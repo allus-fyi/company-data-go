@@ -55,7 +55,7 @@ if err != nil {
 }
 
 err = client.ProcessChanges(func(c companydata.Change) error {
-    // c.Event, c.PersonID, c.Slug, c.Value, c.Live, c.At
+    // c.Event, c.PersonID, c.ShareCode, c.Slug, c.Value, c.Live, c.At
     apply(c)
     return nil // returning nil ACKS; an error RETRIES → then dead-letters
 }, companydata.PumpOptions{})
@@ -225,7 +225,7 @@ other five SDKs.
 type RequestField struct { Slug, Label, Type string; OneTime, Mandatory bool; Raw map[string]any }
 type Connection   struct { ID, PersonID, DisplayName string; ConnectedAt *time.Time; Values map[string]Value; Raw map[string]any }
 type Value        struct { Value any; Live bool; UpdatedAt *time.Time; Raw map[string]any }
-type Change       struct { ID, Event, PersonID, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
+type Change       struct { ID, Event, PersonID, ShareCode, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
 type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Raw map[string]any }
 ```
 
