@@ -324,3 +324,173 @@ func TestHandleBadSignatureFails(t *testing.T) {
 		t.Fatalf("expected ErrWebhook, got %v", err)
 	}
 }
+
+// ── alternative webhook auth methods (bearer / basic / header / none) ────────
+//
+// Mirrors the Python tests at the bottom of test_webhooks.py.
+
+// authCfg builds a minimal Config carrying one alt-auth field. verify never
+// reads the PEM here, so the service key path is a throwaway (mirrors the Python
+// _auth_cfg, which constructs Config directly to bypass _build validation).
+func authCfg(apply func(*Config)) *Config {
+	cfg := &Config{
+		APIURL:            "https://api.allme.fyi",
+		ClientID:          "svc",
+		ClientSecret:      "s",
+		ServicePrivateKey: "unused.pem",
+		KeyPassphrase:     "unused",
+	}
+	apply(cfg)
+	return cfg
+}
+
+// fullRaw builds a rawConfig with a real service PEM plus extra overrides, for
+// the config-validation tests (mirrors the Python _full_data + Config._build).
+func fullRaw(t *testing.T, v *vectorDoc, apply func(*rawConfig)) *rawConfig {
+	t.Helper()
+	dir := t.TempDir()
+	pemPath := filepath.Join(dir, "k.pem")
+	if err := os.WriteFile(pemPath, []byte(v.EncryptedPrivateKeyPEM), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := &rawConfig{
+		APIURL:            "https://api.allme.fyi",
+		ClientID:          "svc",
+		ClientSecret:      "s",
+		ServicePrivateKey: pemPath,
+		KeyPassphrase:     v.Passphrase,
+	}
+	apply(raw)
+	return raw
+}
+
+func TestVerifyBearerTrue(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookBearerToken = "tok123" })
+	if !VerifyWebhook([]byte("{}"), map[string]string{"Authorization": "Bearer tok123"}, cfg) {
+		t.Fatal("expected bearer verify true")
+	}
+}
+
+func TestVerifyBearerFalseWrongToken(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookBearerToken = "tok123" })
+	if VerifyWebhook([]byte("{}"), map[string]string{"Authorization": "Bearer nope"}, cfg) {
+		t.Fatal("expected bearer verify false for wrong token")
+	}
+}
+
+func TestVerifyBearerFalseMissingHeader(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookBearerToken = "tok123" })
+	if VerifyWebhook([]byte("{}"), map[string]string{}, cfg) {
+		t.Fatal("expected bearer verify false with no Authorization header")
+	}
+}
+
+func TestVerifyBasicTrue(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookBasic = &WebhookBasicAuth{Username: "u", Password: "p"} })
+	token := base64.StdEncoding.EncodeToString([]byte("u:p"))
+	if !VerifyWebhook([]byte("{}"), map[string]string{"Authorization": "Basic " + token}, cfg) {
+		t.Fatal("expected basic verify true")
+	}
+}
+
+func TestVerifyBasicFalseWrongPassword(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookBasic = &WebhookBasicAuth{Username: "u", Password: "p"} })
+	bad := base64.StdEncoding.EncodeToString([]byte("u:wrong"))
+	if VerifyWebhook([]byte("{}"), map[string]string{"Authorization": "Basic " + bad}, cfg) {
+		t.Fatal("expected basic verify false for wrong password")
+	}
+}
+
+func TestVerifyHeaderTrueCaseInsensitiveName(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookHeader = &WebhookHeaderAuth{Name: "X-My-Auth", Value: "sekret"} })
+	if !VerifyWebhook([]byte("{}"), map[string]string{"x-my-auth": "sekret"}, cfg) {
+		t.Fatal("expected header verify true (case-insensitive name)")
+	}
+}
+
+func TestVerifyHeaderFalseWrongValue(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookHeader = &WebhookHeaderAuth{Name: "X-My-Auth", Value: "sekret"} })
+	if VerifyWebhook([]byte("{}"), map[string]string{"X-My-Auth": "nope"}, cfg) {
+		t.Fatal("expected header verify false for wrong value")
+	}
+}
+
+func TestVerifyNoneAlwaysTrue(t *testing.T) {
+	cfg := authCfg(func(c *Config) { c.WebhookAuthNone = true })
+	if !VerifyWebhook([]byte("anything at all"), map[string]string{}, cfg) {
+		t.Fatal("expected none verify always true")
+	}
+}
+
+func TestVerifyNoMethodConfiguredFalse(t *testing.T) {
+	cfg := authCfg(func(c *Config) {})
+	if VerifyWebhook([]byte("{}"), map[string]string{"Authorization": "Bearer x"}, cfg) {
+		t.Fatal("expected verify false with no method configured")
+	}
+}
+
+func TestConfigRejectsTwoAuthMethods(t *testing.T) {
+	v := loadVector(t)
+	raw := fullRaw(t, v, func(r *rawConfig) {
+		r.WebhookSecret = "h"
+		r.WebhookBearerToken = "b"
+	})
+	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ErrConfig for two methods, got %v", err)
+	}
+}
+
+func TestConfigRejectsBearerPlusNone(t *testing.T) {
+	v := loadVector(t)
+	raw := fullRaw(t, v, func(r *rawConfig) {
+		r.WebhookBearerToken = "b"
+		r.WebhookAuthNone = true
+	})
+	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ErrConfig for bearer+none, got %v", err)
+	}
+}
+
+func TestConfigBasicRequiresBothFields(t *testing.T) {
+	v := loadVector(t)
+	raw := fullRaw(t, v, func(r *rawConfig) { r.WebhookBasic = json.RawMessage(`{"username":"u"}`) })
+	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ErrConfig for basic missing password, got %v", err)
+	}
+}
+
+func TestConfigHeaderRequiresBothFields(t *testing.T) {
+	v := loadVector(t)
+	raw := fullRaw(t, v, func(r *rawConfig) { r.WebhookHeader = json.RawMessage(`{"name":"X-H"}`) })
+	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ErrConfig for header missing value, got %v", err)
+	}
+}
+
+func TestConfigSingleMethodOKAndMethodName(t *testing.T) {
+	v := loadVector(t)
+
+	cfg, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookBearerToken = "b" }))
+	if err != nil {
+		t.Fatalf("buildConfig bearer: %v", err)
+	}
+	if cfg.WebhookAuthMethod() != "bearer" {
+		t.Fatalf("method = %q, want bearer", cfg.WebhookAuthMethod())
+	}
+
+	cfg2, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookSecret = "h" }))
+	if err != nil {
+		t.Fatalf("buildConfig hmac: %v", err)
+	}
+	if cfg2.WebhookAuthMethod() != "hmac" {
+		t.Fatalf("method = %q, want hmac", cfg2.WebhookAuthMethod())
+	}
+
+	cfg3, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookAuthNone = true }))
+	if err != nil {
+		t.Fatalf("buildConfig none: %v", err)
+	}
+	if cfg3.WebhookAuthMethod() != "none" {
+		t.Fatalf("method = %q, want none", cfg3.WebhookAuthMethod())
+	}
+}

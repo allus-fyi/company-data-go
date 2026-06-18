@@ -50,15 +50,27 @@ const (
 
 // header is a case-insensitive header lookup (frameworks normalize casing
 // inconsistently). headers may be a map[string]string or map[string][]string
-// (the latter is net/http's http.Header).
+// (the latter is net/http's http.Header). Returns "" when absent.
 func header(headers map[string][]string, name string) string {
+	v, _ := lookup(headers, name)
+	return v
+}
+
+// lookup is a case-insensitive header lookup that distinguishes "absent" from
+// "present with an empty value" (mirrors the Python reference's _header, which
+// returns None only when absent). Returns (value, true) on the first matching
+// header name, or ("", false) when the name is absent.
+func lookup(headers map[string][]string, name string) (string, bool) {
 	target := strings.ToLower(name)
 	for k, v := range headers {
-		if strings.ToLower(k) == target && len(v) > 0 {
-			return v[0]
+		if strings.ToLower(k) == target {
+			if len(v) > 0 {
+				return v[0], true
+			}
+			return "", true
 		}
 	}
-	return ""
+	return "", false
 }
 
 // asHeaderMap normalizes various header inputs into map[string][]string.
@@ -77,33 +89,80 @@ func asHeaderMap(headers any) map[string][]string {
 	}
 }
 
-// VerifyWebhook verifies the X-Allus-Signature HMAC over the raw body.
+// VerifyWebhook verifies a webhook against the SINGLE configured auth method.
 //
-// Reads X-Allus-Webhook-Id, looks up that webhook's HMAC secret in config
-// (falling back to the single-webhook shortcut), recomputes
-// HMAC-SHA256(rawBody, secret) as hex, and constant-time-compares it to the
-// X-Allus-Signature header. Returns false on a missing signature,
-// unknown/unconfigured webhook id, or mismatch — never returns an error for a
-// bad signature (that is HandleWebhook's job).
+// Mirrors the platform's per-webhook delivery auth (one method per webhook):
+//
+//   - hmac   — recompute HMAC-SHA256(rawBody, secret) (secret selected by
+//     X-Allus-Webhook-Id) and constant-time-compare to X-Allus-Signature.
+//   - bearer — Authorization equals "Bearer <token>".
+//   - basic  — Authorization equals "Basic <base64(user:pass)>".
+//   - header — the configured custom header equals the configured value.
+//   - none   — always true (explicit opt-out).
+//
+// All comparisons are constant-time. Returns false on a missing/mismatched
+// credential, or when no method is configured — never returns an error for a bad
+// credential (that is HandleWebhook's job). Which method is used is decided
+// entirely by config (Config.WebhookAuthMethod); config loading guarantees at
+// most one is set.
 //
 // headers may be a map[string]string or map[string][]string (e.g. http.Header).
 func VerifyWebhook(rawBody []byte, headers any, config *Config) bool {
 	hmap := asHeaderMap(headers)
-	signature := header(hmap, hdrSignature)
-	if signature == "" {
+
+	switch config.WebhookAuthMethod() {
+	case "":
 		return false
+
+	case "none":
+		return true
+
+	case "bearer":
+		got, ok := lookup(hmap, "authorization")
+		if !ok {
+			return false
+		}
+		return constantTimeEqual(got, "Bearer "+config.WebhookBearerToken)
+
+	case "basic":
+		got, ok := lookup(hmap, "authorization")
+		if !ok {
+			return false
+		}
+		creds := config.WebhookBasic.Username + ":" + config.WebhookBasic.Password
+		token := base64.StdEncoding.EncodeToString([]byte(creds))
+		return constantTimeEqual(got, "Basic "+token)
+
+	case "header":
+		got, ok := lookup(hmap, config.WebhookHeader.Name)
+		if !ok {
+			return false
+		}
+		return constantTimeEqual(got, config.WebhookHeader.Value)
+
+	default: // "hmac"
+		signature := header(hmap, hdrSignature)
+		if signature == "" {
+			return false
+		}
+		webhookID := header(hmap, hdrWebhookID)
+		secret := config.WebhookSecret(webhookID)
+		if secret == "" {
+			return false
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(rawBody)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		// Constant-time compare (case-insensitive hex, like the platform's output).
+		got := strings.ToLower(strings.TrimSpace(signature))
+		return subtle.ConstantTimeCompare([]byte(expected), []byte(got)) == 1
 	}
-	webhookID := header(hmap, hdrWebhookID)
-	secret := config.WebhookSecret(webhookID)
-	if secret == "" {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(rawBody)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	// Constant-time compare (case-insensitive hex, like the platform's output).
-	got := strings.ToLower(strings.TrimSpace(signature))
-	return subtle.ConstantTimeCompare([]byte(expected), []byte(got)) == 1
+}
+
+// constantTimeEqual reports whether a and b are equal in constant time.
+// Different-length inputs return false (subtle.ConstantTimeCompare returns 0).
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // ParseWebhook parses a webhook body → a typed Change.
