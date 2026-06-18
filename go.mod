@@ -1,4 +1,4 @@
-module github.com/allus/company-data-go
+module github.com/allus-fyi/company-data-go
 
 go 1.26
 

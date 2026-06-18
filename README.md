@@ -30,7 +30,7 @@ Deeper reference pages live in [`docs/`](docs/):
 ## TL;DR — fetch new updates
 
 ```bash
-go get github.com/allus/company-data-go@latest
+go get github.com/allus-fyi/company-data-go@latest
 ```
 
 Point a config.json at your service keys:
@@ -75,14 +75,14 @@ documented below.
 Requires **Go ≥ 1.26**.
 
 ```bash
-go get github.com/allus/company-data-go@latest
+go get github.com/allus-fyi/company-data-go@latest
 ```
 
 ```go
-import companydata "github.com/allus/company-data-go/companydata"
+import companydata "github.com/allus-fyi/company-data-go/companydata"
 ```
 
-The module path is `github.com/allus/company-data-go`; everything is exported
+The module path is `github.com/allus-fyi/company-data-go`; everything is exported
 from the single package `companydata`. No manual file includes — `go get` +
 `import` just works.
 
