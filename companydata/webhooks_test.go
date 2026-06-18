@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,13 +155,15 @@ func TestVerifyAcceptsHTTPHeader(t *testing.T) {
 	v := loadVector(t)
 	cfg := whConfig(t, v, nil)
 	body := changeBody(v)
-	// http.Header is map[string][]string with canonical casing.
-	headers := map[string][]string{
-		"X-Allus-Webhook-Id": {whID},
-		"X-Allus-Signature":  {sign(body, whSecret)},
-	}
+	// Pass a REAL http.Header — a NAMED type, which a type switch on map[string][]string
+	// does NOT match. This is the canonical client.HandleWebhook(body, r.Header) usage; a
+	// plain map literal would NOT exercise it (regression: asHeaderMap dropped http.Header,
+	// so r.Header yielded no headers → every delivery failed as a bad signature → 401).
+	headers := http.Header{}
+	headers.Set("X-Allus-Webhook-Id", whID)
+	headers.Set("X-Allus-Signature", sign(body, whSecret))
 	if !VerifyWebhook(body, headers, cfg) {
-		t.Fatal("expected verify true with http.Header-style map")
+		t.Fatal("expected verify true with a real http.Header")
 	}
 }
 
