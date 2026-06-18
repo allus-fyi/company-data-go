@@ -16,7 +16,7 @@ import (
 //	RequestField { Slug, Label, Type, OneTime, Mandatory }    // YOUR request config
 //	Connection   { ID, PersonID, DisplayName, ConnectedAt, Values map[slug]Value }
 //	Value        { Value, Live, UpdatedAt }
-//	Change       { ID, Event, PersonID, Slug, Value, Live, At } // ID = stable dedup key
+//	Change       { ID, Event, PersonID, ShareCode, Slug, Value, Live, At } // ID = stable dedup key
 //	LogEntry     { Type, Message, Metadata, At }
 //
 // Typed values:
@@ -225,15 +225,16 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptVal
 // events carry no slot/value). HasLive distinguishes "live was absent" from
 // "live was false".
 type Change struct {
-	ID       string
-	Event    string
-	PersonID string
-	Slug     string
-	Value    any
-	Live     bool
-	HasLive  bool
-	At       *time.Time
-	Raw      map[string]any
+	ID        string
+	Event     string
+	PersonID  string
+	ShareCode string // the person's profile share code (every event; may be empty)
+	Slug      string
+	Value     any
+	Live      bool
+	HasLive   bool
+	At        *time.Time
+	Raw       map[string]any
 }
 
 func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
@@ -260,15 +261,16 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 	}
 
 	return Change{
-		ID:       asString(obj["id"]),
-		Event:    event,
-		PersonID: firstString(obj["person_user_id"], obj["person_id"]),
-		Slug:     slug,
-		Value:    value,
-		Live:     live,
-		HasLive:  hasLive,
-		At:       parseISO(asString(obj["at"])),
-		Raw:      obj,
+		ID:        asString(obj["id"]),
+		Event:     event,
+		PersonID:  firstString(obj["person_user_id"], obj["person_id"]),
+		ShareCode: asString(obj["share_code"]),
+		Slug:      slug,
+		Value:     value,
+		Live:      live,
+		HasLive:   hasLive,
+		At:        parseISO(asString(obj["at"])),
+		Raw:       obj,
 	}, nil
 }
 

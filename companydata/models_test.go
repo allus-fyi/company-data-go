@@ -231,6 +231,26 @@ func TestChangeConsentEventHasSlugNoValue(t *testing.T) {
 	}
 }
 
+func TestChangeIncludesShareCode(t *testing.T) {
+	// Every change event carries the person's profile share_code (nullable).
+	body := map[string]any{"changes": []any{
+		map[string]any{"id": "chg-1", "event": "connection_created",
+			"person_user_id": "person-1", "share_code": "ABC123", "at": "2026-06-17T12:00:00Z"},
+		map[string]any{"id": "chg-2", "event": "connection_created",
+			"person_user_id": "person-2", "at": "2026-06-17T12:00:00Z"}, // no share_code -> ""
+	}}
+	changes, err := changesFromAPI(body, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil)
+	if err != nil {
+		t.Fatalf("changesFromAPI: %v", err)
+	}
+	if changes[0].ShareCode != "ABC123" {
+		t.Fatalf("change0 ShareCode = %q, want ABC123", changes[0].ShareCode)
+	}
+	if changes[1].ShareCode != "" {
+		t.Fatalf("change1 ShareCode = %q, want empty", changes[1].ShareCode)
+	}
+}
+
 func TestLogEntriesParsed(t *testing.T) {
 	body := map[string]any{"total": 2, "items": []any{
 		map[string]any{"type": "email", "message": "alert", "metadata": map[string]any{"days": 3}, "created_at": "2026-06-17T06:00:00Z"},
