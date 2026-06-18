@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
 	"os"
 	"strings"
 
@@ -74,8 +75,16 @@ func lookup(headers map[string][]string, name string) (string, bool) {
 }
 
 // asHeaderMap normalizes various header inputs into map[string][]string.
+//
+// NOTE: http.Header is a NAMED type (`type Header map[string][]string`), so a
+// type switch on `map[string][]string` does NOT match it — it must be handled
+// explicitly, otherwise the canonical `client.HandleWebhook(body, r.Header)`
+// usage (README + every net/http handler) silently yields no headers and fails
+// as a bad signature.
 func asHeaderMap(headers any) map[string][]string {
 	switch h := headers.(type) {
+	case http.Header:
+		return map[string][]string(h)
 	case map[string][]string:
 		return h
 	case map[string]string:
