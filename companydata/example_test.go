@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	companydata "github.com/allus/company-data-go/companydata"
+	companydata "github.com/allus-fyi/company-data-go/companydata"
 )
 
 // ExampleFromConfig shows the typical bootstrap: build a Client from a JSON
