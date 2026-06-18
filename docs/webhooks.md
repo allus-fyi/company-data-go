@@ -1,0 +1,109 @@
+# Webhooks
+
+The lower-latency push alternative to polling the changes feed. The
+platform delivers each change event to your configured webhook URL; these helpers
+verify and parse it. **All secrets/keys come from config — the helpers take no
+key or secret arguments.**
+
+## Headers the platform sends
+
+- `X-Allus-Webhook-Id` — which webhook this is (selects the HMAC secret from
+  config).
+- `X-Allus-Signature` — `HMAC-SHA256(rawBody, secret)` as lowercase hex.
+- the body — the same slug-keyed `Change` shape as the feed (JSON or XML). If the
+  webhook has `encrypt_payload` on, the body is replaced by a `{"_enc":1,…}`
+  envelope encrypted to your **account** key (and the HMAC is then over that
+  envelope — the final bytes that were sent).
+
+## Methods
+
+```go
+client.VerifyWebhook(rawBody []byte, headers any) bool
+client.ParseWebhook(rawBody []byte, headers any)  (Change, error)
+client.HandleWebhook(rawBody []byte, headers any) (Change, error)  // verify + parse
+```
+
+`headers` may be a `map[string]string` or an `http.Header`
+(`map[string][]string`). Lookups are case-insensitive.
+
+- **Verify** reads `X-Allus-Webhook-Id`, looks up that webhook's HMAC secret in
+  config (falling back to the single-webhook flat secret), recomputes
+  `HMAC-SHA256(rawBody, secret)` and constant-time-compares it to
+  `X-Allus-Signature` (tolerant of upper/lower-case hex). Returns `false` on a
+  missing signature, unknown/unconfigured webhook id, or mismatch — it never
+  returns an error for a bad signature (that's `HandleWebhook`'s job).
+- **Parse** decodes the body (JSON or XML) → a `Change`. If it's an
+  `encrypt_payload` envelope, it's unwrapped with the configured
+  `account_private_key` first, then the inner field value (a service-key wrapper)
+  is decrypted with the service key. A webhook `Change` is byte-identical to a
+  feed `Change`.
+- **Handle** = verify + parse in one call; returns a `*WebhookError`
+  (`errors.Is(err, ErrWebhook)`) on a bad/unknown signature or an unwrappable
+  envelope.
+
+## In an http.HandlerFunc
+
+```go
+func webhook(client *companydata.Client) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        body, err := io.ReadAll(r.Body) // RAW bytes — the HMAC is over them
+        if err != nil {
+            http.Error(w, "read error", http.StatusBadRequest)
+            return
+        }
+        change, err := client.HandleWebhook(body, r.Header)
+        if err != nil {
+            http.Error(w, "invalid webhook", http.StatusBadRequest)
+            return
+        }
+        switch change.Event {
+        case "field_updated":
+            upsert(change.PersonID, change.Slug, change.Value)
+        case "connection_created", "connection_deleted",
+            "field_deleted", "consent_accepted", "consent_declined":
+            // handle per your needs
+        }
+        w.WriteHeader(http.StatusOK)
+    }
+}
+```
+
+> Always read and pass the **raw** request bytes (`io.ReadAll(r.Body)`) — the HMAC
+> is computed over the exact bytes that were sent, never the re-serialized parsed
+> tree.
+
+## Two OAEP hashes (a cross-language gotcha)
+
+The crypto uses **two** distinct OAEP hashes, and the SDK gets both right:
+
+- **Inner per-field values** (and all pull-API values) use **RSA-OAEP-SHA256**
+  (MGF1-SHA256) with the **service** key — matching the platform's Web Crypto
+  encryption.
+- The optional **account-key webhook envelope** uses **RSA-OAEP-SHA1**
+  (MGF1-SHA1) with the **account** key — OpenSSL's default OAEP padding.
+
+You don't configure this — it's automatic. (It's documented here because it's the
+non-obvious detail every language port has to pin explicitly.)
+
+## XXE safety
+
+XML webhook bodies are parsed with Go's `encoding/xml`, which is XXE-safe by
+default: it does not resolve external entities or DTDs, so there is no entity
+resolver to disable. The HMAC is always over the raw bytes, never the parsed
+tree.
+
+## Config
+
+Webhook secrets and the optional account key live in config:
+
+```json
+{
+  "webhooks": { "wh_abc123": "hmac_secret" },
+  "account_private_key": "./account.pem",
+  "account_passphrase": "…"
+}
+```
+
+A single-webhook service can use a flat `"webhook_secret": "…"` instead of the
+map. The account key is only needed for `encrypt_payload` webhooks; it is loaded
+once at client construction (no per-request PBKDF2).

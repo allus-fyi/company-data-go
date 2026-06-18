@@ -1,0 +1,24 @@
+{
+  "_comment": "Shared cross-language decryption test vector (sdk.html \u00a75). Test-only RSA-2048 keypair. PEM is PBES2 PKCS#8 (PBKDF2-HMAC-SHA256 + AES-256-CBC, 100000 iters), produced via the OpenSSL CLI to match allus/src/pkcs8.js exactly. Wrappers match frontend/src/crypto.js (RSA-OAEP-SHA256 + AES-256-GCM, 12B IV, 16B tag appended). Regenerate with sdks/testdata/gen_vector.py.",
+  "encrypted_private_key_pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFNjBgBgkqhkiG9w0BBQ0wUzAyBgkqhkiG9w0BBQwwJQQQZadbCPnm8DZxpSoI\nrQBTiwIDAYagMAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBC06YXrlNRJDlrb\nTszKp5LRBIIE0PkjZJfPLY78LdzuKt6Jj6MShDMxOfpVDZarlNVSEn3PmDIR+kpR\nfFHbavujfqBvY0tDX3cT07QWNws1srkWz4ijf0BWGKYp6ABcNu3TjtbrVY+zq0Dx\nlYS9h79tqhZzNsBuXBUkOqlxrTFRIf3fmvrWbx3c4CWCFST8k4NIy5vXgxTZlSl7\n57Ce77RNAT1hnSQJEIcFH3YkM7ehl8CqwWiKUoZHpPTU7DOUi/yHRSj4gTlm4xHI\nIF2k7hHqWmJYhMUNQhGR9ml5IbPsPGQUCAfsEKZTU/zE/irICqIHer8rBzLFENQi\n1SuX92ZGoULg3kdr1qsTguvHiLrwW1fcCVfKvgtMkJDReitW+avqtYgkuhTqckx2\nxgGbNb0hFCTihtwlVznL6ic7LUEOw4sFyMS1U21BPpszM5F2Ve3p33MXUMbswVg/\n6uSdcbk9UNR5Ygcj0bCpgD/Bn+bcj2qQuJ6z43DxTJoxJbQc0jSjjzZUA2/WBMH6\nCaHApPHx6wxHy8f+bLPWXypbKugObHIYAdRSBjp1miODRT5JwugyavZdkzaPdDMk\n/ywZisVfWa2IOd0f3OWOT9xcWYIJ+aoy/W3F/Rj2BL5dlqMyzKeBUps//C0bPK9e\n8Fv9GysV3AvGpKZAgT+Gn7F6coFx2tdPLzFYg9/Gzv12ocsfmut5XE5FxKeFxMcu\nU+ALAQrcYUj9B5GNcQGDDgMGnGbKYje8xA/+Tou3a27c73fSEHBhNFrVKYQ4BZTW\n2hjCd/vmWGhhE8ml4kVo59qX7c+V/tK8VHA9hZ2olpThDdBPlIwaNsaR0MKFBWW3\nszqW6u8BC5maVESHkLFE/lVA6Z/1CmY1sghOzPT5xpb//msSDLoqrLTXb13/BK38\nxZx9yi9rt3a+lo97U1QiHbe5GqVTC3TGBDAGJWarF29S/qDzeM7yuOkhf/N1QA93\nrICu9bCfc8k3+nQYI1afptHmaniQeKYiuOizezUjO1pJ4vrCJiShKPGjldycvpC8\n0oEFKocOivbQBWKDJVsZ69UTkBis7tFLQBWgKmudb80NQFAa7Uu4SXpHoSiVMeeE\nXac0ZfyOsxflUQgy1ynIyzLLvvDFQUbTT5oVgDf23sssHpc6StlKtZbhCgvTVAMP\nPoLtzgpxWcPYT7LGhoJqeOxS7GqCI64OolKCSkbbeNowR7dlqriEbKEkBcdwWyIL\nsGuvhPShyx9eoS8soSavXYnmsUfaqqGmXwJlj68gT0ZQlayrTF49Mw47wUYRMF5m\nydg9B1bsF/RxW+cGH2vUAAvg3A+c12eWNQpDePkbEYLHCNy9MreF6wTEjoY+lADY\nXiHaNEJsjQSIhMngBtBvKLZsZzNw3pCrOMeGk3WN+DCFZE7ECumBP1I9jvaTZG6w\n9ph7hvUmBo4GW9bnGZT8FU/x2Ufrx5ot/0l5X6KAL5uEEgEJx7amG7ZGFq0ABE8B\nX09pRYdtQDz9APJnCe3LXLbEWTjzvmnQSHBIHoheiRGgjVCtxi69xO3a2yJIHHyU\nPd+UbvMSH6+u9FfzVidHA4Dxz3BxkZ5c55GrpatW2epp5OIQHmQaqlcEjYNeuhvU\nx3rLJuQ/9LmucGx9A6V7GLwH/IMb9NQAW5anVg/em6RrROzB6GrJrwX7\n-----END ENCRYPTED PRIVATE KEY-----\n",
+  "passphrase": "vector-passphrase-2026",
+  "text": {
+    "wrapper": {
+      "_enc": 1,
+      "k": "eYcGf1MffvD9RTvhfRaxEdOfisi8zEQ5oSoYXSRH2+AmhRSvZVTsknxR11kA/MGP0zvC8PtbiiJIe+l08lud2urPd96Baw5Z7CTQlxYxOprt99HoudDR7meDxJNUNwyKJk5mojB8i23FMidgA3cbWp4qev8MLPugZm+7fiZLdozQDCo74rJEz23rrnz2h1Mg+Qd0gkTHh6hoNUlvojz9H6Ps8MQp5G9yPKmhAdUSku+Vk8PQunRYrtglwRw61DRzBMOOpkd7bGXFkSpy+NcYU0FNPakycICjEF0F+qGj7o44YpqI7rFeCcfmu1yH+D8/hVfHbVwvsfqddgEMO4rJww==",
+      "iv": "eCN2DTktfuYI2+HD",
+      "d": "owP7sxtM1ESW3R10O8q5asMGCo/YZIHxoUvMxK716Kw="
+    },
+    "plaintext": "hello-sdk-vector"
+  },
+  "binary": {
+    "wrapper": {
+      "_enc": 1,
+      "k": "WJlcq+iC+GIMMCpzRTJWgoJFhNaBcIHT7vlxeG6XM/I8yLI7tAzDVSqRSWW2m18nFGgpViPgfJZIIz7hXl+O9S4yNmWKGmy1WwJvHq5rou86cQJ8SppKN0AERBd805nXNT332dcI+1VkFUYZNSPp6PfGNN7Wqh/r0ujdeINibalsgT9tVumqGCb26+Xi10ko/9bDSE8HvbiolC/Iloa9YDz6CYgY1KT2OR5dR76cuxIvj+v9/I6X+HHXOi+iIcPeW1bLCDpPpyu3T0Z7meRskb3ulg64pztUpa1ewkN3y7puACiVSkb08C6qz5XZzef7tMa0tEZn6nbeQHNcUfMdUQ==",
+      "iv": "/6rfEJFgUiUdoZ9s",
+      "d": "BxlEyx8j7SsXllYkkFYRjtyAdh35HJNOw/5OSRC7az70E9NAcbBX9F0tmZfarqWnqp70GH73oPTThg=="
+    },
+    "decrypted_json_sha256": "2ed3004eccc67c494e36b13087d0c36e7633f7a8c212c77ddaddbfe2a31e5808",
+    "inner_full_sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+  }
+}
