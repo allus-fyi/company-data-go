@@ -54,6 +54,15 @@ type Config struct {
 	// "webhook_secret" shortcut, captured under the reserved singleWebhookKey.
 	Webhooks map[string]string `json:"webhooks,omitempty"`
 
+	// Optional — alternative webhook auth methods, mirroring the platform's
+	// per-webhook delivery auth. Configure AT MOST ONE family among
+	// hmac (webhooks/webhook_secret) | bearer | basic | header | none;
+	// two or more → ConfigError. See WebhookAuthMethod().
+	WebhookBearerToken string             `json:"webhook_bearer_token,omitempty"` // "Authorization: Bearer <token>"
+	WebhookBasic       *WebhookBasicAuth  `json:"webhook_basic,omitempty"`        // {"username","password"} → Basic auth
+	WebhookHeader      *WebhookHeaderAuth `json:"webhook_header,omitempty"`       // {"name","value"} → custom header
+	WebhookAuthNone    bool               `json:"webhook_auth_none,omitempty"`    // explicit opt-out — verify always true
+
 	// Durable local buffer for the changes pump. Defaults to
 	// "./allus-cache".
 	CacheDir string `json:"cache_dir,omitempty"`
@@ -62,20 +71,41 @@ type Config struct {
 	Format string `json:"format,omitempty"`
 }
 
+// WebhookBasicAuth is the {"username","password"} shape for HTTP Basic webhook
+// delivery auth.
+type WebhookBasicAuth struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// WebhookHeaderAuth is the {"name","value"} shape for a custom-header webhook
+// delivery auth.
+type WebhookHeaderAuth struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // rawConfig is the on-disk JSON shape (it also captures the flat
-// "webhook_secret" shortcut, which Config folds into Webhooks).
+// "webhook_secret" shortcut, which Config folds into Webhooks). The webhook
+// alt-auth objects are captured as raw json.RawMessage so an absent vs.
+// present-but-malformed object can be told apart (the Python reference
+// distinguishes data.get("webhook_basic") is None from a bad shape).
 type rawConfig struct {
-	APIURL            string            `json:"api_url"`
-	ClientID          string            `json:"client_id"`
-	ClientSecret      string            `json:"client_secret"`
-	ServicePrivateKey string            `json:"service_private_key"`
-	KeyPassphrase     string            `json:"key_passphrase"`
-	AccountPrivateKey string            `json:"account_private_key"`
-	AccountPassphrase string            `json:"account_passphrase"`
-	Webhooks          map[string]string `json:"webhooks"`
-	WebhookSecret     string            `json:"webhook_secret"`
-	CacheDir          string            `json:"cache_dir"`
-	Format            string            `json:"format"`
+	APIURL             string            `json:"api_url"`
+	ClientID           string            `json:"client_id"`
+	ClientSecret       string            `json:"client_secret"`
+	ServicePrivateKey  string            `json:"service_private_key"`
+	KeyPassphrase      string            `json:"key_passphrase"`
+	AccountPrivateKey  string            `json:"account_private_key"`
+	AccountPassphrase  string            `json:"account_passphrase"`
+	Webhooks           map[string]string `json:"webhooks"`
+	WebhookSecret      string            `json:"webhook_secret"`
+	WebhookBearerToken string            `json:"webhook_bearer_token"`
+	WebhookBasic       json.RawMessage   `json:"webhook_basic"`
+	WebhookHeader      json.RawMessage   `json:"webhook_header"`
+	WebhookAuthNone    bool              `json:"webhook_auth_none"`
+	CacheDir           string            `json:"cache_dir"`
+	Format             string            `json:"format"`
 }
 
 // ConfigFromFile loads a Config from a JSON file; env vars override file
@@ -129,6 +159,53 @@ func buildConfig(raw *rawConfig) (*Config, error) {
 		cfg.Webhooks = webhooks
 	}
 
+	// Alternative webhook auth methods (file-config only — NO env overrides).
+	// Validate object shapes, mirroring the Python reference.
+	if raw.WebhookBearerToken != "" {
+		cfg.WebhookBearerToken = raw.WebhookBearerToken
+	}
+
+	if !isJSONNull(raw.WebhookBasic) {
+		var basic WebhookBasicAuth
+		if err := json.Unmarshal(raw.WebhookBasic, &basic); err != nil || basic.Username == "" || basic.Password == "" {
+			return nil, newConfigError(`"webhook_basic" must be an object with non-empty "username" and "password"`)
+		}
+		cfg.WebhookBasic = &basic
+	}
+
+	if !isJSONNull(raw.WebhookHeader) {
+		var hdr WebhookHeaderAuth
+		if err := json.Unmarshal(raw.WebhookHeader, &hdr); err != nil || hdr.Name == "" || hdr.Value == "" {
+			return nil, newConfigError(`"webhook_header" must be an object with non-empty "name" and "value"`)
+		}
+		cfg.WebhookHeader = &hdr
+	}
+
+	if raw.WebhookAuthNone {
+		cfg.WebhookAuthNone = true
+	}
+
+	// At most one webhook auth method (family) may be configured.
+	var present []string
+	if len(cfg.Webhooks) > 0 {
+		present = append(present, "hmac")
+	}
+	if cfg.WebhookBearerToken != "" {
+		present = append(present, "bearer")
+	}
+	if cfg.WebhookBasic != nil {
+		present = append(present, "basic")
+	}
+	if cfg.WebhookHeader != nil {
+		present = append(present, "header")
+	}
+	if cfg.WebhookAuthNone {
+		present = append(present, "none")
+	}
+	if len(present) > 1 {
+		return nil, newConfigError("configure at most one webhook auth method (found: %s)", strings.Join(present, ", "))
+	}
+
 	// Defaults.
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = "./allus-cache"
@@ -176,6 +253,36 @@ func (c *Config) WebhookSecret(webhookID string) string {
 		}
 	}
 	return c.Webhooks[singleWebhookKey]
+}
+
+// WebhookAuthMethod returns the single configured webhook auth method, or "" if
+// none is set. One of "hmac" | "bearer" | "basic" | "header" | "none". Config
+// loading guarantees at most one is configured, so the order here is only a
+// tie-break that never triggers.
+func (c *Config) WebhookAuthMethod() string {
+	if c.WebhookAuthNone {
+		return "none"
+	}
+	if c.WebhookBearerToken != "" {
+		return "bearer"
+	}
+	if c.WebhookBasic != nil {
+		return "basic"
+	}
+	if c.WebhookHeader != nil {
+		return "header"
+	}
+	if len(c.Webhooks) > 0 {
+		return "hmac"
+	}
+	return ""
+}
+
+// isJSONNull reports whether a json.RawMessage is absent or the JSON literal
+// null — both treated as "not configured" (matching the Python reference, where
+// data.get("webhook_basic") is None covers an absent key and an explicit null).
+func isJSONNull(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
 }
 
 // firstNonEmpty returns the first non-empty string of its arguments, or "".
