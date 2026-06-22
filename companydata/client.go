@@ -3,11 +3,14 @@ package companydata
 import (
 	"context"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -56,6 +59,8 @@ const (
 	epChanges       = baseEndpoint + "/changes"
 	epRequestFields = baseEndpoint + "/request-fields"
 	epLogs          = baseEndpoint + "/logs"
+	epDocuments     = baseEndpoint + "/documents"
+	epKeys          = "/api/keys"
 
 	// defaultConnPage is the connections iterator page size. The endpoint is
 	// heavily rate-limited, so pages are reasonably large to
@@ -82,6 +87,12 @@ type Client struct {
 	typeBySlug    map[string]string
 	fieldsLoaded  bool
 
+	// Recipient RSA public keys (by share_code), cached for per-person document
+	// encryption. A public key is immutable + not a secret (fetched live, never
+	// configured).
+	pubkeyMu    sync.Mutex
+	pubkeyCache map[string]*rsa.PublicKey
+
 	pump *Pump
 }
 
@@ -104,10 +115,11 @@ func withClientSleep(s func(time.Duration)) clientOption {
 // a *ConfigError (fail fast).
 func New(config *Config, opts ...clientOption) (*Client, error) {
 	c := &Client{
-		config:     config,
-		logger:     log.Default(),
-		sleep:      time.Sleep,
-		typeBySlug: map[string]string{},
+		config:      config,
+		logger:      log.Default(),
+		sleep:       time.Sleep,
+		typeBySlug:  map[string]string{},
+		pubkeyCache: map[string]*rsa.PublicKey{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -497,6 +509,335 @@ func (c *Client) HandleWebhook(rawBody []byte, headers any) (Change, error) {
 	return HandleWebhook(rawBody, headers, c.config, c.typeForSlug, c.decryptValue, c.binaryFetch, c.accountKey)
 }
 
+// ── company documents (write) ───────────────────────────────────────────────
+
+// CreateDocumentOptions configures CreateDocument. Go has no keyword arguments,
+// so the create call takes this struct.
+//
+// Required: Name, PayloadKind ("json" or "file"), and exactly one of JSONValue
+// (for "json") / FileBytes (+ optional FileMime, for "file").
+//
+// Target selection decides encryption (NOT IsPrivate):
+//   - PER-PERSON: set ConnectionID or PersonUserID → the value is ALWAYS
+//     encrypted FOR THE RECIPIENT (ShareCode resolved from ConnectionID/
+//     PersonUserID when not given) before it leaves the process — for EVERY
+//     per-person doc, private or not. NO key argument.
+//   - BROADCAST: leave all targets empty → the value is sent PLAINTEXT (you
+//     cannot single-key-encrypt to all of a service's connections). A broadcast
+//     MUST be non-private; IsPrivate=true therefore requires a per-person target.
+//
+// IsPrivate is a DISPLAY-ONLY flag passed through to the API — it governs the
+// recipient device's lock vs decrypt-on-load behaviour, NOT whether the value is
+// encrypted.
+type CreateDocumentOptions struct {
+	Kind        string // defaults to "document" when empty
+	Name        string
+	PayloadKind string // "json" | "file"
+	IsPrivate   bool
+	Description  string
+
+	// Per-person target (any one of these makes it per-person; ShareCode skips
+	// the resolve step).
+	ConnectionID string
+	PersonUserID string
+	ShareCode    string
+
+	// Payload (one of these per PayloadKind).
+	JSONValue any
+	FileBytes []byte
+	FileMime  string
+
+	Metadata map[string]any
+	Status   string
+}
+
+// CreateDocument creates a company document for a connection / person
+// (PER-PERSON), or BROADCAST (no target). See CreateDocumentOptions for the
+// encryption contract (keyed on the target, not on IsPrivate).
+func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions) (Document, error) {
+	if opts.PayloadKind != "json" && opts.PayloadKind != "file" {
+		return Document{}, newConfigError("payload_kind must be 'json' or 'file'")
+	}
+	kind := opts.Kind
+	if kind == "" {
+		kind = "document"
+	}
+
+	var target map[string]any
+	switch {
+	case opts.ConnectionID != "":
+		target = map[string]any{"connection_id": opts.ConnectionID}
+	case opts.PersonUserID != "":
+		target = map[string]any{"person_user_id": opts.PersonUserID}
+	}
+	perPerson := target != nil
+
+	if opts.IsPrivate && !perPerson {
+		// A plaintext broadcast cannot be locked — IsPrivate needs a per-person target.
+		return Document{}, newConfigError("is_private=true requires a per-person target (broadcast is plaintext)")
+	}
+
+	var pubkey *rsa.PublicKey
+	if perPerson {
+		// EVERY per-person doc is encrypted, private or not — fetch the recipient key.
+		sc := opts.ShareCode
+		if sc == "" {
+			resolved, err := c.resolveShareCode(ctx, opts.ConnectionID, opts.PersonUserID)
+			if err != nil {
+				return Document{}, err
+			}
+			sc = resolved
+		}
+		key, err := c.recipientPublicKey(ctx, sc)
+		if err != nil {
+			return Document{}, err
+		}
+		pubkey = key
+	}
+
+	body := map[string]any{
+		"kind":         kind,
+		"name":         opts.Name,
+		"payload_kind": opts.PayloadKind,
+		"is_private":   opts.IsPrivate,
+		"target":       target, // nil → JSON null (broadcast)
+	}
+	if opts.Description != "" {
+		body["description"] = opts.Description
+	}
+	if opts.Metadata != nil {
+		body["metadata"] = opts.Metadata
+	}
+	if opts.Status != "" {
+		body["status"] = opts.Status
+	}
+
+	if opts.PayloadKind == "json" {
+		if opts.JSONValue == nil {
+			return Document{}, newConfigError("json_value is required for payload_kind='json'")
+		}
+		if perPerson {
+			plaintext, err := json.Marshal(opts.JSONValue)
+			if err != nil {
+				return Document{}, newConfigError("could not marshal json_value: %v", err)
+			}
+			wrapper, err := EncryptForPublicKey(string(plaintext), pubkey)
+			if err != nil {
+				return Document{}, err
+			}
+			body["value"] = wrapper
+		} else {
+			body["value"] = opts.JSONValue
+		}
+		created, err := c.http.Post(ctx, epDocuments, body)
+		if err != nil {
+			return Document{}, err
+		}
+		return documentFromAPI(docObj(created), c.decryptValue), nil
+	}
+
+	// file: create the metadata row first, then upload bytes to /{id}/file.
+	if opts.FileBytes == nil {
+		return Document{}, newConfigError("file_bytes is required for payload_kind='file'")
+	}
+	created, err := c.http.Post(ctx, epDocuments, body)
+	if err != nil {
+		return Document{}, err
+	}
+	doc := documentFromAPI(docObj(created), c.decryptValue)
+	filePath := epDocuments + "/" + doc.ID + "/file"
+	if perPerson {
+		// Encrypt the file bytes (EVERY per-person doc): wrap the file envelope
+		// string, then send the wrapper JSON as bytes.
+		envelope, err := json.Marshal(map[string]any{"file": dataURI(opts.FileBytes, opts.FileMime)})
+		if err != nil {
+			return Document{}, newConfigError("could not build file envelope: %v", err)
+		}
+		wrapper, err := EncryptForPublicKey(string(envelope), pubkey)
+		if err != nil {
+			return Document{}, err
+		}
+		wrapperBytes, err := json.Marshal(wrapper)
+		if err != nil {
+			return Document{}, newConfigError("could not marshal file wrapper: %v", err)
+		}
+		if _, err := c.http.PostRaw(ctx, filePath, wrapperBytes, "application/json"); err != nil {
+			return Document{}, err
+		}
+	} else {
+		// Broadcast — raw plaintext bytes.
+		mime := opts.FileMime
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		if _, err := c.http.PostRaw(ctx, filePath, opts.FileBytes, mime); err != nil {
+			return Document{}, err
+		}
+	}
+	return doc, nil
+}
+
+// ListDocumentsOptions filters ListDocuments (all fields optional).
+type ListDocumentsOptions struct {
+	PersonUserID string
+	Status       string
+	Limit        int // defaults to 100 when <1
+	Offset       int
+}
+
+// ListDocuments lists this service's documents → []Document (paged; optional
+// person/status filter).
+func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOptions) ([]Document, error) {
+	limit := opts.Limit
+	if limit < 1 {
+		limit = defaultConnPage
+	}
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	params := url.Values{}
+	params.Set("limit", strconv.Itoa(limit))
+	params.Set("offset", strconv.Itoa(offset))
+	if opts.PersonUserID != "" {
+		params.Set("person_user_id", opts.PersonUserID)
+	}
+	if opts.Status != "" {
+		params.Set("status", opts.Status)
+	}
+	body, err := c.http.Get(ctx, epDocuments, params)
+	if err != nil {
+		return nil, err
+	}
+	return documentsFromAPI(body, c.decryptValue), nil
+}
+
+// Document fetches one document by id → Document.
+func (c *Client) Document(ctx context.Context, documentID string) (Document, error) {
+	body, err := c.http.Get(ctx, epDocuments+"/"+documentID, nil)
+	if err != nil {
+		return Document{}, err
+	}
+	return documentFromAPI(docObj(body), c.decryptValue), nil
+}
+
+// UpdateDocumentStatus sets a document's lifecycle status
+// (offering|ready_to_sign|active|active_but_ending|ended) → the updated Document.
+func (c *Client) UpdateDocumentStatus(ctx context.Context, documentID, status string) (Document, error) {
+	body, err := c.http.Put(ctx, epDocuments+"/"+documentID, map[string]any{"status": status})
+	if err != nil {
+		return Document{}, err
+	}
+	return documentFromAPI(docObj(body), c.decryptValue), nil
+}
+
+// UpdateDocumentMetadataOptions configures UpdateDocumentMetadata. Set any of
+// Metadata / Name / Description (at least one is required).
+type UpdateDocumentMetadataOptions struct {
+	Metadata    map[string]any
+	Name        string
+	Description string
+}
+
+// UpdateDocumentMetadata updates a document's metadata / name / description → the
+// updated Document.
+func (c *Client) UpdateDocumentMetadata(ctx context.Context, documentID string, opts UpdateDocumentMetadataOptions) (Document, error) {
+	payload := map[string]any{}
+	if opts.Metadata != nil {
+		payload["metadata"] = opts.Metadata
+	}
+	if opts.Name != "" {
+		payload["name"] = opts.Name
+	}
+	if opts.Description != "" {
+		payload["description"] = opts.Description
+	}
+	if len(payload) == 0 {
+		return Document{}, newConfigError("UpdateDocumentMetadata needs metadata, name, or description")
+	}
+	body, err := c.http.Put(ctx, epDocuments+"/"+documentID, payload)
+	if err != nil {
+		return Document{}, err
+	}
+	return documentFromAPI(docObj(body), c.decryptValue), nil
+}
+
+// DeleteDocument deletes a document (and its on-disk file).
+func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
+	_, err := c.http.Delete(ctx, epDocuments+"/"+documentID)
+	return err
+}
+
+// recipientPublicKey fetches + caches the recipient RSA public key by share_code
+// (GET /api/keys/{shareCode}).
+func (c *Client) recipientPublicKey(ctx context.Context, shareCode string) (*rsa.PublicKey, error) {
+	c.pubkeyMu.Lock()
+	if cached, ok := c.pubkeyCache[shareCode]; ok {
+		c.pubkeyMu.Unlock()
+		return cached, nil
+	}
+	c.pubkeyMu.Unlock()
+
+	body, err := c.http.Get(ctx, epKeys+"/"+shareCode, nil)
+	if err != nil {
+		return nil, err
+	}
+	var spki string
+	if m, ok := body.(map[string]any); ok {
+		spki = asString(m["public_key"])
+	}
+	if spki == "" {
+		return nil, NewApiError(0, "keys.not_found", "no public_key for share_code "+shareCode)
+	}
+	key, err := LoadPublicKey(spki)
+	if err != nil {
+		return nil, err
+	}
+	c.pubkeyMu.Lock()
+	c.pubkeyCache[shareCode] = key
+	c.pubkeyMu.Unlock()
+	return key, nil
+}
+
+// resolveShareCode resolves a target's share_code (the recipient public-key
+// handle). It prefers a single-connection fetch (which carries share_code); it
+// falls back to a connections scan by user_id. Pass ShareCode in
+// CreateDocumentOptions to skip this entirely.
+func (c *Client) resolveShareCode(ctx context.Context, connectionID, personUserID string) (string, error) {
+	if connectionID != "" {
+		body, err := c.http.Get(ctx, epConnections+"/"+connectionID, nil)
+		if err != nil {
+			return "", err
+		}
+		if m, ok := body.(map[string]any); ok {
+			if sc := asString(m["share_code"]); sc != "" {
+				return sc, nil
+			}
+		}
+	}
+	if personUserID != "" {
+		conns, errc := c.Connections(ctx, defaultConnPage, 0)
+		for conn := range conns {
+			raw := conn.Raw
+			if asString(raw["user_id"]) == personUserID || conn.PersonID == personUserID {
+				if sc := asString(raw["share_code"]); sc != "" {
+					// Drain the rest so the iterator goroutine isn't left blocked.
+					go func() {
+						for range conns {
+						}
+						<-errc
+					}()
+					return sc, nil
+				}
+			}
+		}
+		if err := <-errc; err != nil {
+			return "", err
+		}
+	}
+	return "", newConfigError("could not resolve a share_code for the target — pass ShareCode explicitly")
+}
+
 func (c *Client) logf(format string, a ...any) {
 	if c.logger != nil {
 		c.logger.Printf(format, a...)
@@ -517,6 +858,26 @@ func loadServiceKey(config *Config) (*rsa.PrivateKey, error) {
 		return nil, wrapConfigError(err, "could not load service private key: %v", err)
 	}
 	return key, nil
+}
+
+// docObj pulls the document object out of a create/get/update response. The API
+// returns the bare document object; a {"document": {...}} wrapper is tolerated too.
+func docObj(body any) map[string]any {
+	if m, ok := body.(map[string]any); ok {
+		if inner, ok := m["document"].(map[string]any); ok {
+			return inner
+		}
+		return m
+	}
+	return map[string]any{}
+}
+
+// dataURI builds a data:<mime>;base64,<…> URI for the per-person file envelope.
+func dataURI(fileBytes []byte, mime string) string {
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(fileBytes)
 }
 
 // listItems pulls the items array out of a {total, items} list response.

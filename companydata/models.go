@@ -225,16 +225,18 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptVal
 // events carry no slot/value). HasLive distinguishes "live was absent" from
 // "live was false".
 type Change struct {
-	ID        string
-	Event     string
-	PersonID  string
-	ShareCode string // the person's profile share code (every event; may be empty)
-	Slug      string
-	Value     any
-	Live      bool
-	HasLive   bool
-	At        *time.Time
-	Raw       map[string]any
+	ID         string
+	Event      string
+	PersonID   string
+	ShareCode  string // the person's profile share code (every event; may be empty)
+	Slug       string
+	Value      any
+	Live       bool
+	HasLive    bool
+	DocumentID string // set on document_status_changed
+	Status     string // set on document_status_changed
+	At         *time.Time
+	Raw        map[string]any
 }
 
 func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
@@ -260,17 +262,25 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		}
 	}
 
+	var documentID, status string
+	if event == "document_status_changed" {
+		documentID = asString(obj["document_id"])
+		status = asString(obj["status"])
+	}
+
 	return Change{
-		ID:        asString(obj["id"]),
-		Event:     event,
-		PersonID:  firstString(obj["person_user_id"], obj["person_id"]),
-		ShareCode: asString(obj["share_code"]),
-		Slug:      slug,
-		Value:     value,
-		Live:      live,
-		HasLive:   hasLive,
-		At:        parseISO(asString(obj["at"])),
-		Raw:       obj,
+		ID:         asString(obj["id"]),
+		Event:      event,
+		PersonID:   firstString(obj["person_user_id"], obj["person_id"]),
+		ShareCode:  asString(obj["share_code"]),
+		Slug:       slug,
+		Value:      value,
+		Live:       live,
+		HasLive:    hasLive,
+		DocumentID: documentID,
+		Status:     status,
+		At:         parseISO(asString(obj["at"])),
+		Raw:        obj,
 	}, nil
 }
 
@@ -323,6 +333,119 @@ func logEntriesFromAPI(body any) []LogEntry {
 		}
 	}
 	return out
+}
+
+// ── document ─────────────────────────────────────────────────────────────────
+
+// Document is a company document the SDK created/queried (company-data side).
+//
+// Value semantics mirror the connection-payload contract — keyed on
+// BROADCAST(plaintext) vs PER-PERSON(always encrypted), NOT on IsPrivate:
+//
+//	broadcast file   -> {file, original_name, mime_type, size}  (plaintext)
+//	per-person file  -> {"_enc_file": "enc_…json"}              (ciphertext blob, ANY IsPrivate)
+//	broadcast json   -> the JSON object                          (plaintext)
+//	per-person json  -> {"_enc":1,k,iv,d}                        (ciphertext wrapper, ANY IsPrivate;
+//	                                                              decrypt on demand via JSON())
+//
+// IsPrivate is device-display-only (lock vs decrypt-on-load), not the value shape.
+type Document struct {
+	ID          string
+	Kind        string
+	Name        string
+	Description string
+	Status      string
+	PayloadKind string // 'file' | 'json'
+	IsPrivate   bool
+	Value       any
+	Metadata    map[string]any
+	CreatedAt   *time.Time
+	UpdatedAt   *time.Time
+
+	decryptValue decryptValueFn // injected; nil for a plaintext-only document
+	Raw          map[string]any
+}
+
+// JSON returns the plaintext object for a json document.
+//
+// Decryption is keyed on the value shape (per-person → encrypted wrapper), NOT on
+// IsPrivate: a per-person json doc (ANY IsPrivate) is an {"_enc":1,…} wrapper and
+// is decrypted with the SDK's own private key; a broadcast json doc is already
+// plaintext and returned as-is. Returns a *DecryptError if called on a non-json
+// document or with no decrypt wiring for an encrypted value.
+func (d *Document) JSON() (any, error) {
+	if d.PayloadKind != "json" {
+		return nil, &DecryptError{msg: "JSON() is only valid for payload_kind='json' documents"}
+	}
+	if m, ok := d.Value.(map[string]any); ok && isEncWrapper(m) {
+		if d.decryptValue == nil {
+			return nil, &DecryptError{msg: "no decrypt wiring for an encrypted (per-person) document"}
+		}
+		plaintext, err := d.decryptValue(m)
+		if err != nil {
+			return nil, err
+		}
+		var parsed any
+		dec := json.NewDecoder(strings.NewReader(plaintext))
+		dec.UseNumber()
+		if err := dec.Decode(&parsed); err != nil {
+			return nil, &DecryptError{msg: "decrypted document value is not valid JSON"}
+		}
+		return parsed, nil
+	}
+	return d.Value, nil
+}
+
+func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
+	var metadata map[string]any
+	if m, ok := obj["metadata"].(map[string]any); ok {
+		metadata = m
+	}
+	return Document{
+		ID:           asString(obj["id"]),
+		Kind:         asString(obj["kind"]),
+		Name:         asString(obj["name"]),
+		Description:  asString(obj["description"]),
+		Status:       asString(obj["status"]),
+		PayloadKind:  asString(obj["payload_kind"]),
+		IsPrivate:    coerceBool(obj["is_private"]),
+		Value:        obj["value"],
+		Metadata:     metadata,
+		CreatedAt:    parseISO(asString(obj["created_at"])),
+		UpdatedAt:    parseISO(asString(obj["updated_at"])),
+		decryptValue: decryptValue,
+		Raw:          obj,
+	}
+}
+
+// documentsFromAPI parses the {total, items} documents list → []Document.
+func documentsFromAPI(body any, decryptValue decryptValueFn) []Document {
+	items := extractList(body, "items")
+	out := make([]Document, 0, len(items))
+	for _, o := range items {
+		if m, ok := o.(map[string]any); ok {
+			out = append(out, documentFromAPI(m, decryptValue))
+		}
+	}
+	return out
+}
+
+// isEncWrapper reports whether a decoded map is a {"_enc":1,…} ciphertext wrapper.
+func isEncWrapper(m map[string]any) bool {
+	v, ok := m["_enc"]
+	if !ok {
+		return false
+	}
+	switch n := v.(type) {
+	case json.Number:
+		return n.String() == "1"
+	case float64:
+		return n == 1
+	case int:
+		return n == 1
+	default:
+		return false
+	}
 }
 
 // ── shared coercion helpers ───────────────────────────────────────────────
