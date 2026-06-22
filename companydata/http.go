@@ -1,6 +1,7 @@
 package companydata
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -175,6 +176,62 @@ func (c *HTTPClient) bearer(ctx context.Context, forceRefresh bool) (string, err
 // matching Config.Format, parses JSON or XML, and maps non-2xx responses to the
 // SDK error types. params may be nil.
 func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (any, error) {
+	return c.request(ctx, http.MethodGet, path, params, nil)
+}
+
+// Post POSTs path with a JSON body (jsonBody) → parsed body. A nil jsonBody
+// sends no body. See PostRaw for sending raw bytes (e.g. encrypted file blobs).
+func (c *HTTPClient) Post(ctx context.Context, path string, jsonBody any) (any, error) {
+	return c.request(ctx, http.MethodPost, path, nil, jsonBody)
+}
+
+// PostRaw POSTs path with a raw byte body + a Content-Type → parsed body. Used
+// for the document file upload (raw plaintext bytes for a broadcast, the
+// ciphertext wrapper bytes for a per-person doc).
+func (c *HTTPClient) PostRaw(ctx context.Context, path string, rawBody []byte, contentType string) (any, error) {
+	return c.requestRaw(ctx, http.MethodPost, path, rawBody, contentType)
+}
+
+// Put PUTs path with a JSON body → parsed body.
+func (c *HTTPClient) Put(ctx context.Context, path string, jsonBody any) (any, error) {
+	return c.request(ctx, http.MethodPut, path, nil, jsonBody)
+}
+
+// Delete DELETEs path → parsed body.
+func (c *HTTPClient) Delete(ctx context.Context, path string) (any, error) {
+	return c.request(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// request is the shared request loop for every JSON verb. It adds the bearer
+// token + an Accept header matching Config.Format, carries an optional JSON
+// body, parses JSON or XML, and maps non-2xx responses to the SDK errors: 401 →
+// one refresh-and-retry then *AuthError; 429 → bounded Retry-After backoff then
+// *RateLimitError; other non-2xx → *ApiError (carrying the body's error_key).
+// params is used for GET; jsonBody is marshaled and sent for write verbs.
+func (c *HTTPClient) request(ctx context.Context, method, path string, params url.Values, jsonBody any) (any, error) {
+	var encoded []byte
+	if jsonBody != nil {
+		var err error
+		encoded, err = json.Marshal(jsonBody)
+		if err != nil {
+			return nil, NewApiError(0, "", "request to "+path+" failed: could not marshal body: "+err.Error())
+		}
+	}
+	return c.doRequest(ctx, method, path, params, encoded, "application/json", jsonBody != nil)
+}
+
+// requestRaw is the shared request loop for a raw-bytes body (the document file
+// upload). It carries rawBody verbatim with the given Content-Type.
+func (c *HTTPClient) requestRaw(ctx context.Context, method, path string, rawBody []byte, contentType string) (any, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return c.doRequest(ctx, method, path, nil, rawBody, contentType, true)
+}
+
+// doRequest performs the actual auth + retry loop, sending body (with
+// Content-Type contentType when hasBody) and applying params to the URL.
+func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) (any, error) {
 	wantsXML := c.config.Format == "xml"
 	accept := "application/json"
 	if wantsXML {
@@ -192,24 +249,31 @@ func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (a
 		if len(params) > 0 {
 			reqURL += "?" + params.Encode()
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		var bodyReader io.Reader
+		if hasBody {
+			bodyReader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 		if err != nil {
 			return nil, NewApiError(0, "", "request to "+path+" failed: "+err.Error())
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", accept)
+		if hasBody {
+			req.Header.Set("Content-Type", contentType)
+		}
 
 		resp, err := c.doer.Do(req)
 		if err != nil {
 			return nil, NewApiError(0, "", "request to "+path+" failed: "+err.Error())
 		}
-		body, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		status := resp.StatusCode
 
 		switch {
 		case status >= 200 && status < 300:
-			return parseBody(body, wantsXML)
+			return parseBody(respBody, wantsXML)
 
 		case status == 401:
 			// One refresh-and-retry, then give up as AuthError.
@@ -220,7 +284,7 @@ func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (a
 				}
 				continue
 			}
-			errorKey, message := extractError(body, c.config.Format)
+			errorKey, message := extractError(respBody, c.config.Format)
 			return nil, newAuthError("unauthorized after token refresh%s%s", bracket(errorKey), colon(message))
 
 		case status == 429:
@@ -230,11 +294,11 @@ func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (a
 				c.sleep(backoffDelay(retryAfter, retries429))
 				continue
 			}
-			errorKey, message := extractError(body, c.config.Format)
+			errorKey, message := extractError(respBody, c.config.Format)
 			return nil, NewRateLimitError(retryAfter, errorKey, message)
 
 		default:
-			errorKey, message := extractError(body, c.config.Format)
+			errorKey, message := extractError(respBody, c.config.Format)
 			return nil, NewApiError(status, errorKey, message)
 		}
 	}

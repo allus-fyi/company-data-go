@@ -3,6 +3,8 @@ package companydata
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -404,6 +406,358 @@ func TestFromConfigLoadsKey(t *testing.T) {
 	pt, err := c.decryptValue(v.Text.Wrapper)
 	if err != nil || pt != v.Text.Plaintext {
 		t.Fatalf("decryptValue = %q, %v", pt, err)
+	}
+}
+
+// ── company documents (write) ──────────────────────────────────────────────────
+
+// writeReq captures a recorded write-verb request for assertions.
+type writeReq struct {
+	method      string
+	path        string
+	jsonBody    map[string]any // decoded JSON body (nil for raw)
+	rawBody     []byte         // raw body bytes when Content-Type wasn't application/json
+	contentType string
+}
+
+// rwDoer routes GET to a get-router, the OAuth token POST to a canned token, and
+// every other write verb (POST/PUT/DELETE to non-token paths) to a write-router.
+type rwDoer struct {
+	getRoute   func(path string, params map[string][]string) (int, string)
+	writeRoute func(w writeReq) (int, string)
+	gets       []string
+	writes     []writeReq
+}
+
+func (d *rwDoer) Do(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet {
+		d.gets = append(d.gets, req.URL.Path)
+		status, body := d.getRoute(req.URL.Path, req.URL.Query())
+		return jsonResp(status, body), nil
+	}
+	if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/oauth2/token") {
+		return jsonResp(200, `{"access_token":"tok-1","token_type":"Bearer","expires_in":3600}`), nil
+	}
+	wr := writeReq{method: req.Method, path: req.URL.Path, contentType: req.Header.Get("Content-Type")}
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		wr.rawBody = raw
+		if wr.contentType == "application/json" {
+			_ = json.Unmarshal(raw, &wr.jsonBody)
+		}
+	}
+	d.writes = append(d.writes, wr)
+	status, body := d.writeRoute(wr)
+	return jsonResp(status, body), nil
+}
+
+func newTestClientRW(t *testing.T, cfg *Config,
+	getRoute func(string, map[string][]string) (int, string),
+	writeRoute func(writeReq) (int, string)) (*Client, *rwDoer) {
+	t.Helper()
+	d := &rwDoer{getRoute: getRoute, writeRoute: writeRoute}
+	httpc := NewHTTPClient(cfg, WithDoer(d))
+	c, err := New(cfg, WithHTTPClient(httpc), WithLogger(log.New(io.Discard, "", 0)), withClientSleep(func(_ time.Duration) {}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c, d
+}
+
+func noGET(t *testing.T) func(string, map[string][]string) (int, string) {
+	return func(path string, _ map[string][]string) (int, string) {
+		t.Fatalf("unexpected GET %s", path)
+		return 0, ""
+	}
+}
+
+// vectorPubSPKIB64 is the vector key's PUBLIC half as base64 SPKI/DER (what
+// GET /api/keys returns).
+func vectorPubSPKIB64(t *testing.T, v *vectorDoc) string {
+	t.Helper()
+	priv, err := LoadPrivateKey([]byte(v.EncryptedPrivateKeyPEM), v.Passphrase)
+	if err != nil {
+		t.Fatalf("LoadPrivateKey: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(der)
+}
+
+func TestCreateDocumentBroadcastJSONIsPlaintext(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+
+	var posted map[string]any
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
+		if w.method != "POST" || !strings.HasSuffix(w.path, "/documents") {
+			t.Fatalf("unexpected write %s %s", w.method, w.path)
+		}
+		posted = w.jsonBody
+		valJSON, _ := json.Marshal(w.jsonBody["value"])
+		return 201, `{"id":"d1","kind":"document","name":"Terms","description":null,` +
+			`"status":"active","payload_kind":"json","is_private":false,"value":` + string(valJSON) +
+			`,"metadata":null,"created_at":null,"updated_at":null}`
+	})
+
+	doc, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "Terms", PayloadKind: "json",
+		JSONValue: map[string]any{"url": "x", "v": "1"}, Status: "active",
+	})
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	if posted["target"] != nil {
+		t.Fatalf("broadcast target should be nil, got %#v", posted["target"])
+	}
+	val, ok := posted["value"].(map[string]any)
+	if !ok || val["url"] != "x" || val["v"] != "1" {
+		t.Fatalf("broadcast value should be plaintext object, got %#v", posted["value"])
+	}
+	if _, enc := val["_enc"]; enc {
+		t.Fatalf("broadcast value must not be encrypted: %#v", val)
+	}
+	if posted["is_private"] != false {
+		t.Fatalf("is_private = %#v", posted["is_private"])
+	}
+	if doc.ID != "d1" || doc.Status != "active" {
+		t.Fatalf("doc = %+v", doc)
+	}
+}
+
+func TestCreateDocumentPerPersonEncryptsForBothPrivacy(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	spki := vectorPubSPKIB64(t, v)
+	priv, _ := LoadPrivateKey([]byte(v.EncryptedPrivateKeyPEM), v.Passphrase)
+
+	for _, isPrivate := range []bool{false, true} {
+		keysFetched := 0
+		getRoute := func(path string, _ map[string][]string) (int, string) {
+			if !strings.HasSuffix(path, "/api/keys/ABC123") {
+				t.Fatalf("unexpected GET %s", path)
+			}
+			keysFetched++
+			return 200, `{"public_key":"` + spki + `"}`
+		}
+		var captured map[string]any
+		writeRoute := func(w writeReq) (int, string) {
+			captured = w.jsonBody
+			valJSON, _ := json.Marshal(w.jsonBody["value"])
+			ip := "false"
+			if isPrivate {
+				ip = "true"
+			}
+			return 201, `{"id":"d2","kind":"document","name":"PP","description":null,` +
+				`"status":"active","payload_kind":"json","is_private":` + ip + `,"value":` + string(valJSON) +
+				`,"metadata":null,"created_at":null,"updated_at":null}`
+		}
+		c, _ := newTestClientRW(t, cfg, getRoute, writeRoute)
+
+		doc, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+			Name: "PP", PayloadKind: "json", JSONValue: map[string]any{"plan": "pro"},
+			ConnectionID: "conn-1", ShareCode: "ABC123", IsPrivate: isPrivate,
+		})
+		if err != nil {
+			t.Fatalf("CreateDocument(is_private=%v): %v", isPrivate, err)
+		}
+		if keysFetched != 1 {
+			t.Fatalf("expected 1 key fetch, got %d", keysFetched)
+		}
+		val, ok := captured["value"].(map[string]any)
+		if !ok || !isEncWrapper(val) {
+			t.Fatalf("per-person value must be ENCRYPTED (any is_private), got %#v", captured["value"])
+		}
+		for _, f := range []string{"k", "iv", "d"} {
+			if _, ok := val[f]; !ok {
+				t.Fatalf("wrapper missing %q: %#v", f, val)
+			}
+		}
+		target, ok := captured["target"].(map[string]any)
+		if !ok || target["connection_id"] != "conn-1" {
+			t.Fatalf("target = %#v", captured["target"])
+		}
+		if captured["is_private"] != isPrivate {
+			t.Fatalf("is_private = %#v, want %v", captured["is_private"], isPrivate)
+		}
+		// round-trips through the SDK's own decrypt → the original plaintext
+		pt, err := Decrypt(val, priv)
+		if err != nil {
+			t.Fatalf("Decrypt: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(pt), &got); err != nil || got["plan"] != "pro" {
+			t.Fatalf("decrypted = %q (%v)", pt, err)
+		}
+		if doc.ID != "d2" {
+			t.Fatalf("doc id = %q", doc.ID)
+		}
+	}
+}
+
+func TestCreateDocumentPrivateBroadcastFails(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(writeReq) (int, string) {
+		t.Fatal("should not write for a private broadcast")
+		return 0, ""
+	})
+	_, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "x", PayloadKind: "json", JSONValue: map[string]any{"a": 1}, IsPrivate: true,
+	})
+	if err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ConfigError for private broadcast, got %v", err)
+	}
+}
+
+func TestCreateDocumentFileBroadcastUploadsRawBytes(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, d := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
+		if strings.HasSuffix(w.path, "/documents") {
+			return 201, `{"id":"f1","kind":"document","name":"C","description":null,` +
+				`"status":"active","payload_kind":"file","is_private":false,"value":{"_pending":true},` +
+				`"metadata":null,"created_at":null,"updated_at":null}`
+		}
+		if !strings.HasSuffix(w.path, "/documents/f1/file") {
+			t.Fatalf("unexpected write path %s", w.path)
+		}
+		return 200, `{"id":"f1"}`
+	})
+
+	if _, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "C", PayloadKind: "file", FileBytes: []byte("%PDF-1.4 x"), FileMime: "application/pdf",
+	}); err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	if len(d.writes) != 2 {
+		t.Fatalf("expected 2 writes, got %d", len(d.writes))
+	}
+	if !strings.HasSuffix(d.writes[0].path, "/documents") || d.writes[0].jsonBody["target"] != nil {
+		t.Fatalf("create body = %+v", d.writes[0])
+	}
+	if !strings.HasSuffix(d.writes[1].path, "/documents/f1/file") {
+		t.Fatalf("upload path = %s", d.writes[1].path)
+	}
+	if string(d.writes[1].rawBody) != "%PDF-1.4 x" {
+		t.Fatalf("upload body = %q, want raw plaintext bytes", d.writes[1].rawBody)
+	}
+}
+
+func TestCreateDocumentFilePerPersonUploadsWrapperBytes(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	spki := vectorPubSPKIB64(t, v)
+	priv, _ := LoadPrivateKey([]byte(v.EncryptedPrivateKeyPEM), v.Passphrase)
+
+	c, d := newTestClientRW(t, cfg,
+		func(path string, _ map[string][]string) (int, string) {
+			return 200, `{"public_key":"` + spki + `"}`
+		},
+		func(w writeReq) (int, string) {
+			if strings.HasSuffix(w.path, "/documents") {
+				return 201, `{"id":"f2","kind":"document","name":"C","description":null,` +
+					`"status":"active","payload_kind":"file","is_private":true,"value":{"_pending":true},` +
+					`"metadata":null,"created_at":null,"updated_at":null}`
+			}
+			return 200, `{"id":"f2"}`
+		})
+
+	if _, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "C", PayloadKind: "file", FileBytes: []byte("hello-bytes"),
+		FileMime: "application/pdf", PersonUserID: "u1", ShareCode: "ABC123", IsPrivate: true,
+	}); err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	upload := d.writes[1].rawBody
+	if len(upload) == 0 {
+		t.Fatal("expected an upload body")
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(upload, &wrapper); err != nil {
+		t.Fatalf("upload not JSON: %v", err)
+	}
+	if !isEncWrapper(wrapper) {
+		t.Fatalf("upload must be a ciphertext wrapper, got %#v", wrapper)
+	}
+	// decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
+	envJSON, err := Decrypt(wrapper, priv)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+		t.Fatalf("envelope not JSON: %v", err)
+	}
+	fileURI, _ := env["file"].(string)
+	if !strings.HasPrefix(fileURI, "data:application/pdf;base64,") {
+		t.Fatalf("file envelope = %q", fileURI)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.SplitN(fileURI, ",", 2)[1])
+	if err != nil || string(decoded) != "hello-bytes" {
+		t.Fatalf("decoded file bytes = %q (%v)", decoded, err)
+	}
+}
+
+func TestDocumentVerbsHitRightPath(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	getRoute := func(path string, _ map[string][]string) (int, string) {
+		if strings.HasSuffix(path, "/documents") {
+			return 200, `{"total":0,"items":[]}`
+		}
+		if strings.Contains(path, "/documents/d9") {
+			return 200, `{"id":"d9","payload_kind":"json","is_private":false,"value":{"a":1}}`
+		}
+		t.Fatalf("unexpected GET %s", path)
+		return 0, ""
+	}
+	writeRoute := func(writeReq) (int, string) {
+		return 200, `{"id":"d9","payload_kind":"json","is_private":false,"value":{"a":1},"status":"ended"}`
+	}
+	c, d := newTestClientRW(t, cfg, getRoute, writeRoute)
+
+	docs, err := c.ListDocuments(context.Background(), ListDocumentsOptions{Status: "active"})
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("expected 0 docs, got %d", len(docs))
+	}
+	doc, err := c.Document(context.Background(), "d9")
+	if err != nil || doc.ID != "d9" {
+		t.Fatalf("Document = %+v, %v", doc, err)
+	}
+	if _, err := c.UpdateDocumentStatus(context.Background(), "d9", "ended"); err != nil {
+		t.Fatalf("UpdateDocumentStatus: %v", err)
+	}
+	if _, err := c.UpdateDocumentMetadata(context.Background(), "d9", UpdateDocumentMetadataOptions{Name: "renamed"}); err != nil {
+		t.Fatalf("UpdateDocumentMetadata: %v", err)
+	}
+	if err := c.DeleteDocument(context.Background(), "d9"); err != nil {
+		t.Fatalf("DeleteDocument: %v", err)
+	}
+
+	puts, deletes := 0, 0
+	for _, w := range d.writes {
+		suffix := w.path
+		if i := strings.Index(w.path, "/api/company-data"); i >= 0 {
+			suffix = w.path[i+len("/api/company-data"):]
+		}
+		switch {
+		case w.method == "PUT" && suffix == "/documents/d9":
+			puts++
+		case w.method == "DELETE" && suffix == "/documents/d9":
+			deletes++
+		}
+	}
+	if puts != 2 {
+		t.Fatalf("expected 2 PUTs to /documents/d9, got %d", puts)
+	}
+	if deletes != 1 {
+		t.Fatalf("expected 1 DELETE to /documents/d9, got %d", deletes)
 	}
 }
 

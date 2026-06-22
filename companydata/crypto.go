@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -245,6 +246,85 @@ func b64Field(value, name string) ([]byte, error) {
 		return nil, &DecryptError{msg: fmt.Sprintf("wrapper field %q is not valid base64", name)}
 	}
 	return out, nil
+}
+
+// ── encryption (for a recipient public key) ────────────────────────────────
+
+// LoadPublicKey loads a base64 SPKI/DER public key (the platform's
+// GET /api/keys public_key) into an in-memory RSA public key.
+//
+// Config-only key handling does NOT apply to a RECIPIENT public key: it is not a
+// secret and is fetched live from the API per-recipient (never configured). The
+// SDK still never accepts a *private* key/passphrase as a method argument.
+//
+// Returns a *DecryptError on invalid base64, a non-SPKI key, or a non-RSA key.
+func LoadPublicKey(spkiB64 string) (*rsa.PublicKey, error) {
+	der, err := base64.StdEncoding.DecodeString(spkiB64)
+	if err != nil {
+		return nil, &DecryptError{msg: "recipient public_key is not valid base64"}
+	}
+	parsed, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("recipient public_key is not a valid SPKI key: %v", err)}
+	}
+	pub, ok := parsed.(*rsa.PublicKey)
+	if !ok {
+		return nil, &DecryptError{msg: "recipient public_key is not an RSA public key"}
+	}
+	return pub, nil
+}
+
+// EncryptForPublicKey encrypts a UTF-8 string FOR a recipient RSA public key →
+// a {"_enc":1,k,iv,d} wrapper (returned as a map[string]any, JSON-serializable).
+//
+// The exact inverse of Decrypt:
+//
+//	aesKey = 32 random bytes
+//	d      = AES-256-GCM(aesKey, iv=12 random bytes).Seal(plaintext)  // 16-byte tag appended
+//	k      = RSA-OAEP(SHA-256, MGF1-SHA256).Encrypt(aesKey, publicKey)
+//
+// Crypto pinning: RSA-OAEP with SHA-256 for BOTH the OAEP digest AND
+// MGF1 — Go's crypto/rsa.EncryptOAEP uses the SAME hash for the OAEP digest and
+// MGF1, so passing sha256.New() pins SHA-256/MGF1-SHA256. AES-256-GCM with a
+// 12-byte nonce and Go appending the 16-byte tag to the ciphertext — exactly the
+// platform's layout.
+//
+// Used for EVERY per-person (targeted) document (json + file), independent of
+// is_private — broadcast docs stay plaintext.
+func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, error) {
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("could not generate AES key: %v", err)}
+	}
+	iv := make([]byte, gcmIVLen) // 12
+	if _, err := rand.Read(iv); err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("could not generate IV: %v", err)}
+	}
+
+	// AES-256-GCM: crypto/cipher's Seal appends the 16-byte tag to the ciphertext
+	// (the platform layout that Decrypt expects).
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("AES cipher init failed: %v", err)}
+	}
+	gcm, err := cipher.NewGCM(block) // 12-byte nonce, 16-byte tag — platform default
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("GCM init failed: %v", err)}
+	}
+	ciphertextWithTag := gcm.Seal(nil, iv, []byte(plaintext), nil)
+
+	// RSA-OAEP(SHA-256, MGF1-SHA256) — pin SHA-256 for the digest AND MGF1.
+	encKey, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, aesKey, nil)
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("RSA-OAEP wrap failed: %v", err)}
+	}
+
+	return map[string]any{
+		"_enc": 1,
+		"k":    base64.StdEncoding.EncodeToString(encKey),
+		"iv":   base64.StdEncoding.EncodeToString(iv),
+		"d":    base64.StdEncoding.EncodeToString(ciphertextWithTag),
+	}, nil
 }
 
 // ── BinaryHandle ────────────────────────────────────────────

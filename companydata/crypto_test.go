@@ -1,7 +1,10 @@
 package companydata
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -228,6 +231,55 @@ func TestBinaryHandleSaveWritesBytesAndCount(t *testing.T) {
 	}
 	if got := sha256hex(data); got != v.Binary.InnerFullSHA256 {
 		t.Fatalf("saved sha256 = %s, want %s", got, v.Binary.InnerFullSHA256)
+	}
+}
+
+// ── EncryptForPublicKey round-trips through Decrypt ──────────────────────────
+
+func TestEncryptForPublicKeyRoundTripsThroughDecrypt(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	spkiB64 := base64.StdEncoding.EncodeToString(der)
+
+	pub, err := LoadPublicKey(spkiB64)
+	if err != nil {
+		t.Fatalf("LoadPublicKey: %v", err)
+	}
+	for _, pt := range []string{"hello", `{"a":1}`, "with-üñîçödé"} {
+		wrapper, err := EncryptForPublicKey(pt, pub)
+		if err != nil {
+			t.Fatalf("EncryptForPublicKey(%q): %v", pt, err)
+		}
+		if wrapper["_enc"] != 1 {
+			t.Fatalf("wrapper _enc = %#v, want 1", wrapper["_enc"])
+		}
+		for _, f := range []string{"k", "iv", "d"} {
+			if _, ok := wrapper[f]; !ok {
+				t.Fatalf("wrapper missing %q: %#v", f, wrapper)
+			}
+		}
+		got, err := Decrypt(wrapper, priv)
+		if err != nil {
+			t.Fatalf("Decrypt(round-trip %q): %v", pt, err)
+		}
+		if got != pt {
+			t.Fatalf("round-trip = %q, want %q", got, pt)
+		}
+	}
+}
+
+func TestLoadPublicKeyRejectsGarbage(t *testing.T) {
+	if _, err := LoadPublicKey("not-base64!!"); err == nil || !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("expected ErrDecrypt for bad base64, got %v", err)
+	}
+	if _, err := LoadPublicKey(base64.StdEncoding.EncodeToString([]byte("not a spki key"))); err == nil || !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("expected ErrDecrypt for non-SPKI, got %v", err)
 	}
 }
 

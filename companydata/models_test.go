@@ -266,6 +266,70 @@ func TestLogEntriesParsed(t *testing.T) {
 	}
 }
 
+func TestChangeDocumentStatusChangedParses(t *testing.T) {
+	v := loadVector(t)
+	decryptValue, _ := vectorDecryptValue(t, v)
+	body := map[string]any{"changes": []any{
+		map[string]any{
+			"id": "chg-doc", "event": "document_status_changed",
+			"person_user_id": "u-1", "share_code": "ABC123",
+			"document_id": "doc-9", "status": "ended", "at": "2026-06-22T10:00:00Z",
+		},
+	}}
+	changes, err := changesFromAPI(body, func(string) string { return "" }, decryptValue, nil)
+	if err != nil {
+		t.Fatalf("changesFromAPI: %v", err)
+	}
+	chg := changes[0]
+	if chg.Event != "document_status_changed" {
+		t.Fatalf("event = %q", chg.Event)
+	}
+	if chg.DocumentID != "doc-9" || chg.Status != "ended" {
+		t.Fatalf("document fields = %+v", chg)
+	}
+	if chg.PersonID != "u-1" || chg.ShareCode != "ABC123" {
+		t.Fatalf("identity = %+v", chg)
+	}
+	if chg.Slug != "" || chg.Value != nil || chg.HasLive {
+		t.Fatalf("expected no slug/value/live, got %+v", chg)
+	}
+}
+
+func TestDocumentModelBroadcastJSONIsPlaintext(t *testing.T) {
+	doc := documentFromAPI(map[string]any{
+		"id": "d1", "kind": "document", "name": "Terms", "status": "active",
+		"payload_kind": "json", "is_private": false,
+		"value": map[string]any{"v": float64(1)}, "metadata": map[string]any{},
+	}, nil)
+	got, err := doc.JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok || m["v"] != float64(1) {
+		t.Fatalf("broadcast json = %#v", got)
+	}
+}
+
+func TestDocumentModelPerPersonJSONDecrypts(t *testing.T) {
+	v := loadVector(t)
+	decryptValue, _ := vectorDecryptValue(t, v)
+	wrapper := encryptForVectorKey(t, v, `{"plan":"pro"}`)
+	doc := documentFromAPI(map[string]any{
+		"id": "d2", "kind": "document", "name": "PP", "status": "active",
+		"payload_kind": "json", "is_private": true, "value": wrapper,
+		"metadata": map[string]any{},
+	}, decryptValue)
+	got, err := doc.JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok || m["plan"] != "pro" {
+		t.Fatalf("per-person json = %#v", got)
+	}
+}
+
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if len(sub) > 0 && indexOf(s, sub) >= 0 {
