@@ -235,6 +235,7 @@ type Change struct {
 	HasLive    bool
 	DocumentID string // set on document_status_changed
 	Status     string // set on document_status_changed
+	Action     string // set on document_status_changed for a contract: signed | accepted | cancelled
 	At         *time.Time
 	Raw        map[string]any
 }
@@ -262,10 +263,11 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		}
 	}
 
-	var documentID, status string
+	var documentID, status, action string
 	if event == "document_status_changed" {
 		documentID = asString(obj["document_id"])
 		status = asString(obj["status"])
+		action = asString(obj["action"])
 	}
 
 	return Change{
@@ -279,6 +281,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		HasLive:    hasLive,
 		DocumentID: documentID,
 		Status:     status,
+		Action:     action,
 		At:         parseISO(asString(obj["at"])),
 		Raw:        obj,
 	}, nil
@@ -362,6 +365,11 @@ type Document struct {
 	CreatedAt   *time.Time
 	UpdatedAt   *time.Time
 
+	// Contract fields.
+	RequiresSignature  bool
+	RequiresAcceptance bool
+	Signatures         []map[string]any // contract sign/accept audit trail (company-side reads only)
+
 	decryptValue decryptValueFn // injected; nil for a plaintext-only document
 	Raw          map[string]any
 }
@@ -401,20 +409,31 @@ func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
 	if m, ok := obj["metadata"].(map[string]any); ok {
 		metadata = m
 	}
+	var signatures []map[string]any
+	if arr, ok := obj["signatures"].([]any); ok {
+		for _, s := range arr {
+			if sm, ok := s.(map[string]any); ok {
+				signatures = append(signatures, sm)
+			}
+		}
+	}
 	return Document{
-		ID:           asString(obj["id"]),
-		Kind:         asString(obj["kind"]),
-		Name:         asString(obj["name"]),
-		Description:  asString(obj["description"]),
-		Status:       asString(obj["status"]),
-		PayloadKind:  asString(obj["payload_kind"]),
-		IsPrivate:    coerceBool(obj["is_private"]),
-		Value:        obj["value"],
-		Metadata:     metadata,
-		CreatedAt:    parseISO(asString(obj["created_at"])),
-		UpdatedAt:    parseISO(asString(obj["updated_at"])),
-		decryptValue: decryptValue,
-		Raw:          obj,
+		ID:                 asString(obj["id"]),
+		Kind:               asString(obj["kind"]),
+		Name:               asString(obj["name"]),
+		Description:        asString(obj["description"]),
+		Status:             asString(obj["status"]),
+		PayloadKind:        asString(obj["payload_kind"]),
+		IsPrivate:          coerceBool(obj["is_private"]),
+		Value:              obj["value"],
+		Metadata:           metadata,
+		CreatedAt:          parseISO(asString(obj["created_at"])),
+		UpdatedAt:          parseISO(asString(obj["updated_at"])),
+		RequiresSignature:  coerceBool(obj["requires_signature"]),
+		RequiresAcceptance: coerceBool(obj["requires_acceptance"]),
+		Signatures:         signatures,
+		decryptValue:       decryptValue,
+		Raw:                obj,
 	}
 }
 
