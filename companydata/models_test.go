@@ -295,6 +295,45 @@ func TestChangeDocumentStatusChangedParses(t *testing.T) {
 	}
 }
 
+func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
+	v := loadVector(t)
+	decryptValue, _ := vectorDecryptValue(t, v)
+	body := map[string]any{"changes": []any{
+		map[string]any{
+			"id": "chg-sign", "event": "document_status_changed",
+			"person_user_id": "u-2", "action": "signed",
+			"document_id": "doc-7", "status": "active", "at": "2026-06-22T10:00:00Z",
+		},
+	}}
+	changes, err := changesFromAPI(body, func(string) string { return "" }, decryptValue, nil)
+	if err != nil {
+		t.Fatalf("changesFromAPI: %v", err)
+	}
+	chg := changes[0]
+	if chg.Event != "document_status_changed" || chg.Action != "signed" {
+		t.Fatalf("event/action = %q/%q", chg.Event, chg.Action)
+	}
+	if chg.DocumentID != "doc-7" || chg.Status != "active" {
+		t.Fatalf("document fields = %+v", chg)
+	}
+}
+
+func TestDocumentModelCarriesContractFlagsAndSignatures(t *testing.T) {
+	doc := documentFromAPI(map[string]any{
+		"id": "c1", "kind": "agreement", "name": "Agreement", "status": "active",
+		"payload_kind": "json", "is_private": false,
+		"value": map[string]any{"v": float64(1)}, "metadata": map[string]any{},
+		"requires_signature": true, "requires_acceptance": false,
+		"signatures": []any{map[string]any{"action": "signed", "method": "biometric"}},
+	}, nil)
+	if !doc.RequiresSignature || doc.RequiresAcceptance {
+		t.Fatalf("flags = %v/%v", doc.RequiresSignature, doc.RequiresAcceptance)
+	}
+	if len(doc.Signatures) != 1 || doc.Signatures[0]["action"] != "signed" {
+		t.Fatalf("signatures = %+v", doc.Signatures)
+	}
+}
+
 func TestDocumentModelBroadcastJSONIsPlaintext(t *testing.T) {
 	doc := documentFromAPI(map[string]any{
 		"id": "d1", "kind": "document", "name": "Terms", "status": "active",

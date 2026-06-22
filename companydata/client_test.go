@@ -612,6 +612,37 @@ func TestCreateDocumentPrivateBroadcastFails(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentContractWithoutTargetFails(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(writeReq) (int, string) {
+		t.Fatal("should not write for a targetless contract")
+		return 0, ""
+	})
+	_, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "Agreement", PayloadKind: "json", Kind: "agreement", RequiresSignature: true,
+		JSONValue: map[string]any{"a": 1},
+	})
+	if err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ConfigError for a targetless contract, got %v", err)
+	}
+}
+
+func TestCreateDocumentInvalidKindFails(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(writeReq) (int, string) {
+		t.Fatal("should not write for an invalid kind")
+		return 0, ""
+	})
+	_, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "x", PayloadKind: "json", Kind: "invalid", JSONValue: map[string]any{"a": 1},
+	})
+	if err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ConfigError for an invalid kind, got %v", err)
+	}
+}
+
 func TestCreateDocumentFileBroadcastUploadsRawBytes(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)

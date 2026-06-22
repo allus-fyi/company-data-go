@@ -534,7 +534,7 @@ type CreateDocumentOptions struct {
 	Name        string
 	PayloadKind string // "json" | "file"
 	IsPrivate   bool
-	Description  string
+	Description string
 
 	// Per-person target (any one of these makes it per-person; ShareCode skips
 	// the resolve step).
@@ -546,6 +546,11 @@ type CreateDocumentOptions struct {
 	JSONValue any
 	FileBytes []byte
 	FileMime  string
+
+	// Contract flags. Either one (or Kind agreement|subscription) makes this a
+	// contract, which is ALWAYS per-person → it must target one connected person.
+	RequiresSignature  bool
+	RequiresAcceptance bool
 
 	Metadata map[string]any
 	Status   string
@@ -562,6 +567,9 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 	if kind == "" {
 		kind = "document"
 	}
+	if kind != "document" && kind != "agreement" && kind != "subscription" {
+		return Document{}, newConfigError("kind must be 'document', 'agreement' or 'subscription'")
+	}
 
 	var target map[string]any
 	switch {
@@ -571,6 +579,12 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 		target = map[string]any{"person_user_id": opts.PersonUserID}
 	}
 	perPerson := target != nil
+
+	// A contract (agreement/subscription, or either flag) is ALWAYS per-person → it must target one person.
+	isContract := kind == "agreement" || kind == "subscription" || opts.RequiresSignature || opts.RequiresAcceptance
+	if isContract && !perPerson {
+		return Document{}, newConfigError("a contract must target one connected person")
+	}
 
 	if opts.IsPrivate && !perPerson {
 		// A plaintext broadcast cannot be locked — IsPrivate needs a per-person target.
@@ -596,11 +610,13 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 	}
 
 	body := map[string]any{
-		"kind":         kind,
-		"name":         opts.Name,
-		"payload_kind": opts.PayloadKind,
-		"is_private":   opts.IsPrivate,
-		"target":       target, // nil → JSON null (broadcast)
+		"kind":                kind,
+		"name":                opts.Name,
+		"payload_kind":        opts.PayloadKind,
+		"is_private":          opts.IsPrivate,
+		"requires_signature":  opts.RequiresSignature,
+		"requires_acceptance": opts.RequiresAcceptance,
+		"target":              target, // nil → JSON null (broadcast)
 	}
 	if opts.Description != "" {
 		body["description"] = opts.Description
