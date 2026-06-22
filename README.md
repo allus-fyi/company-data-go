@@ -18,6 +18,7 @@ request slots you configured.
 **Contents:** [TL;DR](#tldr--fetch-new-updates) · [Quickstart](#quickstart) ·
 [Every call](#every-call) ·
 [The typed value model](#the-typed-value-model) ·
+[Company documents](#company-documents) ·
 [The changes pump](#the-changes-pump) · [Webhooks](#webhooks) ·
 [Rate limits](#rate-limits) · [Errors](#errors) · [How it's wired](#how-its-wired)
 
@@ -265,6 +266,135 @@ endpoint, decrypts the wrapper, parses the envelope (`{"full":…}` /
 `{"file":…}`), and base64-decodes the primary data-URI payload into the file
 bytes. `Save(path)` writes those bytes atomically. The handle is lazy and caches
 the decrypted envelope, so repeated `Bytes()`/`Save()` don't re-fetch.
+
+---
+
+## Company documents
+
+A service can also push **documents** to people — contracts, statements, signed
+PDFs, structured JSON payloads. Unlike the request-field values (which the person
+fills in for you), documents flow the other way: **you** create them and the
+recipient's app shows them.
+
+The one rule to internalise — **encryption is keyed on the target, never on
+`IsPrivate`**:
+
+- **Per-person** (set `ConnectionID`, `PersonUserID`, or `ShareCode`): the value
+  is **always end-to-end encrypted to that recipient's public key** before it
+  leaves the process — for *every* per-person document, `IsPrivate` or not. The
+  SDK resolves the recipient's share code, fetches their public key, and encrypts
+  with it. **No method takes a key or secret argument.**
+- **Broadcast** (no target): the value is sent **plaintext**. You can't
+  single-key-encrypt one blob to *all* of a service's connections, so broadcast
+  documents are inherently public-to-your-connections. A broadcast therefore
+  **must** be non-private — `IsPrivate: true` with no target returns a
+  `*ConfigError`.
+
+`IsPrivate` is a **device-display-only** flag: it tells the recipient's app to
+show a lock (tap-to-reveal) vs decrypt-and-show-on-load. It does **not** decide
+whether the value is encrypted (the target does). It only makes sense per-person.
+
+`PayloadKind` is `"json"` (a structured object) or `"file"` (raw bytes — PDF,
+image, …).
+
+### Create
+
+```go
+client, err := companydata.FromConfig("allus.json")
+if err != nil {
+    log.Fatal(err)
+}
+ctx := context.Background()
+
+// BROADCAST, plaintext JSON — every connection sees it.
+notice, err := client.CreateDocument(ctx, companydata.CreateDocumentOptions{
+    Name:        "Q3 service notice",
+    PayloadKind: "json",
+    JSONValue: map[string]any{
+        "headline": "Scheduled maintenance",
+        "starts":   "2026-07-01T02:00:00Z",
+    },
+})
+
+// PER-PERSON, JSON — auto-encrypted to this recipient's public key.
+// (IsPrivate optional; it only changes how their device displays it.)
+contract, err := client.CreateDocument(ctx, companydata.CreateDocumentOptions{
+    ConnectionID: "019xxxxxxxxxxxxxxxxxxxxxxxxx", // or PersonUserID / ShareCode
+    Name:         "Service agreement",
+    PayloadKind:  "json",
+    IsPrivate:    true, // recipient's app shows a lock; the bytes are encrypted either way
+    JSONValue:    map[string]any{"plan": "pro", "monthly_eur": 49},
+    Status:       "offering",
+})
+
+// PER-PERSON, FILE — the file bytes are encrypted to the recipient before upload.
+pdf, _ := os.ReadFile("./agreement.pdf")
+signed, err := client.CreateDocument(ctx, companydata.CreateDocumentOptions{
+    PersonUserID: "019yyyyyyyyyyyyyyyyyyyyyyyyy",
+    Name:         "Signed agreement",
+    PayloadKind:  "file",
+    FileBytes:    pdf,
+    FileMime:     "application/pdf",
+})
+```
+
+Setting `ConnectionID` or `PersonUserID` makes a document per-person; `ShareCode`
+short-circuits the recipient-share-code lookup if you already have it. The
+returned `Document` carries `ID`, `Status`, `PayloadKind`, `IsPrivate`,
+`Metadata`, timestamps, and (for per-person JSON) the encrypted `Value` — call
+`doc.JSON()` to get the plaintext object back (it decrypts a per-person wrapper
+with your own key, or returns a broadcast value as-is).
+
+### List / fetch / update / delete
+
+```go
+// List this service's documents (optional person/status filter + paging).
+docs, err := client.ListDocuments(ctx, companydata.ListDocumentsOptions{
+    PersonUserID: "019yyyy…", // optional
+    Status:       "active",   // optional
+    Limit:        100, Offset: 0,
+})
+
+// One document by id.
+doc, err := client.Document(ctx, "019zzzz…")
+obj, _ := doc.JSON() // plaintext (decrypts a per-person wrapper transparently)
+
+// Advance the lifecycle status.
+// offering | ready_to_sign | active | active_but_ending | ended
+doc, err = client.UpdateDocumentStatus(ctx, doc.ID, "active")
+
+// Update metadata / name / description (any one of the three is required).
+doc, err = client.UpdateDocumentMetadata(ctx, doc.ID, companydata.UpdateDocumentMetadataOptions{
+    Name:        "Service agreement (v2)",
+    Description: "Renewed terms",
+    Metadata:    map[string]any{"ref": "AC-2026-0007"},
+})
+
+// Delete the document (and its on-disk file).
+err = client.DeleteDocument(ctx, doc.ID)
+```
+
+### React to status changes in the pump
+
+When a recipient acts on a document, the change feed emits a
+**`document_status_changed`** event carrying `DocumentID` + `Status` (no slug, no
+value) — handle it alongside the field events:
+
+```go
+err := client.ProcessChanges(func(c companydata.Change) error {
+    switch c.Event {
+    case "document_status_changed":
+        // e.g. the person moved a contract offering → ready_to_sign → active
+        onDocumentStatus(c.PersonID, c.DocumentID, c.Status)
+    case "field_updated":
+        upsert(c.PersonID, c.Slug, c.Value)
+    }
+    return nil
+}, companydata.PumpOptions{})
+```
+
+The same event arrives over [webhooks](#webhooks) with the identical `Change`
+shape.
 
 ---
 
