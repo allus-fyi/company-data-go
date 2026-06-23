@@ -305,6 +305,100 @@ func changesFromAPI(body any, typeForSlug typeForSlugFn, decryptValue decryptVal
 	return out, nil
 }
 
+// ── flow run ─────────────────────────────────────────────────────────────────
+
+// FlowRun is a contract-flow run (company-data side).
+//
+// The company is one of the two bound parties. Bindings maps each party key to
+// the bound user_id (the company's own is CompanyUserID); Answers are the
+// per-party encrypted answer copies (the company reads the rows whose
+// for_user_id == CompanyUserID, decryptable with the service private key);
+// Definition is the pinned flow-version graph (nodes, edges, parties, output_mode).
+type FlowRun struct {
+	ID            string
+	FlowID        string
+	FlowVersion   any
+	ServiceID     string
+	ConnectionID  string
+	CompanyUserID string
+	Bindings      map[string]string
+	Status        string
+	CurrentNode   string
+	DocumentID    string
+	OutputMode    string
+	Definition    map[string]any
+	Answers       []map[string]any
+	CreatedAt     *time.Time
+	UpdatedAt     *time.Time
+	Raw           map[string]any
+}
+
+// CompanyPartyKey is the party key the company is bound to (Bindings[key] == CompanyUserID).
+func (r FlowRun) CompanyPartyKey() string {
+	for key, uid := range r.Bindings {
+		if uid == r.CompanyUserID {
+			return key
+		}
+	}
+	return ""
+}
+
+// ServiceUserID is the company's bound user_id — its answer copies use this for_user_id.
+func (r FlowRun) ServiceUserID() string { return r.CompanyUserID }
+
+func flowRunFromAPI(obj map[string]any) FlowRun {
+	if obj == nil {
+		obj = map[string]any{}
+	}
+	var def map[string]any
+	if d, ok := obj["definition"].(map[string]any); ok {
+		def = d
+	} else {
+		def = map[string]any{
+			"nodes":       obj["nodes"],
+			"edges":       obj["edges"],
+			"parties":     obj["parties"],
+			"output_mode": obj["output_mode"],
+		}
+	}
+	bindings := map[string]string{}
+	if b, ok := obj["bindings"].(map[string]any); ok {
+		for k, v := range b {
+			bindings[k] = asString(v)
+		}
+	}
+	var answers []map[string]any
+	if lst, ok := obj["answers"].([]any); ok {
+		for _, a := range lst {
+			if m, ok := a.(map[string]any); ok {
+				answers = append(answers, m)
+			}
+		}
+	}
+	outputMode := asString(obj["output_mode"])
+	if outputMode == "" {
+		outputMode = asString(def["output_mode"])
+	}
+	return FlowRun{
+		ID:            asString(obj["id"]),
+		FlowID:        asString(obj["flow_id"]),
+		FlowVersion:   obj["flow_version"],
+		ServiceID:     asString(obj["service_id"]),
+		ConnectionID:  asString(obj["connection_id"]),
+		CompanyUserID: asString(obj["company_user_id"]),
+		Bindings:      bindings,
+		Status:        asString(obj["status"]),
+		CurrentNode:   asString(obj["current_node"]),
+		DocumentID:    asString(obj["document_id"]),
+		OutputMode:    outputMode,
+		Definition:    def,
+		Answers:       answers,
+		CreatedAt:     parseISO(asString(obj["created_at"])),
+		UpdatedAt:     parseISO(asString(obj["updated_at"])),
+		Raw:           obj,
+	}
+}
+
 // ── log ────────────────────────────────────────────────────────────────────
 
 // LogEntry is a service activity-log entry — ops events only,

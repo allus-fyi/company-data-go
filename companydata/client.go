@@ -2,6 +2,9 @@ package companydata
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -60,6 +63,8 @@ const (
 	epRequestFields = baseEndpoint + "/request-fields"
 	epLogs          = baseEndpoint + "/logs"
 	epDocuments     = baseEndpoint + "/documents"
+	epFlows         = baseEndpoint + "/flows"     // POST /api/company-data/flows/{flowId}/runs
+	epFlowRuns      = baseEndpoint + "/flow-runs" // list / get / answers / generate
 	epKeys          = "/api/keys"
 
 	// defaultConnPage is the connections iterator page size. The endpoint is
@@ -784,6 +789,274 @@ func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
 	return err
 }
 
+// ── contract-flow runs (company side — the company is a bound party) ─────────
+
+// TriggerFlowRun starts a run for a connection. bindings = {party_key: user_id}
+// covering the flow's parties (each bound user must be the company or the
+// connected person). Pins the flow's latest PUBLISHED version. connectionID is
+// the person-side company_service_connections.id for this service. Returns the
+// created FlowRun (status awaiting_<entry node's party>).
+func (c *Client) TriggerFlowRun(ctx context.Context, flowID, connectionID string, bindings map[string]string) (FlowRun, error) {
+	body := map[string]any{
+		"target":   map[string]any{"connection_id": connectionID},
+		"bindings": bindings,
+	}
+	created, err := c.http.Post(ctx, epFlows+"/"+flowID+"/runs", body)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	return flowRunFromAPI(asMap(created)), nil
+}
+
+// FlowRuns lists this service's runs. An empty status defaults to the actionable
+// "awaiting_company" queue; pass "*" (or any non-empty status) explicitly, or use
+// FlowRunsAll for the unfiltered list.
+func (c *Client) FlowRuns(ctx context.Context, status string) ([]FlowRun, error) {
+	if status == "" {
+		status = "awaiting_company"
+	}
+	var params url.Values
+	if status != "*" {
+		params = url.Values{"status": {status}}
+	}
+	body, err := c.http.Get(ctx, epFlowRuns, params)
+	if err != nil {
+		return nil, err
+	}
+	items := listItems(body)
+	out := make([]FlowRun, 0, len(items))
+	for _, o := range items {
+		out = append(out, flowRunFromAPI(asMap(o)))
+	}
+	return out, nil
+}
+
+// FlowRunsAll lists all of this service's runs (no status filter).
+func (c *Client) FlowRunsAll(ctx context.Context) ([]FlowRun, error) {
+	return c.FlowRuns(ctx, "*")
+}
+
+// FlowRun fetches one run by id.
+func (c *Client) FlowRun(ctx context.Context, runID string) (FlowRun, error) {
+	body, err := c.http.Get(ctx, epFlowRuns+"/"+runID, nil)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	return flowRunFromAPI(asMap(body)), nil
+}
+
+// servicePublicKey is the service RSA public key = the public half of the loaded
+// service private key. The run payload does NOT carry the service public key; the
+// company makes its own answer copy by encrypting to the public half of the same
+// RSA pair it already holds (config-only key handling — no extra fetch, no key arg).
+func (c *Client) servicePublicKey() *rsa.PublicKey {
+	return &c.privateKey.PublicKey
+}
+
+// decryptRunAnswers decrypts the company's service-key answer copies → {slug:
+// plaintext}. Only the rows whose for_user_id is the company's bound user_id are
+// decryptable with the service private key; the person's copies are skipped.
+func (c *Client) decryptRunAnswers(run FlowRun) (map[string]any, error) {
+	out := map[string]any{}
+	for _, row := range run.Answers {
+		if asString(row["for_user_id"]) != run.ServiceUserID() {
+			continue
+		}
+		slug := asString(row["slug"])
+		v := row["value"]
+		if slug == "" || v == nil {
+			continue
+		}
+		plain, err := c.decryptValue(v)
+		if err != nil {
+			return nil, err
+		}
+		out[slug] = plain
+	}
+	return out, nil
+}
+
+// flowPersonPublicKey resolves a person party's RSA public key for per-party
+// answer encryption. It prefers a caller-supplied key (partyPubKeys), else
+// resolves the person's share_code from the run's connection → GET /api/keys/{code}.
+//
+// Integration gap: the run payload exposes neither person public keys nor
+// per-binding share codes, so the SDK resolves via the connection. Supply
+// partyPubKeys to skip the lookup entirely.
+func (c *Client) flowPersonPublicKey(ctx context.Context, run FlowRun, uid string, partyPubKeys map[string]*rsa.PublicKey) (*rsa.PublicKey, error) {
+	if k, ok := partyPubKeys[uid]; ok {
+		return k, nil
+	}
+	sc, err := c.resolveShareCode(ctx, run.ConnectionID, uid)
+	if err != nil {
+		return nil, err
+	}
+	return c.recipientPublicKey(ctx, sc)
+}
+
+// SubmitFlowAnswers fills the company's current node and advances.
+//
+// fill = {slug: plaintext_value} the caller computed for this node. For EACH
+// answer the SDK encrypts one copy per bound party (the company via the service
+// public key; each person party via their public key), evaluates the next node
+// LOCALLY (ordered outgoing edges, first match) over the full decrypted answer
+// map, and POSTs {answers, next_node?/leaf, next_party?}. Returns the refreshed
+// FlowRun. A document-mode leaf leaves the run "generating" — call
+// GenerateFlowDocument (or ProcessFlowRun, which chains it). partyPubKeys may be
+// nil; supply it to skip the share_code → /api/keys resolution for person parties.
+func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[string]any, partyPubKeys map[string]*rsa.PublicKey) (FlowRun, error) {
+	if partyPubKeys == nil {
+		partyPubKeys = map[string]*rsa.PublicKey{}
+	}
+	answersSoFar, err := c.decryptRunAnswers(run)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	full := map[string]any{}
+	for k, v := range answersSoFar {
+		full[k] = v
+	}
+	for k, v := range fill {
+		full[k] = v
+	}
+	svcPub := c.servicePublicKey()
+
+	answersOut := make([]map[string]any, 0, len(fill))
+	for slug, val := range fill {
+		plain := flowPlain(val)
+		values := make([]map[string]any, 0, len(run.Bindings))
+		for _, uid := range run.Bindings {
+			var key *rsa.PublicKey
+			if uid == run.ServiceUserID() {
+				key = svcPub
+			} else {
+				k, err := c.flowPersonPublicKey(ctx, run, uid, partyPubKeys)
+				if err != nil {
+					return FlowRun{}, err
+				}
+				key = k
+			}
+			wrapper, err := EncryptForPublicKey(plain, key)
+			if err != nil {
+				return FlowRun{}, err
+			}
+			values = append(values, map[string]any{"for_user_id": uid, "value": wrapper})
+		}
+		answersOut = append(answersOut, map[string]any{"slug": slug, "values": values})
+	}
+
+	leaf, nextNode := computeNextNode(run.Definition, run.CurrentNode, full)
+	body := map[string]any{"answers": answersOut}
+	if leaf {
+		body["leaf"] = true
+	} else {
+		body["next_node"] = nextNode
+		body["next_party"] = partyOf(run.Definition, nextNode)
+	}
+	res, err := c.http.Post(ctx, epFlowRuns+"/"+run.ID+"/answers", body)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	return flowRunFromAPI(asMap(res)), nil
+}
+
+// GenerateFlowDocument runs the document-mode company leaf: a one-time-key value
+// gather → POST /generate. It builds a random 32-byte AES-256-GCM key, encrypts
+// JSON({slug: plaintext}) of the company's decrypted answers, packs
+// iv(12)||ciphertext||tag(16), and POSTs {otk: base64(key), values: base64(blob)}.
+// Returns the API response {document_id, status: "awaiting_signature"} (idempotent).
+func (c *Client) GenerateFlowDocument(ctx context.Context, run FlowRun) (any, error) {
+	answers, err := c.decryptRunAnswers(run)
+	if err != nil {
+		return nil, err
+	}
+	strMap := map[string]string{}
+	for k, v := range answers {
+		strMap[k] = flowPlain(v)
+	}
+	payload, err := json.Marshal(strMap)
+	if err != nil {
+		return nil, newConfigError("could not marshal answer values: %v", err)
+	}
+	otk := make([]byte, 32)
+	if _, err := rand.Read(otk); err != nil {
+		return nil, err
+	}
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(otk)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	ctWithTag := gcm.Seal(nil, iv, payload, nil) // ciphertext || tag(16)
+	blob := append(append([]byte{}, iv...), ctWithTag...)
+	body := map[string]any{
+		"otk":    base64.StdEncoding.EncodeToString(otk),
+		"values": base64.StdEncoding.EncodeToString(blob),
+	}
+	return c.http.Post(ctx, epFlowRuns+"/"+run.ID+"/generate", body)
+}
+
+// ProcessFlowRun is the high-level company turn: load → (if our turn) fill +
+// advance + generate. fillNode(node, answers) returns {slug: value}; the SDK
+// encrypts per party, submits, and — if the submit landed on a document-mode leaf
+// — calls GenerateFlowDocument. Returns the latest FlowRun; when the run is not
+// awaiting the company it is returned untouched. partyPubKeys may be nil.
+func (c *Client) ProcessFlowRun(ctx context.Context, runID string, fillNode func(node, answers map[string]any) map[string]any, partyPubKeys map[string]*rsa.PublicKey) (FlowRun, error) {
+	run, err := c.FlowRun(ctx, runID)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	companyParty := run.CompanyPartyKey()
+	if companyParty == "" || run.Status != "awaiting_"+companyParty {
+		return run, nil // not our turn (or company not bound)
+	}
+	node := nodeByKey(run.Definition, run.CurrentNode)
+	if node == nil {
+		return run, nil
+	}
+	answers, err := c.decryptRunAnswers(run)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	fill := fillNode(node, answers)
+	if fill == nil {
+		fill = map[string]any{}
+	}
+	merged := map[string]any{}
+	for k, v := range answers {
+		merged[k] = v
+	}
+	for k, v := range fill {
+		merged[k] = v
+	}
+	wasLeaf, _ := computeNextNode(run.Definition, run.CurrentNode, merged)
+	run, err = c.SubmitFlowAnswers(ctx, run, fill, partyPubKeys)
+	if err != nil {
+		return FlowRun{}, err
+	}
+	mode := run.OutputMode
+	if mode == "" {
+		mode = asString(run.Definition["output_mode"])
+	}
+	if wasLeaf && mode == "document" {
+		if _, err := c.GenerateFlowDocument(ctx, run); err != nil {
+			return FlowRun{}, err
+		}
+		run, err = c.FlowRun(ctx, run.ID)
+		if err != nil {
+			return FlowRun{}, err
+		}
+	}
+	return run, nil
+}
+
 // recipientPublicKey fetches + caches the recipient RSA public key by share_code
 // (GET /api/keys/{shareCode}).
 func (c *Client) recipientPublicKey(ctx context.Context, shareCode string) (*rsa.PublicKey, error) {
@@ -886,6 +1159,84 @@ func docObj(body any) map[string]any {
 		return m
 	}
 	return map[string]any{}
+}
+
+// asMap coerces a response body to a JSON object (else an empty map).
+func asMap(body any) map[string]any {
+	if m, ok := body.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+// flowPlain renders an answer value as the plaintext string sent to the API
+// (strings as-is, everything else JSON-encoded — mirrors the other SDKs).
+func flowPlain(val any) string {
+	if s, ok := val.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(val)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// nodeByKey looks up a node by key in the pinned definition graph.
+func nodeByKey(definition map[string]any, key string) map[string]any {
+	nodes, ok := definition["nodes"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, n := range nodes {
+		if m, ok := n.(map[string]any); ok && asString(m["key"]) == key {
+			return m
+		}
+	}
+	return nil
+}
+
+// computeNextNode returns the next node after fromKey — ordered outgoing edges,
+// first match wins. leaf is true when there is no outgoing edge or none matched
+// (a dead-end is a leaf, matching the platform engine).
+func computeNextNode(definition map[string]any, fromKey string, answers map[string]any) (leaf bool, next string) {
+	edgesRaw, _ := definition["edges"].([]any)
+	type edge struct {
+		m    map[string]any
+		sort float64
+	}
+	var edges []edge
+	for _, e := range edgesRaw {
+		m, ok := e.(map[string]any)
+		if !ok || asString(m["from"]) != fromKey {
+			continue
+		}
+		s, _ := flowToNum(m["sort"])
+		edges = append(edges, edge{m: m, sort: s})
+	}
+	if len(edges) == 0 {
+		return true, ""
+	}
+	// Stable insertion sort by sort (small N; preserves declaration order on ties).
+	for i := 1; i < len(edges); i++ {
+		for j := i; j > 0 && edges[j-1].sort > edges[j].sort; j-- {
+			edges[j-1], edges[j] = edges[j], edges[j-1]
+		}
+	}
+	for _, e := range edges {
+		if EvaluateCondition(e.m["condition"], answers) {
+			return false, asString(e.m["to"])
+		}
+	}
+	return true, ""
+}
+
+// partyOf returns the party that owns nodeKey in the definition.
+func partyOf(definition map[string]any, nodeKey string) string {
+	if n := nodeByKey(definition, nodeKey); n != nil {
+		return asString(n["party"])
+	}
+	return ""
 }
 
 // dataURI builds a data:<mime>;base64,<…> URI for the per-person file envelope.
