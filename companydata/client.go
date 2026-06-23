@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -63,6 +64,7 @@ const (
 	epRequestFields = baseEndpoint + "/request-fields"
 	epLogs          = baseEndpoint + "/logs"
 	epDocuments     = baseEndpoint + "/documents"
+	epConnectReqs   = baseEndpoint + "/connect-requests"
 	epFlows         = baseEndpoint + "/flows"     // POST /api/company-data/flows/{flowId}/runs
 	epFlowRuns      = baseEndpoint + "/flow-runs" // list / get / answers / generate
 	epKeys          = "/api/keys"
@@ -787,6 +789,31 @@ func (c *Client) UpdateDocumentMetadata(ctx context.Context, documentID string, 
 func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
 	_, err := c.http.Delete(ctx, epDocuments+"/"+documentID)
 	return err
+}
+
+// ── connect requests (service-initiated; idea 2) ────────────────────────────
+
+// SendConnectRequest invites a person (by their share code) to connect to THIS
+// service. Wraps POST /api/company-data/connect-requests — auto-scoped to the
+// calling client's service. Fire-and-forget: the person accepts or rejects, and
+// the outcome reaches you only via the change feed / webhooks
+// (connection_request_accepted / connection_request_rejected). No crypto, no key
+// handling (the request carries no values). Returns the new request_id.
+func (c *Client) SendConnectRequest(ctx context.Context, shareCode string) (string, error) {
+	code := strings.TrimSpace(shareCode)
+	if code == "" {
+		return "", newConfigError("shareCode is required")
+	}
+	body, err := c.http.Post(ctx, epConnectReqs, map[string]any{"share_code": code})
+	if err != nil {
+		return "", err
+	}
+	if m, ok := body.(map[string]any); ok {
+		if rid, ok := m["request_id"].(string); ok && rid != "" {
+			return rid, nil
+		}
+	}
+	return "", NewApiError(0, "company_connections.request_failed", "no request_id in response")
 }
 
 // ── contract-flow runs (company side — the company is a bound party) ─────────

@@ -792,6 +792,88 @@ func TestDocumentVerbsHitRightPath(t *testing.T) {
 	}
 }
 
+// ── connect requests (service-initiated; idea 2) ────────────────────────────
+
+func TestSendConnectRequest(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+
+	var captured map[string]any
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
+		if w.method != "POST" || !strings.HasSuffix(w.path, "/company-data/connect-requests") {
+			t.Fatalf("unexpected write %s %s", w.method, w.path)
+		}
+		captured = w.jsonBody
+		return 201, `{"request_id":"req-1"}`
+	})
+
+	rid, err := c.SendConnectRequest(context.Background(), "  ABC123 ")
+	if err != nil {
+		t.Fatalf("SendConnectRequest: %v", err)
+	}
+	if rid != "req-1" {
+		t.Fatalf("request_id = %q", rid)
+	}
+	if captured["share_code"] != "ABC123" {
+		t.Fatalf("share_code = %#v (should be trimmed)", captured["share_code"])
+	}
+}
+
+func TestSendConnectRequestBlankFails(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, _ := newTestClientRW(t, cfg, noGET(t), func(writeReq) (int, string) {
+		t.Fatal("should not write for a blank share code")
+		return 0, ""
+	})
+	if _, err := c.SendConnectRequest(context.Background(), "   "); err == nil || !errors.Is(err, ErrConfig) {
+		t.Fatalf("expected ConfigError for a blank share code, got %v", err)
+	}
+}
+
+func TestChangeParsesConnectRequestOutcomeEvents(t *testing.T) {
+	noType := func(string) string { return "" }
+	echo := func(v any) (string, error) { return "", nil }
+
+	accepted, err := changeFromAPI(map[string]any{
+		"id": "c1", "event": "connection_request_accepted", "request_id": "req-9",
+		"person_user_id": "person-1", "share_code": "P1CODE", "at": "2026-06-23T10:00:00Z",
+	}, noType, echo, nil)
+	if err != nil {
+		t.Fatalf("changeFromAPI accepted: %v", err)
+	}
+	if accepted.Event != "connection_request_accepted" || accepted.RequestID != "req-9" {
+		t.Fatalf("accepted = %+v", accepted)
+	}
+	if accepted.PersonID != "person-1" || accepted.ShareCode != "P1CODE" {
+		t.Fatalf("accepted identity = %+v", accepted)
+	}
+	if accepted.Slug != "" || accepted.Value != nil {
+		t.Fatalf("accepted should carry no slot/value: %+v", accepted)
+	}
+
+	rejected, err := changeFromAPI(map[string]any{
+		"id": "c2", "event": "connection_request_rejected", "request_id": "req-8",
+		"person_user_id": "person-2",
+	}, noType, echo, nil)
+	if err != nil {
+		t.Fatalf("changeFromAPI rejected: %v", err)
+	}
+	if rejected.Event != "connection_request_rejected" || rejected.RequestID != "req-8" {
+		t.Fatalf("rejected = %+v", rejected)
+	}
+
+	created, err := changeFromAPI(map[string]any{
+		"id": "c3", "event": "connection_created", "person_user_id": "person-3",
+	}, noType, echo, nil)
+	if err != nil {
+		t.Fatalf("changeFromAPI created: %v", err)
+	}
+	if created.RequestID != "" {
+		t.Fatalf("request_id should be empty for unrelated events, got %q", created.RequestID)
+	}
+}
+
 func TestFromConfigBadPassphraseIsConfigError(t *testing.T) {
 	v := loadVector(t)
 	dir := t.TempDir()
