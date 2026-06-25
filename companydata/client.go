@@ -670,8 +670,11 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 	doc := documentFromAPI(docObj(created), c.decryptValue)
 	filePath := epDocuments + "/" + doc.ID + "/file"
 	if perPerson {
-		// Encrypt the file bytes (EVERY per-person doc): wrap the file envelope
-		// string, then send the wrapper JSON as bytes.
+		// EVERY per-person file doc is E2E-encrypted: wrap the file envelope
+		// string, encrypt it for the recipient, then POST {"value": "<wrapper
+		// JSON string>"}. The /file endpoint requires `value` to be a STRING
+		// (isValidEncryptedBlob), so the wrapper map is marshalled to a JSON
+		// string; the bare wrapper object was rejected (400).
 		envelope, err := json.Marshal(map[string]any{"file": dataURI(opts.FileBytes, opts.FileMime)})
 		if err != nil {
 			return Document{}, newConfigError("could not build file envelope: %v", err)
@@ -684,16 +687,16 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 		if err != nil {
 			return Document{}, newConfigError("could not marshal file wrapper: %v", err)
 		}
-		if _, err := c.http.PostRaw(ctx, filePath, wrapperBytes, "application/json"); err != nil {
+		if _, err := c.http.Post(ctx, filePath, map[string]any{"value": string(wrapperBytes)}); err != nil {
 			return Document{}, err
 		}
 	} else {
-		// Broadcast — raw plaintext bytes.
-		mime := opts.FileMime
-		if mime == "" {
-			mime = "application/octet-stream"
-		}
-		if _, err := c.http.PostRaw(ctx, filePath, opts.FileBytes, mime); err != nil {
+		// Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
+		// The API rejected the old raw-bytes body (documents.invalid_payload: file required).
+		if _, err := c.http.Post(ctx, filePath, map[string]any{
+			"file":          dataURI(opts.FileBytes, opts.FileMime),
+			"original_name": opts.Name,
+		}); err != nil {
 			return Document{}, err
 		}
 	}

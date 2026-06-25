@@ -643,7 +643,7 @@ func TestCreateDocumentInvalidKindFails(t *testing.T) {
 	}
 }
 
-func TestCreateDocumentFileBroadcastUploadsRawBytes(t *testing.T) {
+func TestCreateDocumentFileBroadcastUploadsFileDataURI(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	c, d := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
@@ -669,15 +669,28 @@ func TestCreateDocumentFileBroadcastUploadsRawBytes(t *testing.T) {
 	if !strings.HasSuffix(d.writes[0].path, "/documents") || d.writes[0].jsonBody["target"] != nil {
 		t.Fatalf("create body = %+v", d.writes[0])
 	}
-	if !strings.HasSuffix(d.writes[1].path, "/documents/f1/file") {
-		t.Fatalf("upload path = %s", d.writes[1].path)
+	upload := d.writes[1]
+	if !strings.HasSuffix(upload.path, "/documents/f1/file") {
+		t.Fatalf("upload path = %s", upload.path)
 	}
-	if string(d.writes[1].rawBody) != "%PDF-1.4 x" {
-		t.Fatalf("upload body = %q, want raw plaintext bytes", d.writes[1].rawBody)
+	if upload.contentType != "application/json" {
+		t.Fatalf("upload content-type = %q, want application/json", upload.contentType)
+	}
+	// Broadcast file → JSON {"file": "<base64 data URI>", "original_name": "<name>"}.
+	if upload.jsonBody["original_name"] != "C" {
+		t.Fatalf("original_name = %#v, want \"C\"", upload.jsonBody["original_name"])
+	}
+	fileURI, _ := upload.jsonBody["file"].(string)
+	if !strings.HasPrefix(fileURI, "data:application/pdf;base64,") {
+		t.Fatalf("file = %q, want a data URI", fileURI)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.SplitN(fileURI, ",", 2)[1])
+	if err != nil || string(decoded) != "%PDF-1.4 x" {
+		t.Fatalf("decoded file bytes = %q (%v), want original bytes", decoded, err)
 	}
 }
 
-func TestCreateDocumentFilePerPersonUploadsWrapperBytes(t *testing.T) {
+func TestCreateDocumentFilePerPersonUploadsValueWrapperString(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	spki := vectorPubSPKIB64(t, v)
@@ -702,16 +715,22 @@ func TestCreateDocumentFilePerPersonUploadsWrapperBytes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateDocument: %v", err)
 	}
-	upload := d.writes[1].rawBody
-	if len(upload) == 0 {
-		t.Fatal("expected an upload body")
+	upload := d.writes[1]
+	if upload.contentType != "application/json" {
+		t.Fatalf("upload content-type = %q, want application/json", upload.contentType)
+	}
+	// Per-person file → JSON {"value": "<wrapper JSON STRING>"}; the API requires
+	// value to be a STRING that decodes to the {_enc:1,k,iv,d} wrapper.
+	valStr, ok := upload.jsonBody["value"].(string)
+	if !ok || valStr == "" {
+		t.Fatalf("value = %#v, want a non-empty JSON string", upload.jsonBody["value"])
 	}
 	var wrapper map[string]any
-	if err := json.Unmarshal(upload, &wrapper); err != nil {
-		t.Fatalf("upload not JSON: %v", err)
+	if err := json.Unmarshal([]byte(valStr), &wrapper); err != nil {
+		t.Fatalf("value string not JSON: %v", err)
 	}
 	if !isEncWrapper(wrapper) {
-		t.Fatalf("upload must be a ciphertext wrapper, got %#v", wrapper)
+		t.Fatalf("value must be a ciphertext wrapper, got %#v", wrapper)
 	}
 	// decrypt → the {"file":"data:...base64,..."} envelope holding the original bytes
 	envJSON, err := Decrypt(wrapper, priv)
