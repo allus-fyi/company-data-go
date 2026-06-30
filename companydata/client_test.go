@@ -597,6 +597,67 @@ func TestCreateDocumentPerPersonEncryptsForBothPrivacy(t *testing.T) {
 	}
 }
 
+// A ShareCode-only target must be PER-PERSON (encrypted to that recipient), not
+// a broadcast. Regression for the bug where a share_code-only target fell
+// through to the plaintext all-recipients path.
+func TestCreateDocumentShareCodeOnlyIsPerPerson(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	spki := vectorPubSPKIB64(t, v)
+	priv, _ := LoadPrivateKey([]byte(v.EncryptedPrivateKeyPEM), v.Passphrase)
+
+	keysFetched := 0
+	getRoute := func(path string, _ map[string][]string) (int, string) {
+		if !strings.HasSuffix(path, "/api/keys/ABC123") {
+			t.Fatalf("unexpected GET %s", path)
+		}
+		keysFetched++
+		return 200, `{"public_key":"` + spki + `"}`
+	}
+	var captured map[string]any
+	writeRoute := func(w writeReq) (int, string) {
+		captured = w.jsonBody
+		valJSON, _ := json.Marshal(w.jsonBody["value"])
+		return 201, `{"id":"d3","kind":"document","name":"SC","description":null,` +
+			`"status":"active","payload_kind":"json","is_private":false,"value":` + string(valJSON) +
+			`,"metadata":null,"created_at":null,"updated_at":null}`
+	}
+	c, _ := newTestClientRW(t, cfg, getRoute, writeRoute)
+
+	doc, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "SC", PayloadKind: "json", JSONValue: map[string]any{"plan": "pro"},
+		ShareCode: "ABC123",
+	})
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	// (a) the recipient key was fetched
+	if keysFetched != 1 {
+		t.Fatalf("expected 1 key fetch, got %d", keysFetched)
+	}
+	// (b) target is {"share_code": ...}, not nil/broadcast
+	target, ok := captured["target"].(map[string]any)
+	if !ok || target["share_code"] != "ABC123" {
+		t.Fatalf("target = %#v, want {share_code: ABC123}", captured["target"])
+	}
+	// (c) value is the encrypted wrapper (_enc==1), not plaintext
+	val, ok := captured["value"].(map[string]any)
+	if !ok || !isEncWrapper(val) {
+		t.Fatalf("share_code-only value must be ENCRYPTED, got %#v", captured["value"])
+	}
+	pt, err := Decrypt(val, priv)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(pt), &got); err != nil || got["plan"] != "pro" {
+		t.Fatalf("decrypted = %q (%v)", pt, err)
+	}
+	if doc.ID != "d3" {
+		t.Fatalf("doc id = %q", doc.ID)
+	}
+}
+
 func TestCreateDocumentPrivateBroadcastFails(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)

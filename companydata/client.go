@@ -588,6 +588,10 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 		target = map[string]any{"connection_id": opts.ConnectionID}
 	case opts.PersonUserID != "":
 		target = map[string]any{"person_user_id": opts.PersonUserID}
+	case opts.ShareCode != "":
+		// A share_code target is PER-PERSON (encrypted to that recipient), not a
+		// broadcast. Without this it fell through to the plaintext all-recipients path.
+		target = map[string]any{"share_code": opts.ShareCode}
 	}
 	perPerson := target != nil
 
