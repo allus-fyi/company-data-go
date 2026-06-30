@@ -236,6 +236,7 @@ type Change struct {
 	DocumentID string // set on document_status_changed
 	Status     string // set on document_status_changed
 	Action     string // set on document_status_changed for a contract: signed | accepted | cancelled
+	Note       string // set on document_status_changed: the person's optional cancellation note
 	RequestID  string // set on connection_request_accepted | connection_request_rejected
 	At         *time.Time
 	Raw        map[string]any
@@ -264,11 +265,12 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		}
 	}
 
-	var documentID, status, action string
+	var documentID, status, action, note string
 	if event == "document_status_changed" {
 		documentID = asString(obj["document_id"])
 		status = asString(obj["status"])
 		action = asString(obj["action"])
+		note = asString(obj["note"])
 	}
 
 	var requestID string
@@ -288,6 +290,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		DocumentID: documentID,
 		Status:     status,
 		Action:     action,
+		Note:       note,
 		RequestID:  requestID,
 		At:         parseISO(asString(obj["at"])),
 		Raw:        obj,

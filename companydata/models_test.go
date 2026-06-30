@@ -304,6 +304,12 @@ func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
 			"person_user_id": "u-2", "action": "signed",
 			"document_id": "doc-7", "status": "active", "at": "2026-06-22T10:00:00Z",
 		},
+		map[string]any{
+			"id": "chg-cancel", "event": "document_status_changed",
+			"person_user_id": "u-2", "action": "cancelled",
+			"note": "Too expensive", "document_id": "doc-8", "status": "ended",
+			"at": "2026-06-22T11:00:00Z",
+		},
 	}}
 	changes, err := changesFromAPI(body, func(string) string { return "" }, decryptValue, nil)
 	if err != nil {
@@ -315,6 +321,13 @@ func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
 	}
 	if chg.DocumentID != "doc-7" || chg.Status != "active" {
 		t.Fatalf("document fields = %+v", chg)
+	}
+	if chg.Note != "" {
+		t.Fatalf("signed event should have no note, got %q", chg.Note)
+	}
+	cancel := changes[1]
+	if cancel.Action != "cancelled" || cancel.Note != "Too expensive" {
+		t.Fatalf("cancelled event action/note = %q/%q", cancel.Action, cancel.Note)
 	}
 }
 
