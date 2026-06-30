@@ -677,8 +677,9 @@ func TestCreateDocumentFileBroadcastUploadsFileDataURI(t *testing.T) {
 		t.Fatalf("upload content-type = %q, want application/json", upload.contentType)
 	}
 	// Broadcast file → JSON {"file": "<base64 data URI>", "original_name": "<name>"}.
-	if upload.jsonBody["original_name"] != "C" {
-		t.Fatalf("original_name = %#v, want \"C\"", upload.jsonBody["original_name"])
+	// Name "C" has no extension, so original_name derives ".pdf" from FileMime.
+	if upload.jsonBody["original_name"] != "C.pdf" {
+		t.Fatalf("original_name = %#v, want \"C.pdf\"", upload.jsonBody["original_name"])
 	}
 	fileURI, _ := upload.jsonBody["file"].(string)
 	if !strings.HasPrefix(fileURI, "data:application/pdf;base64,") {
@@ -687,6 +688,27 @@ func TestCreateDocumentFileBroadcastUploadsFileDataURI(t *testing.T) {
 	decoded, err := base64.StdEncoding.DecodeString(strings.SplitN(fileURI, ",", 2)[1])
 	if err != nil || string(decoded) != "%PDF-1.4 x" {
 		t.Fatalf("decoded file bytes = %q (%v), want original bytes", decoded, err)
+	}
+}
+
+func TestBroadcastOriginalName(t *testing.T) {
+	cases := []struct {
+		desc, fileName, name, fileMime, want string
+	}{
+		{"extensionless name derives from mime", "", "Price list", "application/pdf", "Price list.pdf"},
+		{"name already has allowed extension is unchanged", "", "report.pdf", "application/pdf", "report.pdf"},
+		{"allowed extension check is case-insensitive", "", "report.PDF", "application/pdf", "report.PDF"},
+		{"explicit FileName overrides", "exact.pdf", "Price list", "application/pdf", "exact.pdf"},
+		{"unknown mime keeps bare name", "", "Price list", "application/zip", "Price list"},
+		{"non-allowed extension derives from mime", "", "Price list.txt", "image/png", "Price list.txt.png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := broadcastOriginalName(tc.fileName, tc.name, tc.fileMime); got != tc.want {
+				t.Fatalf("broadcastOriginalName(%q, %q, %q) = %q, want %q",
+					tc.fileName, tc.name, tc.fileMime, got, tc.want)
+			}
+		})
 	}
 }
 
