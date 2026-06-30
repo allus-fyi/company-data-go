@@ -553,6 +553,10 @@ type CreateDocumentOptions struct {
 	JSONValue any
 	FileBytes []byte
 	FileMime  string
+	// FileName, when set, is sent as original_name for a broadcast file upload.
+	// Otherwise original_name is derived from Name (kept if it already ends in an
+	// allowed extension, else the extension from FileMime is appended).
+	FileName string
 
 	// Contract flags. Either one (or Kind agreement|subscription) makes this a
 	// contract, which is ALWAYS per-person → it must target one connected person.
@@ -695,7 +699,7 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 		// The API rejected the old raw-bytes body (documents.invalid_payload: file required).
 		if _, err := c.http.Post(ctx, filePath, map[string]any{
 			"file":          dataURI(opts.FileBytes, opts.FileMime),
-			"original_name": opts.Name,
+			"original_name": broadcastOriginalName(opts.FileName, opts.Name, opts.FileMime),
 		}); err != nil {
 			return Document{}, err
 		}
@@ -1267,6 +1271,45 @@ func partyOf(definition map[string]any, nodeKey string) string {
 		return asString(n["party"])
 	}
 	return ""
+}
+
+// mimeToExt maps a document MIME type to the file extension the API expects.
+var mimeToExt = map[string]string{
+	"application/pdf":    "pdf",
+	"application/msword": "doc",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+	"application/vnd.ms-excel": "xls",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+	"image/png":  "png",
+	"image/jpeg": "jpg",
+}
+
+// allowedDocExts is the API's allowlist of document file extensions.
+var allowedDocExts = map[string]bool{
+	"pdf": true, "doc": true, "docx": true, "xls": true,
+	"xlsx": true, "png": true, "jpg": true, "jpeg": true,
+}
+
+// broadcastOriginalName computes original_name for a broadcast file upload. The
+// API validates its extension against an allowlist, but name is a human label
+// that often has no extension. Use an explicit fileName; else keep name if it
+// already ends in an allowed extension; else append the extension derived from
+// fileMime (so "Price list" + application/pdf → "Price list.pdf").
+func broadcastOriginalName(fileName, name, fileMime string) string {
+	if fileName != "" {
+		return fileName
+	}
+	ext := ""
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		ext = strings.ToLower(name[i+1:])
+	}
+	if allowedDocExts[ext] {
+		return name
+	}
+	if derived := mimeToExt[strings.ToLower(fileMime)]; derived != "" {
+		return name + "." + derived
+	}
+	return name
 }
 
 // dataURI builds a data:<mime>;base64,<…> URI for the per-person file envelope.
