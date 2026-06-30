@@ -691,6 +691,50 @@ func TestCreateDocumentFileBroadcastUploadsFileDataURI(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentFileUploadFailureDeletesDanglingDoc(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	c, d := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
+		if strings.HasSuffix(w.path, "/documents") && w.method == "POST" {
+			// The create POST succeeds, leaving a {"_pending":true} file doc.
+			return 201, `{"id":"f9","kind":"document","name":"C","description":null,` +
+				`"status":"active","payload_kind":"file","is_private":false,"value":{"_pending":true},` +
+				`"metadata":null,"created_at":null,"updated_at":null}`
+		}
+		if strings.HasSuffix(w.path, "/documents/f9/file") {
+			// The byte upload fails — leaving the just-created doc dangling.
+			return 500, `{"error_key":"documents.upload_failed","message":"boom"}`
+		}
+		if w.method == "DELETE" && strings.HasSuffix(w.path, "/documents/f9") {
+			return 200, `{}`
+		}
+		t.Fatalf("unexpected write %s %s", w.method, w.path)
+		return 0, ""
+	})
+
+	_, err := c.CreateDocument(context.Background(), CreateDocumentOptions{
+		Name: "C", PayloadKind: "file", FileBytes: []byte("%PDF-1.4 x"), FileMime: "application/pdf",
+	})
+	if err == nil {
+		t.Fatal("CreateDocument should return the upload error")
+	}
+	// The ORIGINAL upload error must be returned (the API error, not a cleanup error).
+	var apiErr *ApiError
+	if !errors.As(err, &apiErr) || apiErr.ErrorKey != "documents.upload_failed" {
+		t.Fatalf("err = %v, want the upload ApiError documents.upload_failed", err)
+	}
+	// And the dangling doc must have been best-effort deleted.
+	var deleted bool
+	for _, w := range d.writes {
+		if w.method == "DELETE" && strings.HasSuffix(w.path, "/documents/f9") {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatalf("expected a DELETE to /documents/f9, got writes %+v", d.writes)
+	}
+}
+
 func TestBroadcastOriginalName(t *testing.T) {
 	cases := []struct {
 		desc, fileName, name, fileMime, want string

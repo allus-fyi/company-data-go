@@ -673,6 +673,7 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 	}
 	doc := documentFromAPI(docObj(created), c.decryptValue)
 	filePath := epDocuments + "/" + doc.ID + "/file"
+	var uploadErr error
 	if perPerson {
 		// EVERY per-person file doc is E2E-encrypted: wrap the file envelope
 		// string, encrypt it for the recipient, then POST {"value": "<wrapper
@@ -691,18 +692,22 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 		if err != nil {
 			return Document{}, newConfigError("could not marshal file wrapper: %v", err)
 		}
-		if _, err := c.http.Post(ctx, filePath, map[string]any{"value": string(wrapperBytes)}); err != nil {
-			return Document{}, err
-		}
+		_, uploadErr = c.http.Post(ctx, filePath, map[string]any{"value": string(wrapperBytes)})
 	} else {
 		// Broadcast — plaintext: POST {"file": "<base64 data URI>", "original_name"}.
 		// The API rejected the old raw-bytes body (documents.invalid_payload: file required).
-		if _, err := c.http.Post(ctx, filePath, map[string]any{
+		_, uploadErr = c.http.Post(ctx, filePath, map[string]any{
 			"file":          dataURI(opts.FileBytes, opts.FileMime),
 			"original_name": broadcastOriginalName(opts.FileName, opts.Name, opts.FileMime),
-		}); err != nil {
-			return Document{}, err
-		}
+		})
+	}
+	if uploadErr != nil {
+		// The metadata row exists before the bytes are uploaded; if the upload
+		// fails, best-effort delete it so a failed CreateDocument leaves no
+		// dangling {"_pending": true} document. The cleanup error is swallowed
+		// and the ORIGINAL upload error is returned.
+		_ = c.DeleteDocument(ctx, doc.ID)
+		return Document{}, uploadErr
 	}
 	return doc, nil
 }
