@@ -240,6 +240,7 @@ type Change struct {
 	Method        string // set on a signature: biometric | twofa | email | custodian
 	ContentSHA256 string // set on a signature: SHA-256 of the signed content
 	SignedAt      string // set on a signature: ISO timestamp the signature was recorded
+	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
 	RequestID  string // set on connection_request_accepted | connection_request_rejected
 	At         *time.Time
 	Raw        map[string]any
@@ -268,7 +269,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		}
 	}
 
-	var documentID, status, action, note, method, contentSHA256, signedAt string
+	var documentID, status, action, note, method, contentSHA256, signedAt, cancelEffectiveDate string
 	if event == "document_status_changed" {
 		documentID = asString(obj["document_id"])
 		status = asString(obj["status"])
@@ -277,6 +278,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		method = asString(obj["method"])
 		contentSHA256 = asString(obj["content_sha256"])
 		signedAt = asString(obj["signed_at"])
+		cancelEffectiveDate = asString(obj["cancel_effective_date"])
 	}
 
 	var requestID string
@@ -300,6 +302,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		Method:        method,
 		ContentSHA256: contentSHA256,
 		SignedAt:      signedAt,
+		CancelEffectiveDate: cancelEffectiveDate,
 		RequestID:  requestID,
 		At:         parseISO(asString(obj["at"])),
 		Raw:        obj,
