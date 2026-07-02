@@ -348,6 +348,7 @@ type FlowRun struct {
 	CurrentNode   string
 	DocumentID    string
 	OutputMode    string
+	ReferenceDate string // optional YYYY-MM-DD pinned "today" for constants; "" when absent
 	Definition    map[string]any
 	Answers       []map[string]any
 	CreatedAt     *time.Time
@@ -413,6 +414,7 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 		CurrentNode:   asString(obj["current_node"]),
 		DocumentID:    asString(obj["document_id"]),
 		OutputMode:    outputMode,
+		ReferenceDate: asString(obj["reference_date"]),
 		Definition:    def,
 		Answers:       answers,
 		CreatedAt:     parseISO(asString(obj["created_at"])),
