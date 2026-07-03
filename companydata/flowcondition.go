@@ -78,6 +78,12 @@ func EvaluateCondition(condition any, answers map[string]any) bool {
 		return flowInList(target, val)
 	case "nin":
 		return !flowInList(target, val)
+	case "contains":
+		// #102 substring op (text): needs an answer (like in). Case-sensitive; empty needle contained.
+		return flowAnswered(val) && strings.Contains(flowStr(val), flowStr(target))
+	case "not_contains":
+		// true when unanswered (like nin)
+		return !(flowAnswered(val) && strings.Contains(flowStr(val), flowStr(target)))
 	}
 
 	if !flowAnswered(val) {

@@ -52,8 +52,8 @@ func loadFlowConditionVector(t *testing.T) []flowCondCase {
 
 func TestFlowConditionVector(t *testing.T) {
 	cases := loadFlowConditionVector(t)
-	if len(cases) != 27 {
-		t.Fatalf("expected 27 vector cases, got %d", len(cases))
+	if len(cases) != 35 {
+		t.Fatalf("expected 35 vector cases, got %d", len(cases))
 	}
 	for _, c := range cases {
 		c := c

@@ -153,12 +153,12 @@ func keysOf(m map[string]any) []string {
 }
 
 // TestEvaluateFlowConditionVector: the per-call-site wrapper must preserve plain
-// condition semantics — running the 27-case condition vector through
+// condition semantics — running the 35-case condition vector through
 // EvaluateFlowCondition with no constants must match EvaluateCondition exactly.
 func TestEvaluateFlowConditionVector(t *testing.T) {
 	cases := loadFlowConditionVector(t)
-	if len(cases) != 27 {
-		t.Fatalf("expected 27 vector cases, got %d", len(cases))
+	if len(cases) != 35 {
+		t.Fatalf("expected 35 vector cases, got %d", len(cases))
 	}
 	for _, c := range cases {
 		c := c
