@@ -438,7 +438,7 @@ func TestConfigRejectsTwoAuthMethods(t *testing.T) {
 		r.WebhookSecret = "h"
 		r.WebhookBearerToken = "b"
 	})
-	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(raw, "service"); err == nil || !errors.Is(err, ErrConfig) {
 		t.Fatalf("expected ErrConfig for two methods, got %v", err)
 	}
 }
@@ -449,7 +449,7 @@ func TestConfigRejectsBearerPlusNone(t *testing.T) {
 		r.WebhookBearerToken = "b"
 		r.WebhookAuthNone = true
 	})
-	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(raw, "service"); err == nil || !errors.Is(err, ErrConfig) {
 		t.Fatalf("expected ErrConfig for bearer+none, got %v", err)
 	}
 }
@@ -457,7 +457,7 @@ func TestConfigRejectsBearerPlusNone(t *testing.T) {
 func TestConfigBasicRequiresBothFields(t *testing.T) {
 	v := loadVector(t)
 	raw := fullRaw(t, v, func(r *rawConfig) { r.WebhookBasic = json.RawMessage(`{"username":"u"}`) })
-	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(raw, "service"); err == nil || !errors.Is(err, ErrConfig) {
 		t.Fatalf("expected ErrConfig for basic missing password, got %v", err)
 	}
 }
@@ -465,7 +465,7 @@ func TestConfigBasicRequiresBothFields(t *testing.T) {
 func TestConfigHeaderRequiresBothFields(t *testing.T) {
 	v := loadVector(t)
 	raw := fullRaw(t, v, func(r *rawConfig) { r.WebhookHeader = json.RawMessage(`{"name":"X-H"}`) })
-	if _, err := buildConfig(raw); err == nil || !errors.Is(err, ErrConfig) {
+	if _, err := buildConfig(raw, "service"); err == nil || !errors.Is(err, ErrConfig) {
 		t.Fatalf("expected ErrConfig for header missing value, got %v", err)
 	}
 }
@@ -473,7 +473,7 @@ func TestConfigHeaderRequiresBothFields(t *testing.T) {
 func TestConfigSingleMethodOKAndMethodName(t *testing.T) {
 	v := loadVector(t)
 
-	cfg, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookBearerToken = "b" }))
+	cfg, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookBearerToken = "b" }), "service")
 	if err != nil {
 		t.Fatalf("buildConfig bearer: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestConfigSingleMethodOKAndMethodName(t *testing.T) {
 		t.Fatalf("method = %q, want bearer", cfg.WebhookAuthMethod())
 	}
 
-	cfg2, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookSecret = "h" }))
+	cfg2, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookSecret = "h" }), "service")
 	if err != nil {
 		t.Fatalf("buildConfig hmac: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestConfigSingleMethodOKAndMethodName(t *testing.T) {
 		t.Fatalf("method = %q, want hmac", cfg2.WebhookAuthMethod())
 	}
 
-	cfg3, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookAuthNone = true }))
+	cfg3, err := buildConfig(fullRaw(t, v, func(r *rawConfig) { r.WebhookAuthNone = true }), "service")
 	if err != nil {
 		t.Fatalf("buildConfig none: %v", err)
 	}

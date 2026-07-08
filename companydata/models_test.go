@@ -251,6 +251,59 @@ func TestChangeIncludesShareCode(t *testing.T) {
 	}
 }
 
+func TestChangeIncludesCustomerType(t *testing.T) {
+	// B2B (#163): a change event carries customer_type; absent -> "".
+	body := map[string]any{"changes": []any{
+		map[string]any{"id": "chg-1", "event": "connection_created",
+			"person_user_id": "co-1", "customer_type": "company", "at": "2026-07-07T12:00:00Z"},
+		map[string]any{"id": "chg-2", "event": "connection_created",
+			"person_user_id": "person-2", "at": "2026-07-07T12:00:00Z"},
+	}}
+	changes, err := changesFromAPI(body, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil)
+	if err != nil {
+		t.Fatalf("changesFromAPI: %v", err)
+	}
+	if changes[0].CustomerType != "company" {
+		t.Fatalf("change0 CustomerType = %q, want company", changes[0].CustomerType)
+	}
+	if changes[1].CustomerType != "" {
+		t.Fatalf("change1 CustomerType = %q, want empty", changes[1].CustomerType)
+	}
+}
+
+func TestRequestFieldIncludesAudience(t *testing.T) {
+	// B2B (#163): a request row carries audience; absent -> "".
+	body := map[string]any{"request_fields": []any{
+		map[string]any{"slug": "billing", "label": "Billing", "type": "email", "audience": "company"},
+		map[string]any{"slug": "ref", "label": "Ref", "type": "text"},
+	}}
+	fields := requestFieldsFromAPI(body)
+	if fields[0].Audience != "company" {
+		t.Fatalf("field0 Audience = %q, want company", fields[0].Audience)
+	}
+	if fields[1].Audience != "" {
+		t.Fatalf("field1 Audience = %q, want empty", fields[1].Audience)
+	}
+}
+
+func TestConnectionIncludesCustomerTypeAndShareCode(t *testing.T) {
+	// B2B (#163): a connection carries customer_type + share_code (both may be empty).
+	obj := map[string]any{"connection_id": "c-1", "user_id": "co-9",
+		"customer_type": "company", "share_code": "PARTNER", "values": map[string]any{}}
+	conn, err := connectionFromAPI(obj, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil, nil)
+	if err != nil {
+		t.Fatalf("connectionFromAPI: %v", err)
+	}
+	if conn.CustomerType != "company" || conn.ShareCode != "PARTNER" {
+		t.Fatalf("conn CustomerType/ShareCode = %q/%q, want company/PARTNER", conn.CustomerType, conn.ShareCode)
+	}
+	bare, _ := connectionFromAPI(map[string]any{"connection_id": "c-2", "user_id": "p-1", "values": map[string]any{}},
+		func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil, nil)
+	if bare.CustomerType != "" || bare.ShareCode != "" {
+		t.Fatalf("bare CustomerType/ShareCode = %q/%q, want empty", bare.CustomerType, bare.ShareCode)
+	}
+}
+
 func TestLogEntriesParsed(t *testing.T) {
 	body := map[string]any{"total": 2, "items": []any{
 		map[string]any{"type": "email", "message": "alert", "metadata": map[string]any{"days": 3}, "created_at": "2026-06-17T06:00:00Z"},

@@ -61,7 +61,10 @@ type RequestField struct {
 	Type      string
 	OneTime   bool
 	Mandatory bool
-	Raw       map[string]any
+	// Audience: which customer TYPE this row applies to — "person" | "company" |
+	// "both" (B2B, #163). Empty on an older API.
+	Audience string
+	Raw      map[string]any
 }
 
 func requestFieldFromAPI(obj map[string]any) RequestField {
@@ -72,7 +75,8 @@ func requestFieldFromAPI(obj map[string]any) RequestField {
 		OneTime: coerceBool(obj["one_time"]),
 		Mandatory: coerceBool(obj["mandatory_provide"]) ||
 			coerceBool(obj["mandatory_connected"]),
-		Raw: obj,
+		Audience: asString(obj["audience"]),
+		Raw:      obj,
 	}
 }
 
@@ -174,7 +178,13 @@ type Connection struct {
 	DisplayName string
 	ConnectedAt *time.Time
 	Values      map[string]Value
-	Raw         map[string]any
+	// CustomerType: the connected customer's TYPE — "person" | "company" (B2B,
+	// #163). Empty on an older API. PersonID keeps its name (wire person_user_id)
+	// but semantically holds the customer's user id.
+	CustomerType string
+	// ShareCode: the customer's profile share code (previously only via Raw).
+	ShareCode string
+	Raw       map[string]any
 }
 
 // connectionFromAPI builds a Connection from a hardened connectionDetail (or
@@ -206,12 +216,14 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptVal
 	}
 
 	return Connection{
-		ID:          connID,
-		PersonID:    personID,
-		DisplayName: displayName,
-		ConnectedAt: connectedAt,
-		Values:      values,
-		Raw:         obj,
+		ID:           connID,
+		PersonID:     personID,
+		DisplayName:  displayName,
+		ConnectedAt:  connectedAt,
+		Values:       values,
+		CustomerType: firstString(obj["customer_type"], identity["customer_type"]),
+		ShareCode:    firstString(obj["share_code"], identity["share_code"]),
+		Raw:          obj,
 	}, nil
 }
 
@@ -225,25 +237,26 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptVal
 // events carry no slot/value). HasLive distinguishes "live was absent" from
 // "live was false".
 type Change struct {
-	ID         string
-	Event      string
-	PersonID   string
-	ShareCode  string // the person's profile share code (every event; may be empty)
-	Slug       string
-	Value      any
-	Live       bool
-	HasLive    bool
-	DocumentID string // set on document_status_changed
-	Status     string // set on document_status_changed
-	Action     string // set on document_status_changed for a contract: signed | accepted | cancelled
-	Note       string // set on document_status_changed: the person's optional cancellation note
-	Method        string // set on a signature: biometric | twofa | email | custodian
-	ContentSHA256 string // set on a signature: SHA-256 of the signed content
-	SignedAt      string // set on a signature: ISO timestamp the signature was recorded
+	ID                  string
+	Event               string
+	PersonID            string
+	ShareCode           string // the person's profile share code (every event; may be empty)
+	CustomerType        string // "person" | "company" (B2B, #163); empty on an older API
+	Slug                string
+	Value               any
+	Live                bool
+	HasLive             bool
+	DocumentID          string // set on document_status_changed
+	Status              string // set on document_status_changed
+	Action              string // set on document_status_changed for a contract: signed | accepted | cancelled
+	Note                string // set on document_status_changed: the person's optional cancellation note
+	Method              string // set on a signature: biometric | twofa | email | custodian
+	ContentSHA256       string // set on a signature: SHA-256 of the signed content
+	SignedAt            string // set on a signature: ISO timestamp the signature was recorded
 	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
-	RequestID  string // set on connection_request_accepted | connection_request_rejected
-	At         *time.Time
-	Raw        map[string]any
+	RequestID           string // set on connection_request_accepted | connection_request_rejected
+	At                  *time.Time
+	Raw                 map[string]any
 }
 
 func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
@@ -287,25 +300,26 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 	}
 
 	return Change{
-		ID:         asString(obj["id"]),
-		Event:      event,
-		PersonID:   firstString(obj["person_user_id"], obj["person_id"]),
-		ShareCode:  asString(obj["share_code"]),
-		Slug:       slug,
-		Value:      value,
-		Live:       live,
-		HasLive:    hasLive,
-		DocumentID: documentID,
-		Status:     status,
-		Action:     action,
-		Note:       note,
-		Method:        method,
-		ContentSHA256: contentSHA256,
-		SignedAt:      signedAt,
+		ID:                  asString(obj["id"]),
+		Event:               event,
+		PersonID:            firstString(obj["person_user_id"], obj["person_id"]),
+		ShareCode:           asString(obj["share_code"]),
+		CustomerType:        asString(obj["customer_type"]),
+		Slug:                slug,
+		Value:               value,
+		Live:                live,
+		HasLive:             hasLive,
+		DocumentID:          documentID,
+		Status:              status,
+		Action:              action,
+		Note:                note,
+		Method:              method,
+		ContentSHA256:       contentSHA256,
+		SignedAt:            signedAt,
 		CancelEffectiveDate: cancelEffectiveDate,
-		RequestID:  requestID,
-		At:         parseISO(asString(obj["at"])),
-		Raw:        obj,
+		RequestID:           requestID,
+		At:                  parseISO(asString(obj["at"])),
+		Raw:                 obj,
 	}, nil
 }
 

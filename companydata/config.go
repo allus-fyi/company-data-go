@@ -24,16 +24,18 @@ const singleWebhookKey = "__single__"
 
 // Env-var names that override the corresponding Config field.
 const (
-	envAPIURL            = "ALLUS_API_URL"
-	envClientID          = "ALLUS_CLIENT_ID"
-	envClientSecret      = "ALLUS_CLIENT_SECRET"
-	envServicePrivateKey = "ALLUS_SERVICE_PRIVATE_KEY"
-	envKeyPassphrase     = "ALLUS_KEY_PASSPHRASE"
-	envAccountPrivateKey = "ALLUS_ACCOUNT_PRIVATE_KEY"
-	envAccountPassphrase = "ALLUS_ACCOUNT_PASSPHRASE"
-	envCacheDir          = "ALLUS_CACHE_DIR"
-	envFormat            = "ALLUS_FORMAT"
-	envWebhookSecret     = "ALLUS_WEBHOOK_SECRET"
+	envAPIURL               = "ALLUS_API_URL"
+	envClientID             = "ALLUS_CLIENT_ID"
+	envClientSecret         = "ALLUS_CLIENT_SECRET"
+	envServicePrivateKey    = "ALLUS_SERVICE_PRIVATE_KEY"
+	envKeyPassphrase        = "ALLUS_KEY_PASSPHRASE"
+	envCustomerClientID     = "ALLUS_CUSTOMER_CLIENT_ID"
+	envCustomerClientSecret = "ALLUS_CUSTOMER_CLIENT_SECRET"
+	envAccountPrivateKey    = "ALLUS_ACCOUNT_PRIVATE_KEY"
+	envAccountPassphrase    = "ALLUS_ACCOUNT_PASSPHRASE"
+	envCacheDir             = "ALLUS_CACHE_DIR"
+	envFormat               = "ALLUS_FORMAT"
+	envWebhookSecret        = "ALLUS_WEBHOOK_SECRET"
 )
 
 // Config is the whole SDK configuration. Keys live here and
@@ -44,6 +46,10 @@ type Config struct {
 	ClientSecret      string `json:"client_secret"`
 	ServicePrivateKey string `json:"service_private_key"` // path to the OpenSSL-encrypted PKCS#8 PEM
 	KeyPassphrase     string `json:"key_passphrase"`      // decrypts the service PEM in memory
+
+	// Customer role (#168): the acct_* client pair the connecting company uses.
+	CustomerClientID     string `json:"customer_client_id,omitempty"`
+	CustomerClientSecret string `json:"customer_client_secret,omitempty"`
 
 	// Optional — only needed if you receive encrypt_payload webhooks.
 	AccountPrivateKey string `json:"account_private_key,omitempty"`
@@ -91,21 +97,23 @@ type WebhookHeaderAuth struct {
 // present-but-malformed object can be told apart (the Python reference
 // distinguishes data.get("webhook_basic") is None from a bad shape).
 type rawConfig struct {
-	APIURL             string            `json:"api_url"`
-	ClientID           string            `json:"client_id"`
-	ClientSecret       string            `json:"client_secret"`
-	ServicePrivateKey  string            `json:"service_private_key"`
-	KeyPassphrase      string            `json:"key_passphrase"`
-	AccountPrivateKey  string            `json:"account_private_key"`
-	AccountPassphrase  string            `json:"account_passphrase"`
-	Webhooks           map[string]string `json:"webhooks"`
-	WebhookSecret      string            `json:"webhook_secret"`
-	WebhookBearerToken string            `json:"webhook_bearer_token"`
-	WebhookBasic       json.RawMessage   `json:"webhook_basic"`
-	WebhookHeader      json.RawMessage   `json:"webhook_header"`
-	WebhookAuthNone    bool              `json:"webhook_auth_none"`
-	CacheDir           string            `json:"cache_dir"`
-	Format             string            `json:"format"`
+	APIURL               string            `json:"api_url"`
+	ClientID             string            `json:"client_id"`
+	ClientSecret         string            `json:"client_secret"`
+	ServicePrivateKey    string            `json:"service_private_key"`
+	KeyPassphrase        string            `json:"key_passphrase"`
+	CustomerClientID     string            `json:"customer_client_id"`
+	CustomerClientSecret string            `json:"customer_client_secret"`
+	AccountPrivateKey    string            `json:"account_private_key"`
+	AccountPassphrase    string            `json:"account_passphrase"`
+	Webhooks             map[string]string `json:"webhooks"`
+	WebhookSecret        string            `json:"webhook_secret"`
+	WebhookBearerToken   string            `json:"webhook_bearer_token"`
+	WebhookBasic         json.RawMessage   `json:"webhook_basic"`
+	WebhookHeader        json.RawMessage   `json:"webhook_header"`
+	WebhookAuthNone      bool              `json:"webhook_auth_none"`
+	CacheDir             string            `json:"cache_dir"`
+	Format               string            `json:"format"`
 }
 
 // ConfigFromFile loads a Config from a JSON file; env vars override file
@@ -123,26 +131,50 @@ func ConfigFromFile(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, newConfigError("config file is not valid JSON: %s: %v", path, err)
 	}
-	return buildConfig(&raw)
+	return buildConfig(&raw, "service")
 }
 
 // ConfigFromEnv builds a Config entirely from ALLUS_* env vars.
 func ConfigFromEnv() (*Config, error) {
-	return buildConfig(&rawConfig{})
+	return buildConfig(&rawConfig{}, "service")
+}
+
+// ConfigFromCustomerFile loads a CUSTOMER-role config (#168) — requires the acct_*
+// pair + account key, not the service PEM. Env vars override file values.
+func ConfigFromCustomerFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, newConfigError("config file not found: %s", path)
+		}
+		return nil, wrapConfigError(err, "could not read config file: %s", path)
+	}
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, newConfigError("config file is not valid JSON: %s: %v", path, err)
+	}
+	return buildConfig(&raw, "customer")
+}
+
+// ConfigFromCustomerEnv builds a CUSTOMER-role config entirely from ALLUS_* env vars.
+func ConfigFromCustomerEnv() (*Config, error) {
+	return buildConfig(&rawConfig{}, "customer")
 }
 
 // buildConfig merges file values with env overrides, validates, and constructs.
-func buildConfig(raw *rawConfig) (*Config, error) {
+func buildConfig(raw *rawConfig, role string) (*Config, error) {
 	cfg := &Config{
-		APIURL:            firstNonEmpty(os.Getenv(envAPIURL), raw.APIURL),
-		ClientID:          firstNonEmpty(os.Getenv(envClientID), raw.ClientID),
-		ClientSecret:      firstNonEmpty(os.Getenv(envClientSecret), raw.ClientSecret),
-		ServicePrivateKey: firstNonEmpty(os.Getenv(envServicePrivateKey), raw.ServicePrivateKey),
-		KeyPassphrase:     firstNonEmpty(os.Getenv(envKeyPassphrase), raw.KeyPassphrase),
-		AccountPrivateKey: firstNonEmpty(os.Getenv(envAccountPrivateKey), raw.AccountPrivateKey),
-		AccountPassphrase: firstNonEmpty(os.Getenv(envAccountPassphrase), raw.AccountPassphrase),
-		CacheDir:          firstNonEmpty(os.Getenv(envCacheDir), raw.CacheDir),
-		Format:            firstNonEmpty(os.Getenv(envFormat), raw.Format),
+		APIURL:               firstNonEmpty(os.Getenv(envAPIURL), raw.APIURL),
+		ClientID:             firstNonEmpty(os.Getenv(envClientID), raw.ClientID),
+		ClientSecret:         firstNonEmpty(os.Getenv(envClientSecret), raw.ClientSecret),
+		ServicePrivateKey:    firstNonEmpty(os.Getenv(envServicePrivateKey), raw.ServicePrivateKey),
+		KeyPassphrase:        firstNonEmpty(os.Getenv(envKeyPassphrase), raw.KeyPassphrase),
+		CustomerClientID:     firstNonEmpty(os.Getenv(envCustomerClientID), raw.CustomerClientID),
+		CustomerClientSecret: firstNonEmpty(os.Getenv(envCustomerClientSecret), raw.CustomerClientSecret),
+		AccountPrivateKey:    firstNonEmpty(os.Getenv(envAccountPrivateKey), raw.AccountPrivateKey),
+		AccountPassphrase:    firstNonEmpty(os.Getenv(envAccountPassphrase), raw.AccountPassphrase),
+		CacheDir:             firstNonEmpty(os.Getenv(envCacheDir), raw.CacheDir),
+		Format:               firstNonEmpty(os.Getenv(envFormat), raw.Format),
 	}
 
 	// Webhook secrets: the "webhooks" map plus the flat "webhook_secret"
@@ -219,9 +251,8 @@ func buildConfig(raw *rawConfig) (*Config, error) {
 		}
 	}
 
-	// Required fields (fail fast).
-	var missing []string
-	for _, f := range []struct {
+	// Required fields (fail fast) — role-dependent.
+	required := []struct {
 		name string
 		val  string
 	}{
@@ -230,7 +261,20 @@ func buildConfig(raw *rawConfig) (*Config, error) {
 		{"client_secret", cfg.ClientSecret},
 		{"service_private_key", cfg.ServicePrivateKey},
 		{"key_passphrase", cfg.KeyPassphrase},
-	} {
+	}
+	if role == "customer" {
+		required = []struct {
+			name string
+			val  string
+		}{
+			{"api_url", cfg.APIURL},
+			{"customer_client_id", cfg.CustomerClientID},
+			{"customer_client_secret", cfg.CustomerClientSecret},
+			{"account_private_key", cfg.AccountPrivateKey},
+		}
+	}
+	var missing []string
+	for _, f := range required {
 		if f.val == "" {
 			missing = append(missing, f.name)
 		}
