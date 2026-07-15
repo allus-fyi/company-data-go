@@ -612,3 +612,14 @@ binary decrypt → envelope → inner bytes), the crash-safe pump
 (persist-before-deliver, replay, dead-letter, monotonic attempt counts,
 never-resurrect), and the webhook helpers (HMAC verify, JSON/XML parse, and the
 account-key OAEP-SHA1 envelope).
+
+## Sign in with allme (OAuth, #195)
+
+```go
+oauth, _ := companydata.OAuthClientFromConfig("idw-config.json")
+url, _ := oauth.AuthorizeURL("signin", &companydata.AuthorizeURLOptions{State: state, CodeChallenge: ch})
+// ...user approves; your redirect receives ?code=...
+res, _ := oauth.CompleteSignIn(code, verifier) // res.User, res.Mode, res.Values (plaintext)
+```
+
+Modes: `signin` | `one_time` (claim values decrypted for you) | `connect`. `PollResult(state, timeout, interval)` drives the detached mode.

@@ -33,6 +33,11 @@ const (
 	envCustomerClientSecret = "ALLUS_CUSTOMER_CLIENT_SECRET"
 	envAccountPrivateKey    = "ALLUS_ACCOUNT_PRIVATE_KEY"
 	envAccountPassphrase    = "ALLUS_ACCOUNT_PASSPHRASE"
+	envOAuthClientID        = "ALLUS_OAUTH_CLIENT_ID"
+	envOAuthRedirectURI     = "ALLUS_OAUTH_REDIRECT_URI"
+	envOAuthClientSecret    = "ALLUS_OAUTH_CLIENT_SECRET"
+	envOAuthPrivateKey      = "ALLUS_OAUTH_PRIVATE_KEY"
+	envOAuthKeyPassphrase   = "ALLUS_OAUTH_KEY_PASSPHRASE"
 	envCacheDir             = "ALLUS_CACHE_DIR"
 	envFormat               = "ALLUS_FORMAT"
 	envWebhookSecret        = "ALLUS_WEBHOOK_SECRET"
@@ -54,6 +59,14 @@ type Config struct {
 	// Optional — only needed if you receive encrypt_payload webhooks.
 	AccountPrivateKey string `json:"account_private_key,omitempty"`
 	AccountPassphrase string `json:"account_passphrase,omitempty"`
+
+	// "Sign in with allme" idw role (#195). The idw_* app the RP embeds. OAuthPrivateKey +
+	// OAuthKeyPassphrase are needed only to decrypt one_time claim values (config-only keys).
+	OAuthClientID      string `json:"oauth_client_id,omitempty"`
+	OAuthRedirectURI   string `json:"oauth_redirect_uri,omitempty"`
+	OAuthClientSecret  string `json:"oauth_client_secret,omitempty"`
+	OAuthPrivateKey    string `json:"oauth_private_key,omitempty"`
+	OAuthKeyPassphrase string `json:"oauth_key_passphrase,omitempty"`
 
 	// Optional — per-webhook HMAC secrets keyed by webhook id; matched via the
 	// X-Allus-Webhook-Id header. A single-webhook service can use the flat
@@ -106,6 +119,11 @@ type rawConfig struct {
 	CustomerClientSecret string            `json:"customer_client_secret"`
 	AccountPrivateKey    string            `json:"account_private_key"`
 	AccountPassphrase    string            `json:"account_passphrase"`
+	OAuthClientID        string            `json:"oauth_client_id"`
+	OAuthRedirectURI     string            `json:"oauth_redirect_uri"`
+	OAuthClientSecret    string            `json:"oauth_client_secret"`
+	OAuthPrivateKey      string            `json:"oauth_private_key"`
+	OAuthKeyPassphrase   string            `json:"oauth_key_passphrase"`
 	Webhooks             map[string]string `json:"webhooks"`
 	WebhookSecret        string            `json:"webhook_secret"`
 	WebhookBearerToken   string            `json:"webhook_bearer_token"`
@@ -161,6 +179,28 @@ func ConfigFromCustomerEnv() (*Config, error) {
 	return buildConfig(&rawConfig{}, "customer")
 }
 
+// ConfigFromIdwFile loads an IDW-role config (#195, "Sign in with allme") — requires the
+// oauth_client_id + oauth_redirect_uri. Env vars override file values.
+func ConfigFromIdwFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, newConfigError("config file not found: %s", path)
+		}
+		return nil, wrapConfigError(err, "could not read config file: %s", path)
+	}
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, newConfigError("config file is not valid JSON: %s: %v", path, err)
+	}
+	return buildConfig(&raw, "idw")
+}
+
+// ConfigFromIdwEnv builds an IDW-role config entirely from ALLUS_* env vars.
+func ConfigFromIdwEnv() (*Config, error) {
+	return buildConfig(&rawConfig{}, "idw")
+}
+
 // buildConfig merges file values with env overrides, validates, and constructs.
 func buildConfig(raw *rawConfig, role string) (*Config, error) {
 	cfg := &Config{
@@ -173,6 +213,11 @@ func buildConfig(raw *rawConfig, role string) (*Config, error) {
 		CustomerClientSecret: firstNonEmpty(os.Getenv(envCustomerClientSecret), raw.CustomerClientSecret),
 		AccountPrivateKey:    firstNonEmpty(os.Getenv(envAccountPrivateKey), raw.AccountPrivateKey),
 		AccountPassphrase:    firstNonEmpty(os.Getenv(envAccountPassphrase), raw.AccountPassphrase),
+		OAuthClientID:        firstNonEmpty(os.Getenv(envOAuthClientID), raw.OAuthClientID),
+		OAuthRedirectURI:     firstNonEmpty(os.Getenv(envOAuthRedirectURI), raw.OAuthRedirectURI),
+		OAuthClientSecret:    firstNonEmpty(os.Getenv(envOAuthClientSecret), raw.OAuthClientSecret),
+		OAuthPrivateKey:      firstNonEmpty(os.Getenv(envOAuthPrivateKey), raw.OAuthPrivateKey),
+		OAuthKeyPassphrase:   firstNonEmpty(os.Getenv(envOAuthKeyPassphrase), raw.OAuthKeyPassphrase),
 		CacheDir:             firstNonEmpty(os.Getenv(envCacheDir), raw.CacheDir),
 		Format:               firstNonEmpty(os.Getenv(envFormat), raw.Format),
 	}
@@ -271,6 +316,15 @@ func buildConfig(raw *rawConfig, role string) (*Config, error) {
 			{"customer_client_id", cfg.CustomerClientID},
 			{"customer_client_secret", cfg.CustomerClientSecret},
 			{"account_private_key", cfg.AccountPrivateKey},
+		}
+	} else if role == "idw" {
+		required = []struct {
+			name string
+			val  string
+		}{
+			{"api_url", cfg.APIURL},
+			{"oauth_client_id", cfg.OAuthClientID},
+			{"oauth_redirect_uri", cfg.OAuthRedirectURI},
 		}
 	}
 	var missing []string
