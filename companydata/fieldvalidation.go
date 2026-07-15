@@ -38,7 +38,20 @@ var (
 	fvCardStrip  = regexp.MustCompile(`[ -]`)
 
 	fvGender = []string{"Male", "Female", "Non-binary", "Prefer not to say"}
+
+	// #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter
+	// code. The lists come from the generated country data (do NOT inline them — they would rot).
+	fvCountrySet = fvToSet(CountryCodes)
+	fvUSStateSet = fvToSet(USStateCodes)
 )
+
+func fvToSet(xs []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(xs))
+	for _, x := range xs {
+		m[x] = struct{}{}
+	}
+	return m
+}
 
 // fvSub is a structured sub-field rule. Zero value ({}) = any non-empty string.
 // isInt = a JSON integer; re = string matching a regex; kind = reuse a kind handler.
@@ -52,12 +65,12 @@ type fvSub struct {
 var fvObj = map[string]map[string]fvSub{
 	"address": {
 		"postal_code":     {re: fvPostalRE},
+		"country":         {kind: "countryCode"},
+		"state":           {kind: "usState"},
 		"street":          {},
 		"building_number": {},
 		"affix":           {},
 		"city":            {},
-		"state":           {},
-		"country":         {},
 	},
 	"creditcard": {
 		"number": {kind: "card"},
@@ -110,6 +123,8 @@ var fvRules = map[string]fvRule{
 	"legal_document": {kind: "object"},
 	"number":         {kind: "number"},
 	"boolean":        {kind: "boolean"},
+	"country":        {kind: "countryCode"},
+	"nationality":    {kind: "countryCode"},
 	// text + unknown => no rule => accept anything
 }
 
@@ -182,6 +197,12 @@ func fvApplyKind(kind, value string) bool {
 		return err == nil && !math.IsInf(f, 0) && !math.IsNaN(f)
 	case "boolean":
 		return value == "true" || value == "false"
+	case "countryCode":
+		_, ok := fvCountrySet[value]
+		return ok
+	case "usState":
+		_, ok := fvUSStateSet[value]
+		return ok
 	default:
 		return true
 	}
@@ -266,4 +287,15 @@ func FieldValueError(fieldType, value string) string {
 		return ""
 	}
 	return fieldType
+}
+
+// IsValidCountryCode reports whether code is an assigned ISO 3166-1 alpha-2 country code (#303).
+func IsValidCountryCode(code string) bool {
+	_, ok := fvCountrySet[code]
+	return ok
+}
+
+// DialCodeFor returns the ITU E.164 dial code (digits only, no "+") for a country code, or "" (#303).
+func DialCodeFor(code string) string {
+	return DialCodes[code]
 }

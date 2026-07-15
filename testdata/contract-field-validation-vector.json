@@ -112,6 +112,23 @@
     { "name": "boolean_false_ok", "type": "boolean", "value": "false", "valid": true },
     { "name": "boolean_empty_ok", "type": "boolean", "value": "", "valid": true },
     { "name": "boolean_yes_bad", "type": "boolean", "value": "yes", "valid": false },
-    { "name": "boolean_one_bad", "type": "boolean", "value": "1", "valid": false }
+    { "name": "boolean_one_bad", "type": "boolean", "value": "1", "valid": false },
+
+    { "name": "country_us_ok", "type": "country", "value": "US", "valid": true },
+    { "name": "country_nl_ok", "type": "country", "value": "NL", "valid": true },
+    { "name": "country_empty_ok", "type": "country", "value": "", "valid": true },
+    { "name": "country_lowercase_bad", "type": "country", "value": "us", "valid": false },
+    { "name": "country_name_bad", "type": "country", "value": "United States", "valid": false },
+    { "name": "country_three_bad", "type": "country", "value": "USA", "valid": false },
+    { "name": "nationality_nl_ok", "type": "nationality", "value": "NL", "valid": true },
+    { "name": "nationality_empty_ok", "type": "nationality", "value": "", "valid": true },
+    { "name": "nationality_bad", "type": "nationality", "value": "Dutch", "valid": false },
+
+    { "name": "address_country_code_ok", "type": "address", "value": "{\"country\":\"US\"}", "valid": true },
+    { "name": "address_country_name_bad", "type": "address", "value": "{\"country\":\"United States\"}", "valid": false },
+    { "name": "address_country_unknown_bad", "type": "address", "value": "{\"country\":\"XX\"}", "valid": false },
+    { "name": "address_state_code_ok", "type": "address", "value": "{\"country\":\"US\",\"state\":\"CA\"}", "valid": true },
+    { "name": "address_state_name_bad", "type": "address", "value": "{\"state\":\"California\"}", "valid": false },
+    { "name": "address_country_empty_ok", "type": "address", "value": "{\"country\":\"\",\"city\":\"X\"}", "valid": true }
   ]
 }

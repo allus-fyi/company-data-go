@@ -237,7 +237,8 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 
   | Field type | Go type of `Value.Value` |
   |------------|--------------------------|
-  | `email` / `phone` / `url` / `text` | `string` |
+  | `email` / `phone` / `url` / `text` | `string` (`phone` is a single E.164-style string: `+` and digits) |
+  | `country` / `nationality` | `string` — an ISO 3166-1 alpha-2 code (e.g. `"US"`, `"NL"`); not a display name |
   | `address` / `bank` / `creditcard` | `map[string]any` (parsed JSON object) |
   | `date` / `date_of_birth` | `time.Time` |
   | `photo` / `document` / `legal_document` | `*BinaryHandle` (lazy) |
@@ -249,6 +250,12 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   bytes, err := logo.Bytes()          // fetches the slot file endpoint + decrypts on demand
   n,     err := logo.Save("./logo.png") // atomic write (temp + fsync + rename)
   ```
+
+  `country`/`nationality` values are 2-letter ISO codes, and an `address`'s
+  `country`/`state` sub-fields are an ISO alpha-2 code / USPS 2-letter state code
+  respectively. `FieldValueValid(type, value)` validates these against the bundled
+  country dataset; `IsValidCountryCode(code)` / `DialCodeFor(code)` check a code or
+  look up its E.164 dial code.
 
 - `Value.Live` = the person chose "keep connected" (auto-updates) vs a one-time
   snapshot. `Value.UpdatedAt` = when this answer last changed (`*time.Time`, nil
