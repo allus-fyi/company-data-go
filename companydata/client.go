@@ -964,6 +964,16 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 	}
 	svcPub := c.servicePublicKey()
 
+	// #302: validate each freshly-typed answer against its field type from the pinned
+	// definition, BEFORE encryption. Skip when the type can't be resolved.
+	for slug, val := range fill {
+		if ft := fieldTypeForSlug(run.Definition, slug); ft != "" {
+			if !FieldValueValid(ft, flowPlain(val)) {
+				return FlowRun{}, newValidationError(slug, ft)
+			}
+		}
+	}
+
 	answersOut := make([]map[string]any, 0, len(fill))
 	for slug, val := range fill {
 		plain := flowPlain(val)
@@ -1272,6 +1282,40 @@ func computeNextNode(definition map[string]any, fromKey string, answers map[stri
 		}
 	}
 	return true, ""
+}
+
+// fieldTypeForSlug resolves a field element's field_type from the pinned flow
+// definition by scanning every node's elements for a kind:"field" element with
+// the given slug. Returns "" when the slug is not a field element (or elements
+// are absent) — callers then SKIP validation rather than invent a type (#302).
+func fieldTypeForSlug(definition map[string]any, slug string) string {
+	nodes, ok := definition["nodes"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, n := range nodes {
+		nm, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		els, ok := nm["elements"].([]any)
+		if !ok {
+			continue
+		}
+		for _, e := range els {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if asString(em["kind"]) == "field" && asString(em["slug"]) == slug {
+				if ft := asString(em["field_type"]); ft != "" {
+					return ft
+				}
+				return asString(em["type"])
+			}
+		}
+	}
+	return ""
 }
 
 // partyOf returns the party that owns nodeKey in the definition.

@@ -30,6 +30,8 @@ var (
 	ErrWebhook = errors.New("webhook error")
 	// ErrRateLimit is matched by errors.Is(err, ErrRateLimit) for any *RateLimitError.
 	ErrRateLimit = errors.New("rate limit error")
+	// ErrValidation is matched by errors.Is(err, ErrValidation) for any *ValidationError.
+	ErrValidation = errors.New("validation error")
 )
 
 // ConfigError is raised for missing or invalid configuration (or key file) at
@@ -119,6 +121,25 @@ func (e *WebhookError) Is(target error) bool { return target == ErrWebhook }
 
 func newWebhookError(format string, a ...any) *WebhookError {
 	return &WebhookError{msg: fmt.Sprintf(format, a...)}
+}
+
+// ValidationError is raised when a freshly-typed value fails its field type's
+// shape/format check (#302) before encryption. It names the offending Slug and
+// the resolved FieldType. Client validation is UX, never a security boundary.
+type ValidationError struct {
+	Slug      string
+	FieldType string
+}
+
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation error: value for %q is not a valid %s", e.Slug, e.FieldType)
+}
+
+// Is reports ErrValidation membership for errors.Is.
+func (e *ValidationError) Is(target error) bool { return target == ErrValidation }
+
+func newValidationError(slug, fieldType string) *ValidationError {
+	return &ValidationError{Slug: slug, FieldType: fieldType}
 }
 
 // RateLimitError is a 429 from a rate-limited endpoint. It embeds

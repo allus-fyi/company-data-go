@@ -76,7 +76,10 @@ type CustomerClient struct {
 	accountKey      *rsa.PrivateKey
 	pubkeyCache     map[string]*rsa.PublicKey
 	serviceKeyCache map[string]*rsa.PublicKey
-	pump            *Pump
+	// requestTypeCache maps "companyCode/serviceCode" → {request_field_id: field_type},
+	// resolved from the connect-screen lookup for typed-answer validation (#302).
+	requestTypeCache map[string]map[string]string
+	pump             *Pump
 }
 
 // NewCustomer builds a CustomerClient. The transport authenticates as the acct_*
@@ -89,8 +92,9 @@ func NewCustomer(config *Config, opts ...customerOption) (*CustomerClient, error
 		config:          config,
 		logger:          log.Default(),
 		sleep:           time.Sleep,
-		pubkeyCache:     map[string]*rsa.PublicKey{},
-		serviceKeyCache: map[string]*rsa.PublicKey{},
+		pubkeyCache:      map[string]*rsa.PublicKey{},
+		serviceKeyCache:  map[string]*rsa.PublicKey{},
+		requestTypeCache: map[string]map[string]string{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -418,6 +422,34 @@ func (c *CustomerClient) decryptAccount(wrapper any) (string, error) {
 	return Decrypt(wrapper, c.accountKey)
 }
 
+// requestFieldTypes resolves {request_field_id: field_type} for a service from the
+// connect-screen lookup, cached per company/service. Best-effort — a lookup failure
+// yields an empty map so typed-answer validation is simply skipped (#302).
+func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[string]string {
+	key := companyCode + "/" + serviceCode
+	if m, ok := c.requestTypeCache[key]; ok {
+		return m
+	}
+	out := map[string]string{}
+	body, err := c.http.Get(context.Background(), epCustomerConnections+"/lookup/"+companyCode+"/"+serviceCode, nil)
+	if err == nil {
+		for _, r := range extractList(body, "request_fields") {
+			if m, ok := r.(map[string]any); ok {
+				id := asString(m["id"])
+				ft := asString(m["field_type"])
+				if ft == "" {
+					ft = asString(m["type"])
+				}
+				if id != "" && ft != "" {
+					out[id] = ft
+				}
+			}
+		}
+	}
+	c.requestTypeCache[key] = out
+	return out
+}
+
 func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, serviceCode string) ([]map[string]any, error) {
 	pub, err := c.serviceKey(companyCode, serviceCode)
 	if err != nil {
@@ -425,6 +457,16 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 	}
 	if pub == nil {
 		return nil, fmt.Errorf("no service key for %s/%s", companyCode, serviceCode)
+	}
+	// #302: validate each typed answer against its request row's field type, BEFORE
+	// encryption. Skip an answer whose type can't be resolved (do not invent one).
+	types := c.requestFieldTypes(companyCode, serviceCode)
+	for _, a := range answers {
+		if ft := types[a.RequestFieldID]; ft != "" {
+			if !FieldValueValid(ft, a.Value) {
+				return nil, newValidationError(a.RequestFieldID, ft)
+			}
+		}
 	}
 	out := make([]map[string]any, 0, len(answers))
 	for _, a := range answers {
