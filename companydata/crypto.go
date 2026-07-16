@@ -12,8 +12,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -490,4 +492,16 @@ func (h *BinaryHandle) Save(path string) (int, error) {
 	}
 	fsyncDir(dir)
 	return len(data), nil
+}
+
+// HashMatches reports whether sha256(salt ‖ plaintext) equals expectedHash (hex).
+// #311 verified fields: consumers recompute this from the plaintext they just
+// decrypted and trust the verified flag ONLY on a match.
+func HashMatches(salt, expectedHash, plaintext string) bool {
+	if salt == "" || expectedHash == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(salt + plaintext))
+	computed := hex.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(expectedHash)) == 1
 }

@@ -106,6 +106,7 @@ type Value struct {
 	Value     any
 	Live      bool
 	UpdatedAt *time.Time
+	Verified  bool // #311: true iff the value carries verified metadata AND the hash matches
 	Raw       map[string]any
 }
 
@@ -118,6 +119,7 @@ func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValu
 		Value:     typed,
 		Live:      coerceBool(obj["live"]),
 		UpdatedAt: parseISO(firstString(obj["updatedAt"], obj["updated_at"])),
+		Verified:  verifiedFrom(obj, typed),
 		Raw:       obj,
 	}, nil
 }
@@ -255,6 +257,7 @@ type Change struct {
 	SignedAt            string // set on a signature: ISO timestamp the signature was recorded
 	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
 	RequestID           string // set on connection_request_accepted | connection_request_rejected
+	Verified            bool   // #311: true iff a field_updated value is verified (hash matches the decrypted plaintext)
 	At                  *time.Time
 	Raw                 map[string]any
 }
@@ -318,6 +321,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		SignedAt:            signedAt,
 		CancelEffectiveDate: cancelEffectiveDate,
 		RequestID:           requestID,
+		Verified:            verifiedFrom(obj, value),
 		At:                  parseISO(asString(obj["at"])),
 		Raw:                 obj,
 	}, nil
@@ -699,4 +703,18 @@ func extractList(body any, key string) []any {
 	default:
 		return nil
 	}
+}
+
+// verifiedFrom recomputes the #311 verified flag from the just-decrypted plaintext (email string only).
+func verifiedFrom(obj map[string]any, plaintext any) bool {
+	pt, ok := plaintext.(string)
+	if !ok {
+		return false
+	}
+	vhash := asString(obj["verified_hash"])
+	vsalt := asString(obj["verified_salt"])
+	if vhash == "" || vsalt == "" {
+		return false
+	}
+	return HashMatches(vsalt, vhash, pt)
 }
