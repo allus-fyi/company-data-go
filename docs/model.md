@@ -83,7 +83,7 @@ crash mid-write never leaves a truncated file.
 
 ```go
 type Change struct {
-    ID       string     // stable server change-row id (the pump dedupes on it)
+    ID       string     // pull-feed server change-row id (the pump dedupes on it; NOT stable on webhooks)
     Event    string     // see the events table
     PersonID string
     Slug     string     // present on field_updated / field_deleted / consent_* only
@@ -94,6 +94,8 @@ type Change struct {
     Raw      map[string]any
 }
 ```
+
+> **On the webhook path this id is NOT a dedup key.** A live webhook delivery has no change row behind it, so its id is minted for that single POST; a delivery replayed from the server-side backlog is rebuilt from a durable row and carries that row's id instead — the same id on every re-attempt of that row. The id is therefore sometimes stable across a duplicate and sometimes not, with no way for the receiver to tell, which is what makes it unusable as an idempotency key. Webhooks and the pull feed are alternative integrations; see `webhooks.md` for the webhook delivery contract and what to key on instead (change.ID is not it).
 
 | Event | Carries |
 |-------|---------|
