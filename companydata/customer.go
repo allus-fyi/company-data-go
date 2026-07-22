@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -69,12 +70,37 @@ type FlowParty struct {
 
 // CustomerClient is the b2b customer-side facade. NO sign/accept (spec D6).
 type CustomerClient struct {
-	config          *Config
-	http            *HTTPClient
-	logger          *log.Logger
-	sleep           func(time.Duration)
-	accountKey      *rsa.PrivateKey
-	pubkeyCache     map[string]*rsa.PublicKey
+	config      *Config
+	http        *HTTPClient
+	logger      *log.Logger
+	sleep       func(time.Duration)
+	accountKey  *rsa.PrivateKey
+	pubkeyCache map[string]*rsa.PublicKey
+	// #344 review pass 2: pubkeyCache is reachable from two goroutines now — batchKey during an
+	// encryption, and InvalidatePublicKey which the README tells webhook consumers to call from
+	// their own handler. An unsynchronised map under concurrent read+write is a hard crash in Go,
+	// not a stale-value bug, so the cache gets a mutex covering lookup, write and invalidation.
+	// #344 review pass 3 corrects the pass-2 note that once stood here: serviceKeyCache and
+	// requestTypeCache ARE reachable from concurrent encryptions (they sit on the same
+	// encryptFor* paths as pubkeyCache), so an unsynchronised map there is the same hard crash.
+	// They now share otherMu. Neither has an invalidator, so neither needs a generation counter
+	// — but adding one later MUST bring a generation with it, for the reason spelled out below.
+	// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+	//
+	// Locking the map alone is not enough. The fetch path is check (locked) → unlock → HTTP →
+	// store (locked), so an InvalidatePublicKey that lands between the unlock and the store is
+	// silently undone: the pre-rotation key is written back AFTER the delete, the key_rotated
+	// event has already been consumed, and with no TTL the process encrypts to the dead key for
+	// the rest of its life — the exact symptom this issue exists to fix.
+	//
+	// The fetch snapshots the generation before releasing the mutex and stores only if it is
+	// still current; otherwise it discards its result and the next caller refetches. Invalidation
+	// therefore dominates every fetch that began before it.
+	pubkeyGen       map[string]uint64
+	pubkeyMu        sync.Mutex
+	// otherMu guards serviceKeyCache and requestTypeCache. Separate from pubkeyMu so a public-key
+	// fetch and a service-key fetch never serialise on each other.
+	otherMu         sync.Mutex
 	serviceKeyCache map[string]*rsa.PublicKey
 	// requestTypeCache maps "companyCode/serviceCode" → {request_field_id: field_type},
 	// resolved from the connect-screen lookup for typed-answer validation (#302).
@@ -89,10 +115,11 @@ func NewCustomer(config *Config, opts ...customerOption) (*CustomerClient, error
 		return nil, newConfigError("CustomerClient requires customer_client_id + customer_client_secret")
 	}
 	c := &CustomerClient{
-		config:          config,
-		logger:          log.Default(),
-		sleep:           time.Sleep,
+		config:           config,
+		logger:           log.Default(),
+		sleep:            time.Sleep,
 		pubkeyCache:      map[string]*rsa.PublicKey{},
+		pubkeyGen:        map[string]uint64{},
 		serviceKeyCache:  map[string]*rsa.PublicKey{},
 		requestTypeCache: map[string]map[string]string{},
 	}
@@ -356,7 +383,28 @@ func (c *CustomerClient) fetchChanges(limit int) ([]map[string]any, error) {
 	return out, nil
 }
 
+// InvalidatePublicKey drops a person's cached RSA public key, by user id. See the Client method of
+// the same name (#344); the changes feed calls this for you, webhook consumers must call it.
+func (c *CustomerClient) InvalidatePublicKey(userID string) {
+	c.pubkeyMu.Lock()
+	delete(c.pubkeyCache, userID)
+	c.pubkeyGen[userID]++ // any fetch already in flight must not write its stale result back
+	c.pubkeyMu.Unlock()
+}
+
 func (c *CustomerClient) decryptChange(event map[string]any) (Change, error) {
+	// #344: see Client.decryptChange. Note this cache also stores a negative (nil) result, so
+	// without invalidation a person who had no key yet would stay unresolvable for the process
+	// lifetime too.
+	// #344: the pull feed names it `event`; a raw webhook body names it `action` (and on document
+	// rows `action` carries signed|accepted|cancelled instead) — so match either key.
+	evType, _ := event["event"].(string)
+	act, _ := event["action"].(string)
+	if evType == "key_rotated" || act == "key_rotated" {
+		if id, _ := event["person_user_id"].(string); id != "" {
+			c.InvalidatePublicKey(id)
+		}
+	}
 	return changeFromAPI(event, func(string) string { return "" }, c.decryptAccount, nil)
 }
 
@@ -427,7 +475,10 @@ func (c *CustomerClient) decryptAccount(wrapper any) (string, error) {
 // yields an empty map so typed-answer validation is simply skipped (#302).
 func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[string]string {
 	key := companyCode + "/" + serviceCode
-	if m, ok := c.requestTypeCache[key]; ok {
+	c.otherMu.Lock()
+	m, ok := c.requestTypeCache[key]
+	c.otherMu.Unlock()
+	if ok {
 		return m
 	}
 	out := map[string]string{}
@@ -446,7 +497,9 @@ func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[
 			}
 		}
 	}
+	c.otherMu.Lock()
 	c.requestTypeCache[key] = out
+	c.otherMu.Unlock()
 	return out
 }
 
@@ -485,7 +538,10 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 
 func (c *CustomerClient) serviceKey(companyCode, serviceCode string) (*rsa.PublicKey, error) {
 	key := companyCode + "/" + serviceCode
-	if k, ok := c.serviceKeyCache[key]; ok {
+	c.otherMu.Lock()
+	k, ok := c.serviceKeyCache[key]
+	c.otherMu.Unlock()
+	if ok {
 		return k, nil
 	}
 	body, err := c.http.Get(context.Background(), epKeys+"/"+companyCode+"/"+serviceCode, nil)
@@ -501,12 +557,22 @@ func (c *CustomerClient) serviceKey(companyCode, serviceCode string) (*rsa.Publi
 			}
 		}
 	}
+	c.otherMu.Lock()
 	c.serviceKeyCache[key] = pub
+	c.otherMu.Unlock()
 	return pub, nil
 }
 
 func (c *CustomerClient) batchKey(userID string) (*rsa.PublicKey, error) {
-	if k, ok := c.pubkeyCache[userID]; ok {
+	// Lock only around the map access, never across the HTTP call below — holding it there would
+	// serialise every concurrent encryption behind one network round-trip. Same shape as the
+	// service client's recipientPublicKey. The comma-ok is load-bearing: a nil value is a CACHED
+	// NEGATIVE (person has no key yet) and must still count as a hit.
+	c.pubkeyMu.Lock()
+	k, ok := c.pubkeyCache[userID]
+	gen := c.pubkeyGen[userID]
+	c.pubkeyMu.Unlock()
+	if ok {
 		return k, nil
 	}
 	body, err := c.http.Post(context.Background(), epKeys+"/batch", map[string]any{"user_ids": []string{userID}})
@@ -524,7 +590,12 @@ func (c *CustomerClient) batchKey(userID string) (*rsa.PublicKey, error) {
 			}
 		}
 	}
-	c.pubkeyCache[userID] = pub
+	c.pubkeyMu.Lock()
+	// Store ONLY if no invalidation happened while the request was in flight.
+	if c.pubkeyGen[userID] == gen {
+		c.pubkeyCache[userID] = pub
+	}
+	c.pubkeyMu.Unlock()
 	return pub, nil
 }
 

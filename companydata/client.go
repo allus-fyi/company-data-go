@@ -97,8 +97,20 @@ type Client struct {
 	// Recipient RSA public keys (by share_code), cached for per-person document
 	// encryption. A public key is immutable + not a secret (fetched live, never
 	// configured).
+	// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+	//
+	// Locking the map alone is not enough. The fetch path is check (locked) → unlock → HTTP →
+	// store (locked), so an InvalidatePublicKey that lands between the unlock and the store is
+	// silently undone: the pre-rotation key is written back AFTER the delete, the key_rotated
+	// event has already been consumed, and with no TTL the process encrypts to the dead key for
+	// the rest of its life — the exact symptom this issue exists to fix.
+	//
+	// The fetch snapshots the generation before releasing the mutex and stores only if it is
+	// still current; otherwise it discards its result and the next caller refetches. Invalidation
+	// therefore dominates every fetch that began before it.
 	pubkeyMu    sync.Mutex
 	pubkeyCache map[string]*rsa.PublicKey
+	pubkeyGen   map[string]uint64
 
 	pump *Pump
 }
@@ -127,6 +139,7 @@ func New(config *Config, opts ...clientOption) (*Client, error) {
 		sleep:       time.Sleep,
 		typeBySlug:  map[string]string{},
 		pubkeyCache: map[string]*rsa.PublicKey{},
+		pubkeyGen:   map[string]uint64{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -437,7 +450,40 @@ func (c *Client) fetchChanges(limit int) ([]map[string]any, error) {
 
 // decryptChange is the pump's decrypt: a raw event map → a typed Change (value
 // decrypted at delivery).
+// InvalidatePublicKey drops a person's cached RSA public key, by share code.
+//
+// #344: a public key is immutable, so caching one is safe — until the person rotates it. Persons
+// learn about a rotation from a silent push; a SERVICE receives no pushes at all, so without a
+// signal a long-lived worker could keep encrypting documents to the rotated-away key for the whole
+// process lifetime, with no recovery.
+//
+// The changes feed calls this for you. Call it yourself when you consume changes over a WEBHOOK:
+// the verifier is a package-level function with no client instance, so it cannot reach this cache.
+// On a key_rotated webhook, call c.InvalidatePublicKey(change.ShareCode).
+func (c *Client) InvalidatePublicKey(shareCode string) {
+	// #344 review pass 2: pubkeyCache is guarded by pubkeyMu everywhere else (recipientPublicKey
+	// reads and writes it under the lock). This deletion is documented as something a WEBHOOK
+	// consumer calls from its own goroutine, so it genuinely races an in-flight encryption —
+	// unsynchronised, Go can kill the process with "fatal error: concurrent map read and map write".
+	c.pubkeyMu.Lock()
+	delete(c.pubkeyCache, shareCode)
+	c.pubkeyGen[shareCode]++ // any fetch already in flight must not write its stale result back
+	c.pubkeyMu.Unlock()
+}
+
 func (c *Client) decryptChange(event map[string]any) (Change, error) {
+	// #344: the feed is a service's only rotation signal — drop the stale key before the caller
+	// can use it. Deliberately eventual: nothing rejects a document encrypted to a stale key, so
+	// there is a window between the rotation and this event being drained.
+	// #344: the pull feed names it `event`; a raw webhook body names it `action` (and on document
+	// rows `action` carries signed|accepted|cancelled instead) — so match either key.
+	evType, _ := event["event"].(string)
+	act, _ := event["action"].(string)
+	if evType == "key_rotated" || act == "key_rotated" {
+		if sc, _ := event["share_code"].(string); sc != "" {
+			c.InvalidatePublicKey(sc)
+		}
+	}
 	return changeFromAPI(event, c.typeForSlug, c.decryptValue, c.binaryFetch)
 }
 
@@ -1118,6 +1164,7 @@ func (c *Client) recipientPublicKey(ctx context.Context, shareCode string) (*rsa
 		c.pubkeyMu.Unlock()
 		return cached, nil
 	}
+	gen := c.pubkeyGen[shareCode]
 	c.pubkeyMu.Unlock()
 
 	body, err := c.http.Get(ctx, epKeys+"/"+shareCode, nil)
@@ -1136,7 +1183,10 @@ func (c *Client) recipientPublicKey(ctx context.Context, shareCode string) (*rsa
 		return nil, err
 	}
 	c.pubkeyMu.Lock()
-	c.pubkeyCache[shareCode] = key
+	// Store ONLY if no invalidation happened while the request was in flight.
+	if c.pubkeyGen[shareCode] == gen {
+		c.pubkeyCache[shareCode] = key
+	}
 	c.pubkeyMu.Unlock()
 	return key, nil
 }

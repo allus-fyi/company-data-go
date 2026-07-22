@@ -257,6 +257,7 @@ type Change struct {
 	SignedAt            string // set on a signature: ISO timestamp the signature was recorded
 	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
 	RequestID           string // set on connection_request_accepted | connection_request_rejected
+	PublicKeySHA256     string // #344: set on key_rotated — SHA-256 fingerprint of the person's NEW public key
 	Verified            bool   // #311: true iff a field_updated value is verified (hash matches the decrypted plaintext)
 	At                  *time.Time
 	Raw                 map[string]any
@@ -302,6 +303,11 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		requestID = asString(obj["request_id"])
 	}
 
+	var publicKeySHA256 string
+	if event == "key_rotated" {
+		publicKeySHA256 = asString(obj["public_key_sha256"])
+	}
+
 	return Change{
 		ID:                  asString(obj["id"]),
 		Event:               event,
@@ -321,6 +327,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		SignedAt:            signedAt,
 		CancelEffectiveDate: cancelEffectiveDate,
 		RequestID:           requestID,
+		PublicKeySHA256:     publicKeySHA256,
 		Verified:            verifiedFrom(obj, value),
 		At:                  parseISO(asString(obj["at"])),
 		Raw:                 obj,
