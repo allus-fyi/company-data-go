@@ -298,6 +298,12 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		cancelEffectiveDate = asString(obj["cancel_effective_date"])
 	}
 
+	// #436: 2fa_challenge_completed carries the outcome in status (approved|denied|revoked); its
+	// challenge_id/completed_at stay in Raw. The poll is the record (spec §3).
+	if event == "2fa_challenge_completed" {
+		status = asString(obj["status"])
+	}
+
 	var requestID string
 	if event == "connection_request_accepted" || event == "connection_request_rejected" {
 		requestID = asString(obj["request_id"])
