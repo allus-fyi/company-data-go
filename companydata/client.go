@@ -806,6 +806,58 @@ func (c *Client) Document(ctx context.Context, documentID string) (Document, err
 	return documentFromAPI(docObj(body), c.decryptValue), nil
 }
 
+// DocumentFile downloads a document's file BYTES (#491 gap 2). Document returns
+// metadata only and GenerateFlowDocument returns just {document_id, status} —
+// neither yields the bytes. GET /documents/{id}/file returns EITHER a broadcast
+// document's RAW plaintext bytes (not JSON), or a per-person document's JSON
+// {"encrypted":true,"value":{"_enc":1,...}} — encrypted to the RECIPIENT, not
+// this service key, so it can't be decrypted here. This GETs the raw bytes; if
+// they happen to JSON-decode to an object with a truthy "encrypted" field, that's
+// the per-person case and it fails clearly as *ApiError{ErrorKey:
+// "documents.recipient_encrypted"} rather than attempting a doomed service-key
+// decrypt. For a generated flow contract's OWN copy the company uses
+// FlowRunDocument — that copy IS service-key-encrypted.
+func (c *Client) DocumentFile(ctx context.Context, documentID string) ([]byte, error) {
+	raw, err := c.http.GetRaw(ctx, epDocuments+"/"+documentID+"/file")
+	if err != nil {
+		return nil, err
+	}
+	var decoded map[string]any
+	if json.Unmarshal(raw, &decoded) == nil {
+		if enc, ok := decoded["encrypted"]; ok && asBool(enc) {
+			return nil, NewApiError(0, "documents.recipient_encrypted",
+				"This document is encrypted to its recipient and is not readable with the company service key. "+
+					"For a generated flow contract, use FlowRunDocument(runID) to download the company copy.")
+		}
+	}
+	return raw, nil // broadcast / plaintext bytes
+}
+
+// FlowRunDocument downloads a generated flow contract's COMPANY copy (#491 gap
+// 2). GET /flow-runs/{runID}/document/file returns the company-party copy,
+// encrypted to the SERVICE key — the same {"_enc":1,...} wrapper shape the
+// slot-file download uses, fetched + decrypted via the same BinaryHandle path as
+// the (now-fixed) DocumentFile used to: fetch unwraps the API's
+// {"encrypted":true,"value":<wrapper>} envelope, decrypt runs the service-key
+// decrypt to the {"file":"data:…;base64,…"} envelope, and the data-URI is
+// decoded to the PLAINTEXT file bytes. A 404 (no generated document yet)
+// propagates as the normal *ApiError.
+func (c *Client) FlowRunDocument(ctx context.Context, runID string) ([]byte, error) {
+	fetch := func(valueURL string) (any, error) {
+		body, err := c.http.Get(ctx, valueURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if m, ok := body.(map[string]any); ok {
+			if v, ok := m["value"]; ok {
+				return v, nil
+			}
+		}
+		return body, nil
+	}
+	return newLazyBinaryHandle(epFlowRuns+"/"+runID+"/document/file", fetch, c.decryptValue).Bytes()
+}
+
 // UpdateDocumentStatus sets a document's lifecycle status
 // (offering|ready_to_sign|active|active_but_ending|ended) → the updated Document.
 func (c *Client) UpdateDocumentStatus(ctx context.Context, documentID, status string) (Document, error) {
@@ -932,6 +984,38 @@ func (c *Client) FlowRun(ctx context.Context, runID string) (FlowRun, error) {
 		return FlowRun{}, err
 	}
 	return flowRunFromAPI(asMap(body)), nil
+}
+
+// FlowRunAnswers returns a completed run's DECRYPTED answers as {slug: plaintext}
+// (#491 gap 1). It decrypts the company's service-key answer copies of an
+// already-fetched run — the public accessor for a finished run's answers, since
+// the private decryptRunAnswers it wraps is otherwise reached only inside
+// ProcessFlowRun, which returns an already-completed run untouched. (Go has no
+// FlowRun|string union; fetch the run with FlowRun first, then pass it here.)
+func (c *Client) FlowRunAnswers(run FlowRun) (map[string]any, error) {
+	return c.decryptRunAnswers(run)
+}
+
+// Identity is this client's own service identity (#491 gap 3).
+type Identity struct {
+	CompanyUserID string
+	ServiceID     string
+}
+
+// Identity returns this client's OWN identity from GET /api/company-data/whoami
+// (#491 gap 3). The COMPANY party of a TriggerFlowRun binding must bind to
+// CompanyUserID (the person party's user_id comes from the connection), so
+// without this the company-side binding was unconstructible through the SDK.
+func (c *Client) Identity(ctx context.Context) (Identity, error) {
+	body, err := c.http.Get(ctx, baseEndpoint+"/whoami", nil)
+	if err != nil {
+		return Identity{}, err
+	}
+	m := asMap(body)
+	return Identity{
+		CompanyUserID: asString(m["company_user_id"]),
+		ServiceID:     asString(m["service_id"]),
+	}, nil
 }
 
 // servicePublicKey is the service RSA public key = the public half of the loaded

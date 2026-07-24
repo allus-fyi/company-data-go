@@ -179,6 +179,16 @@ func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (a
 	return c.request(ctx, http.MethodGet, path, params, nil)
 }
 
+// GetRaw GETs path → the RAW 2xx response body bytes, with NO JSON/XML parsing.
+// Same auth/refresh/retry handling as Get (bearer token, one refresh-and-retry
+// on 401, bounded Retry-After backoff on 429, *ApiError on other non-2xx) — it
+// just skips parseBody on success. Needed because a response isn't always JSON:
+// a broadcast document's file endpoint returns raw plaintext file bytes, while a
+// per-person document returns the normal JSON encrypted wrapper.
+func (c *HTTPClient) GetRaw(ctx context.Context, path string) ([]byte, error) {
+	return c.doRequestBytes(ctx, http.MethodGet, path, nil, nil, "", false)
+}
+
 // Post POSTs path with a JSON body (jsonBody) → parsed body. A nil jsonBody
 // sends no body. See PostRaw for sending raw bytes (e.g. encrypted file blobs).
 func (c *HTTPClient) Post(ctx context.Context, path string, jsonBody any) (any, error) {
@@ -230,8 +240,21 @@ func (c *HTTPClient) requestRaw(ctx context.Context, method, path string, rawBod
 }
 
 // doRequest performs the actual auth + retry loop, sending body (with
-// Content-Type contentType when hasBody) and applying params to the URL.
+// Content-Type contentType when hasBody) and applying params to the URL, then
+// parses the 2xx response body as JSON or XML per Config.Format.
 func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) (any, error) {
+	respBody, err := c.doRequestBytes(ctx, method, path, params, body, contentType, hasBody)
+	if err != nil {
+		return nil, err
+	}
+	return parseBody(respBody, c.config.Format == "xml")
+}
+
+// doRequestBytes is the shared auth + retry loop, sending body (with
+// Content-Type contentType when hasBody) and applying params to the URL. It
+// returns the RAW response bytes for a 2xx response (no parsing) — doRequest
+// parses them; GetRaw returns them verbatim.
+func (c *HTTPClient) doRequestBytes(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) ([]byte, error) {
 	wantsXML := c.config.Format == "xml"
 	accept := "application/json"
 	if wantsXML {
@@ -273,7 +296,7 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params 
 
 		switch {
 		case status >= 200 && status < 300:
-			return parseBody(respBody, wantsXML)
+			return respBody, nil
 
 		case status == 401:
 			// One refresh-and-retry, then give up as AuthError.

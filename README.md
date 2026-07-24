@@ -366,6 +366,18 @@ docs, err := client.ListDocuments(ctx, companydata.ListDocumentsOptions{
 doc, err := client.Document(ctx, "019zzzz…")
 obj, _ := doc.JSON() // plaintext (decrypts a per-person wrapper transparently)
 
+// #491: download a FILE document's bytes (metadata methods don't include them).
+// A broadcast document comes back as plaintext bytes directly. A per-person
+// document is encrypted to that RECIPIENT (not your service key) and DocumentFile
+// returns an *ApiError{ErrorKey: "documents.recipient_encrypted"} instead of a
+// doomed decrypt attempt — for a generated flow contract's own company copy, use
+// FlowRunDocument below.
+pdf, err := client.DocumentFile(ctx, "019zzzz…")
+
+// #491: a generated flow contract's COMPANY copy — encrypted to your service
+// key, so (unlike DocumentFile on the same document) this one DOES decrypt.
+pdf, err = client.FlowRunDocument(ctx, runID)
+
 // Advance the lifecycle status.
 // offering | ready_to_sign | active | active_but_ending | ended
 doc, err = client.UpdateDocumentStatus(ctx, doc.ID, "active")
@@ -380,6 +392,17 @@ doc, err = client.UpdateDocumentMetadata(ctx, doc.ID, companydata.UpdateDocument
 // Delete the document (and its on-disk file).
 err = client.DeleteDocument(ctx, doc.ID)
 ```
+
+`DocumentFile`/`FlowRunDocument` are the only two calls that return actual file
+bytes — `Document`/`ListDocuments` are metadata-only, and `GenerateFlowDocument`
+returns just `{document_id, status}`. Which one to call depends on **whose copy**
+you want: `DocumentFile(documentID)` for a document you pushed (broadcast comes
+back plaintext; per-person is encrypted to the recipient, so it errors with
+`documents.recipient_encrypted` rather than attempting a decrypt that can't
+succeed with your key); `FlowRunDocument(runID)` for the company-party copy of a
+document a contract flow generated (that copy is encrypted to YOUR service key
+and decrypts transparently, the same way a `photo`/`document` `*BinaryHandle`
+does).
 
 ### React to status changes in the pump
 
@@ -402,6 +425,40 @@ err := client.ProcessChanges(func(c companydata.Change) error {
 
 The same event arrives over [webhooks](#webhooks) with the identical `Change`
 shape.
+
+---
+
+## Contract flows (company side)
+
+A **flow** is a company-defined, multi-step info-gathering run bound to a
+connection (e.g. onboarding, a signable agreement). The company is one of the
+run's bound parties.
+
+| Method | Returns | What it does |
+|--------|---------|--------------|
+| `TriggerFlowRun(ctx, flowID, connectionID, bindings)` | `FlowRun, error` | Starts a run, pinning the flow's latest published version. `bindings` = `{party_key: user_id}`. |
+| `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
+| `FlowRun(ctx, runID)` | `FlowRun, error` | Fetches one run by id. |
+| `SubmitFlowAnswers(ctx, run, fill, partyPubKeys)` | `FlowRun, error` | Fills the company's current node, encrypts one answer copy per bound party, and advances the run. |
+| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and kicks off contract generation. Returns `{document_id, status}` (no bytes — see below). |
+| `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate, chained. |
+| `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
+| `Identity(ctx)` | `Identity, error` | **(#491)** This client's OWN identity — `{CompanyUserID, ServiceID}` from `GET /api/company-data/whoami`. The company party of a `TriggerFlowRun`/`SubmitFlowAnswers` binding must bind to `CompanyUserID` (the person party's user_id comes from the connection), so without this the company-side binding was otherwise unconstructible through the SDK. |
+
+```go
+run, err := client.TriggerFlowRun(ctx, flowID, connectionID, map[string]string{
+    "company": mustIdentity.CompanyUserID, // from client.Identity(ctx)
+    "person":  personUserID,               // from the Connection
+})
+
+// ... after the run reaches a company-turn state (see ProcessFlowRun/SubmitFlowAnswers) ...
+
+run, err = client.FlowRun(ctx, run.ID)
+answers, err := client.FlowRunAnswers(run) // {slug: plaintext}, e.g. answers["monthly_eur"]
+```
+
+Once a document-mode leaf has generated the contract, download its bytes with
+`FlowRunDocument(runID)` — see [Company documents](#company-documents) above.
 
 ---
 
