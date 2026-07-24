@@ -288,13 +288,20 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params 
 			return nil, newAuthError("unauthorized after token refresh%s%s", bracket(errorKey), colon(message))
 
 		case status == 429:
+			errorKey, message := extractError(respBody, c.config.Format)
+			// #481: a twofa.pending_cap 429 means the caller already holds the maximum
+			// concurrent 2FA challenges — a retry can never clear that, so surface it
+			// immediately as an ApiError instead of the blind Retry-After backoff every
+			// other 429 gets.
+			if errorKey == "twofa.pending_cap" {
+				return nil, NewApiError(status, errorKey, message)
+			}
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			if retries429 < c.maxRetries429 {
 				retries429++
 				c.sleep(backoffDelay(retryAfter, retries429))
 				continue
 			}
-			errorKey, message := extractError(respBody, c.config.Format)
 			return nil, NewRateLimitError(retryAfter, errorKey, message)
 
 		default:

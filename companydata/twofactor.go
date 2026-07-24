@@ -2,7 +2,9 @@ package companydata
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"time"
 )
 
 // TwoFactorChallenge is a login-approval challenge returned by TwoFactorClient.Challenge (#436, spec §3).
@@ -32,11 +34,15 @@ type TwoFactorResult struct {
 // (2fa_challenge_completed) is the best-effort push equivalent; the poll remains authoritative.
 type TwoFactorClient struct {
 	http *HTTPClient
+	// sleep/now are injectable so WaitForResult is unit-testable without real delays or a real
+	// clock (matches OAuthClient / HTTPClient). Nil defaults to time.Sleep / time.Now.
+	sleep func(time.Duration)
+	now   func() time.Time
 }
 
 // TwoFactor returns the 2FA-by-allme relying-party challenge API.
 func (c *Client) TwoFactor() *TwoFactorClient {
-	return &TwoFactorClient{http: c.http}
+	return &TwoFactorClient{http: c.http, sleep: c.sleep}
 }
 
 // Challenge initiates a login-approval challenge for the person behind shareCode. idempotencyKey is
@@ -77,4 +83,41 @@ func (t *TwoFactorClient) Result(ctx context.Context, challengeID string) (TwoFa
 		ExpiresAt:   asString(obj["expires_at"]),
 		CompletedAt: asString(obj["completed_at"]),
 	}, nil
+}
+
+// WaitForResult polls Result until the status is terminal (no longer "pending") and returns that
+// first terminal TwoFactorResult (#481; mirrors the OAuth PollResult precedent). Because the first
+// terminal read burns the challenge, this returns as soon as the status leaves "pending" — it never
+// re-reads a consumed result. It returns an *ApiError if timeout elapses while still pending;
+// interval is the wait between polls. A non-positive timeout defaults to 600s, a non-positive
+// interval to 2s (the repo's zero-means-default convention, as in OAuthClient.PollResult).
+func (t *TwoFactorClient) WaitForResult(ctx context.Context, challengeID string, timeout, interval time.Duration) (TwoFactorResult, error) {
+	if timeout <= 0 {
+		timeout = 600 * time.Second
+	}
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	now := t.now
+	if now == nil {
+		now = time.Now
+	}
+	sleep := t.sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	deadline := now().Add(timeout)
+	for {
+		res, err := t.Result(ctx, challengeID)
+		if err != nil {
+			return TwoFactorResult{}, err
+		}
+		if res.Status != "pending" {
+			return res, nil
+		}
+		if !now().Before(deadline) {
+			return TwoFactorResult{}, NewApiError(0, "", fmt.Sprintf("2FA challenge %s not completed within %s", challengeID, timeout))
+		}
+		sleep(interval)
+	}
 }

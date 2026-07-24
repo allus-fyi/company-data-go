@@ -221,6 +221,39 @@ func Test429ExhaustsRetriesThenRaisesRateLimitError(t *testing.T) {
 	}
 }
 
+func Test429PendingCapSurfacesImmediatelyWithoutRetry(t *testing.T) {
+	// #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
+	// ApiError, NOT go through the Retry-After backoff (which every other 429 gets).
+	var sleeps []time.Duration
+	d := &fakeDoer{
+		tokenResponses: []fakeResponse{tokenOK()},
+		getResponses: []fakeResponse{
+			{status: 429, headers: map[string]string{"Retry-After": "2"}, body: `{"error_key":"twofa.pending_cap"}`},
+			{status: 200, body: `{"should":"not be reached"}`},
+		},
+	}
+	c := newTestHTTP(t, d, "json", &sleeps)
+	_, err := c.Get(context.Background(), "/api/service-2fa/challenges", nil)
+	var apiErr *ApiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *ApiError, got %v", err)
+	}
+	if apiErr.Status != 429 || apiErr.ErrorKey != "twofa.pending_cap" {
+		t.Fatalf("ApiError mismatch: %+v", apiErr)
+	}
+	// It must NOT surface as a RateLimitError (that's the retry/backoff path).
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		t.Fatal("pending_cap must not surface as *RateLimitError")
+	}
+	if len(sleeps) != 0 { // no backoff sleep
+		t.Fatalf("expected no backoff, got %v", sleeps)
+	}
+	if len(d.gets) != 1 { // no retry — the 200 was never consumed
+		t.Fatalf("expected 1 GET, got %d", len(d.gets))
+	}
+}
+
 func TestNon2xxMapsToApiErrorWithErrorKey(t *testing.T) {
 	d := &fakeDoer{
 		tokenResponses: []fakeResponse{tokenOK()},

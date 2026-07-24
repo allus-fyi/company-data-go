@@ -209,3 +209,45 @@ func TestPollResultExpired(t *testing.T) {
 		t.Fatalf("expected ApiError 410, got %v", err)
 	}
 }
+
+// ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────────
+
+func TestAuthorizeURLAccepts2FAEnrollMode(t *testing.T) {
+	c, _ := NewOAuthClient(idwConfig(t, nil))
+	got, err := c.AuthorizeURL("2fa_enroll", &AuthorizeURLOptions{ResponseMode: "detached", State: "EN1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(got)
+	q := u.Query()
+	if q.Get("mode") != "2fa_enroll" || q.Get("response_mode") != "detached" {
+		t.Fatalf("query = %v", q)
+	}
+}
+
+func TestPollResultPendingThenEnrolled(t *testing.T) {
+	// #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResult must
+	// return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
+	d := &oauthFake{postQ: []fakeResponse{{status: 202}, {status: 200, body: `{"enrolled":true,"state":"EN1"}`}}}
+	c, _ := NewOAuthClient(idwConfig(t, nil), WithOAuthDoer(d), WithOAuthSleep(func(time.Duration) {}))
+	res, err := c.PollResult("EN1", 5*time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["enrolled"] != true || res["state"] != "EN1" {
+		t.Fatalf("res = %v", res)
+	}
+	if len(d.posts) != 2 { // returned on first delivery, never polled past it
+		t.Fatalf("expected 2 polls, got %d", len(d.posts))
+	}
+}
+
+func TestPollResultStillReturnsOnCodeAfterEnrollChange(t *testing.T) {
+	// Regression: the enroll addition must not break the sign-in `code` delivery.
+	d := &oauthFake{postQ: []fakeResponse{{status: 200, body: `{"code":"AUTHCODE","state":"DET1"}`}}}
+	c, _ := NewOAuthClient(idwConfig(t, nil), WithOAuthDoer(d), WithOAuthSleep(func(time.Duration) {}))
+	res, err := c.PollResult("DET1", 5*time.Second, time.Millisecond)
+	if err != nil || res["code"] != "AUTHCODE" {
+		t.Fatalf("poll: %v %v", res, err)
+	}
+}

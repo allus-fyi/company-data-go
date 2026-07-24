@@ -110,8 +110,8 @@ type AuthorizeURLOptions struct {
 
 // AuthorizeURL builds the consent-screen URL — the "Sign in with allme" button target.
 func (c *OAuthClient) AuthorizeURL(mode string, opts *AuthorizeURLOptions) (string, error) {
-	if mode != "signin" && mode != "one_time" && mode != "connect" {
-		return "", newConfigError("invalid mode %q (expected signin | one_time | connect)", mode)
+	if mode != "signin" && mode != "one_time" && mode != "connect" && mode != "2fa_enroll" {
+		return "", newConfigError("invalid mode %q (expected signin | one_time | connect | 2fa_enroll)", mode)
 	}
 	if opts == nil {
 		opts = &AuthorizeURLOptions{}
@@ -265,7 +265,10 @@ func (c *OAuthClient) decryptValues(raw map[string]any) (map[string]string, erro
 	return out, nil
 }
 
-// PollResult polls /oauth2/result for a detached sign-in (single-delivery).
+// PollResult polls /oauth2/result for a detached sign-in or enrollment (single-delivery). A detached
+// sign-in returns {code, state}; a detached 2fa_enroll returns {enrolled: true, state} (#481). It
+// returns on the first delivered shape (code OR enrolled) and never polls past it, so a one-shot
+// enrollment result is not consumed and lost.
 func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) (map[string]any, error) {
 	if timeout <= 0 {
 		timeout = 600 * time.Second
@@ -290,7 +293,11 @@ func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) 
 		switch resp.StatusCode {
 		case 200:
 			m := parseJSONObject(body)
-			if _, ok := m["code"]; ok {
+			// #481: return on the first delivered terminal shape — a sign-in `code` OR a
+			// 2fa_enroll `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
+			// returning here (rather than looping) keeps a one-shot enrollment result from
+			// being consumed and lost to a timeout.
+			if asString(m["code"]) != "" || asBool(m["enrolled"]) {
 				return m, nil
 			}
 		case 410:

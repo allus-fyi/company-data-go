@@ -701,4 +701,54 @@ url, _ := oauth.AuthorizeURL("signin", &companydata.AuthorizeURLOptions{State: s
 res, _ := oauth.CompleteSignIn(code, verifier) // res.User, res.Mode, res.Values (plaintext)
 ```
 
-Modes: `signin` | `one_time` (claim values decrypted for you) | `connect`. `PollResult(state, timeout, interval)` drives the detached mode.
+Modes: `signin` | `one_time` (claim values decrypted for you) | `connect` |
+`2fa_enroll` (opt a person into 2FA — see below).
+
+## 2FA by allme (#436, #481)
+
+Ask a connected person to approve a login inside the allme app. On the same service data client (no new
+config), via the `TwoFactor()` sub-client:
+
+```go
+client, err := companydata.FromConfig("allus.json")
+if err != nil {
+    log.Fatal(err)
+}
+ctx := context.Background()
+
+// Raise a challenge. The idempotency key is REQUIRED — a repeat with the same key within the TTL returns
+// the SAME challenge and sends no second push. The context is plain text shown on the person's card
+// (pass "" for none).
+ch, err := client.TwoFactor().Challenge(ctx, "2I6UF3", "login-8f3c1a", "Sign-in from Chrome")
+if err != nil {
+    log.Fatal(err)
+}
+if ch.MatchingDigits != "" {                  // number matching is on for this service
+    showOnLoginPage(ch.MatchingDigits)        // the person types these back into the app; the server checks them
+}
+
+// Wait for the terminal outcome — polls Result for you (0, 0 → defaults: 600s timeout, 2s interval),
+// returns an *ApiError on timeout.
+res, err := client.TwoFactor().WaitForResult(ctx, ch.ChallengeID, 0, 0) // or Result(ctx, ch.ChallengeID) to poll once yourself
+if err != nil {
+    log.Fatal(err)
+}
+if res.Status == "approved" {
+    grantLogin()
+}
+```
+
+- **Burn-on-read.** The first read of a terminal state (`approved` | `denied` | `expired` | `revoked`)
+  delivers it and burns it — a later read is `gone`. Read it once and persist your own outcome;
+  `WaitForResult` returns that first terminal read and never re-reads a consumed challenge.
+- **Webhook variant.** The `2fa_challenge_completed` change/webhook carries the same terminal `Status`, so a
+  webhook consumer need not poll. **Expiry fires no webhook/Change** — only `approved`/`denied`/`revoked`
+  reach the feed, so a lapsed challenge is observable only by polling.
+- **Enrollment.** Only an enrolled person can be challenged (an un-enrolled `share_code` is `404`).
+  Enrollment is a one-time consent on the `web.allme.fyi/auth` surface via the OAuth helper's `2fa_enroll`
+  mode — a redirect button (`oauth.AuthorizeURL("2fa_enroll", &companydata.AuthorizeURLOptions{State: state})`),
+  or server-to-server with `ResponseMode: "detached"` + `PollResult(state, 0, 0)`, which returns
+  `{"enrolled": true, "state": ...}` once the person confirms.
+- **Errors.** `404` (unknown / not-enrolled share code). A `429` is either the plain rate limit (retried with
+  backoff → `*RateLimitError`) or `twofa.pending_cap` (too many challenges already open for this person) — the
+  latter surfaces immediately as `*ApiError` and is never retried, since a retry cannot clear it.
