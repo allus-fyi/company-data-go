@@ -21,7 +21,8 @@ internals, never raw platform HTTP.
 ## Run it — one command
 
 ```bash
-cd sdks/go/examples/company-data
+git clone https://github.com/allus-fyi/company-data-go
+cd company-data-go/examples/company-data
 go run .
 ```
 
@@ -71,10 +72,16 @@ build/SDK failure surfaces as a `failed` run (never a 200 without the envelope).
 
 ### The webhook scenario (accumulating)
 
-`companydata:webhook` is the one *accumulating* run. `/start` persists a routing
-record `webhookId → runId` (superseding any prior one) and returns
-`action:{type:"none"}` — there is **no** long-poll (it would wedge the single
-worker). Events then arrive two ways, both appended to the same run's `result`:
+`companydata:webhook` is the one *accumulating* run, and it is **setup-first**:
+register a webhook on your service in the portal, then paste its **webhook id** and
+one-time **HMAC secret** into the scenario before starting it — **the run refuses to
+start without them** (`server.go` answers `409 not_configured`). Set
+`encrypt_payload` OFF; this example holds no account private key.
+
+Once started, `/start` persists a routing record `webhookId → runId` (superseding any
+prior one) and returns `action:{type:"none"}` — there is **no** long-poll (it would
+wedge the single worker). Events then arrive two ways, both appended to the same
+run's `result`:
 
 - **Inbound deliveries** on the **public `POST /webhook`** route. The exact
   call/status sequence (never the combined `HandleWebhook`, which can't split
@@ -92,6 +99,19 @@ worker). Events then arrive two ways, both appended to the same run's `result`:
 
 The run stays `pending` while collecting; the frontend keeps polling and renders
 `run.result` = `{webhookId, events, unparseable}`.
+
+**Optional / advanced — real inbound delivery.** The feed fallback above means you
+need no tunnel to watch events arrive. To exercise a genuine `POST /webhook` from the
+deployed platform, your machine has to be publicly addressable — open one tunnel:
+
+```bash
+cloudflared tunnel --url http://localhost:8091
+```
+
+Register the printed public URL with **`/webhook`** appended as the webhook's target
+in the portal, and keep the tunnel running while you test. Against a local stack no
+tunnel is needed — register `http://localhost:8091/webhook` directly, since its
+delivery worker can reach the example.
 
 ---
 

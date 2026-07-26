@@ -19,7 +19,8 @@ is the point of the OIDC demonstration (#314).
 ## Run it — one command
 
 ```bash
-cd sdks/go/examples/identity
+git clone https://github.com/allus-fyi/company-data-go
+cd company-data-go/examples/identity
 go run .
 ```
 
