@@ -1,4 +1,4 @@
-package main
+package identity
 
 // OIDC login (scenarios 5 & 6, the #314 compliance demo) via the STANDARD Go OIDC stack:
 // github.com/coreos/go-oidc/v3/oidc (discovery + id_token verification) over golang.org/x/oauth2

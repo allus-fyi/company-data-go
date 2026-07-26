@@ -1,7 +1,0 @@
-# Transients — never committed (runtime state + fetched bundle).
-# go.mod / go.sum ARE committed: they pin the SDK's own dependencies exactly, so two
-# fresh `go run .` builds resolve the same dependency graph.
-/.runtime/
-/.frontend/
-.DS_Store
-/flow

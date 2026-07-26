@@ -1,4 +1,4 @@
-package main
+package identity
 
 // PKCE (RFC 7636) verifier + S256 challenge. Pure local crypto — no network, no platform HTTP.
 // The SDK takes the code_challenge into OAuthClient.AuthorizeURL and the code_verifier into

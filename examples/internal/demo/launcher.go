@@ -1,14 +1,15 @@
-package main
+package demo
 
-// One-command launcher for the company-data example: `go run .` (from this directory).
+// The one-command launcher shared by the whole example: `go run .` (from examples/).
 //
 // Steps (mirroring the PHP reference bin/start.php):
 //  1. wipe .runtime/ (fresh state each boot)
 //  2. on a missing/unverified bundle: fetch the pinned frontend release (frontend.lock), VERIFY its
 //     sha256, unpack to .frontend/<tag>/ (a present, verified bundle is a cache hit — nothing refetched)
-//  3. assert the bundle's contract.json version == the backend's implemented contractVersion
+//  3. assert the bundle's contract.json version == the backend's implemented ContractVersion
 //  4. refuse a busy port with a clear message
-//  5. serve http://localhost:${PORT:-8091} with a SINGLE serialising net/http server
+//  5. serve http://localhost:${PORT:-8091} with a SINGLE serialising net/http server that hosts all
+//     three scenario families.
 
 import (
 	"archive/tar"
@@ -35,23 +36,25 @@ type frontendLock struct {
 	Sha256 string `json:"sha256"`
 }
 
-func main() {
-	if err := run(); err != nil {
+// Main is the process entry point: it wires the shared Runtime into each family factory and runs the
+// server, exiting non-zero on a startup error.
+func Main(factories ...FamilyFactory) {
+	if err := run(factories); err != nil {
 		fmt.Fprintf(os.Stderr, "\nERROR: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(factories []FamilyFactory) error {
 	base, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "company-data example (go) — starting up")
+	fmt.Fprintln(os.Stderr, "allme SDK example test suite (go) — starting up")
 
-	// 1. fresh runtime state
+	// 1. fresh runtime state (shared by all three families)
 	rt := NewRuntime(base)
-	if err := rt.wipeAll(); err != nil {
+	if err := rt.WipeAll(); err != nil {
 		return fmt.Errorf("could not reset .runtime/: %w", err)
 	}
 
@@ -61,7 +64,7 @@ func run() error {
 		return err
 	}
 	frontendDir := filepath.Join(base, ".frontend", lock.Tag) // per-tag cache dir
-	if err := ensureFrontend(base, frontendDir, lock); err != nil {
+	if err := ensureFrontend(frontendDir, lock); err != nil {
 		return err
 	}
 
@@ -82,9 +85,13 @@ func run() error {
 			"(one browser origin is shared across SDK examples, so only one runs at a time)", port, err)
 	}
 
-	// 5. serve — single serialising server
-	srv := &Server{rt: rt, frontendDir: frontendDir, sdkVersion: sdkVersion()}
-	fmt.Fprintf(os.Stderr, "serving http://%s  (Ctrl-C to stop)\n", addr)
+	// 5. serve — single serialising server hosting every family
+	families := make([]Family, 0, len(factories))
+	for _, f := range factories {
+		families = append(families, f(rt))
+	}
+	srv := &Server{rt: rt, frontendDir: frontendDir, sdkVersion: sdkVersion(), families: families}
+	fmt.Fprintf(os.Stderr, "serving http://%s  (all three scenario families; Ctrl-C to stop)\n", addr)
 	httpSrv := &http.Server{Handler: srv}
 	return httpSrv.Serve(ln)
 }
@@ -105,7 +112,7 @@ func readLock(path string) (*frontendLock, error) {
 }
 
 // ensureFrontend serves a verified cache hit or fetches + verifies + unpacks the pinned release.
-func ensureFrontend(base, frontendDir string, lock *frontendLock) error {
+func ensureFrontend(frontendDir string, lock *frontendLock) error {
 	markSha := strings.ToLower(strings.TrimSpace(readFileString(filepath.Join(frontendDir, ".sha"))))
 	cacheValid := isFile(filepath.Join(frontendDir, "index.html")) &&
 		isFile(filepath.Join(frontendDir, "contract.json")) &&
@@ -114,12 +121,12 @@ func ensureFrontend(base, frontendDir string, lock *frontendLock) error {
 		fmt.Fprintf(os.Stderr, "frontend %s present + checksum-verified (cache hit) — skipping fetch\n", lock.Tag)
 		return nil
 	}
-	return fetchBundle(base, frontendDir, lock)
+	return fetchBundle(frontendDir, lock)
 }
 
 // fetchBundle downloads dist.tar.gz for the pinned tag, verifies its sha256, and unpacks it. A checksum
 // mismatch refuses loudly (an unverified bundle is never served).
-func fetchBundle(base, frontendDir string, lock *frontendLock) error {
+func fetchBundle(frontendDir string, lock *frontendLock) error {
 	url := releaseBase + "/" + lock.Tag + "/dist.tar.gz"
 	fmt.Fprintf(os.Stderr, "fetching frontend %s → %s\n", lock.Tag, url)
 
@@ -170,10 +177,10 @@ func checkContract(frontendDir string) error {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return fmt.Errorf("bundle contract.json invalid: %w", err)
 	}
-	if c.ContractVersion != contractVersion {
+	if c.ContractVersion != ContractVersion {
 		return fmt.Errorf("contract mismatch: bundle contractVersion=%d, backend implements %d.\n"+
 			"Bump the frontend.lock pin to a release whose contract.json matches, or update the backend.",
-			c.ContractVersion, contractVersion)
+			c.ContractVersion, ContractVersion)
 	}
 	return nil
 }
@@ -248,6 +255,8 @@ func sdkVersion() string {
 			if dep.Path != "github.com/allus-fyi/company-data-go" {
 				continue
 			}
+			// A local replace directive (this example runs against the in-tree SDK) reports no real
+			// version — surface it as "dev" rather than the placeholder v0.0.0 / (devel).
 			if dep.Replace != nil {
 				return "dev"
 			}

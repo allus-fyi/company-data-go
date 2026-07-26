@@ -1,18 +1,16 @@
-package main
+package flow
 
-// The demo-backend contract (v2, flow family), config-file model. One Server, one serialising mutex:
-// HTTP dispatch → handler → the intended top-level allme SDK flow surface only (Identity /
-// TriggerFlowRun / FlowRun / ProcessFlowRun / FlowRunAnswers / FlowRunDocument). Handlers NEVER perform
-// raw platform HTTP.
+// The flow scenario family: a single scenario "flow:run" that runs a contract flow end-to-end through
+// the SDK's intended top-level flow surface (Identity / TriggerFlowRun / FlowRun / ProcessFlowRun /
+// FlowRunAnswers / FlowRunDocument) — never raw platform HTTP.
 //
-// A single scenario "flow:run". There is NO cross-card flow-run-id handoff: the platform flow run lives
-// entirely INSIDE this one demo run's .runtime file — the demo runId is the backend run and the platform
-// flowRunId is stored inside it, never exposed as a separate browser input.
+// There is NO cross-card flow-run-id handoff: the platform flow run lives entirely INSIDE this one demo
+// run's .runtime file — the demo runId is the backend run and the platform flowRunId is stored inside it,
+// never exposed as a separate browser input.
 //
-// Settings flow (config-file model): the browser POSTs a scenario's setup values to
-// POST /api/scenarios/{id}/config, which writes them to a canonical SDK config FILE
-// (.runtime/config/{store}.json; the service PEM → .runtime/config/keys/ by path). /start builds the
-// service Client from that file via companydata.FromConfig (ConfigFromFile) and runs OFF the config —
+// Settings flow (config-file model): the browser POSTs its setup values to POST /api/scenarios/{id}/config,
+// which writes them to a canonical SDK config FILE (the service PEM → .runtime/config/keys/ by path).
+// /start builds the service Client from that file via companydata.FromConfig and runs OFF the config —
 // exactly as a real integrator wires the SDK. The request body of /start is ignored; a /start with no
 // saved config → 409 not_configured.
 //
@@ -24,28 +22,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/allus-fyi/company-data-go/companydata"
+	"github.com/allus-fyi/company-data-go/examples/internal/demo"
 )
 
 const (
-	contractVersion = 2 // flow family lands at the next-available version (identity=1)
-	sdkName         = "go"
-	defaultAPIURL   = "https://api.allme.fyi"
+	defaultAPIURL = demo.DefaultAPIURL
 
 	// scenarioID is the single public scenario id (the flow family).
 	scenarioID = "flow:run"
-	// storeID is the internal store key for the config/meta/run files (the public id is not
-	// filesystem-shaped).
-	storeID = 1
 
 	// invalidEmail is the canned INVALID value the validation-demo submits once for an email field.
 	invalidEmail = "not-an-email"
@@ -55,90 +43,37 @@ const (
 	partyCustomer = "customer"
 )
 
+// thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
-	reConfig = regexp.MustCompile(`^/api/scenarios/([\w:.-]+)/config$`)
-	reStart  = regexp.MustCompile(`^/api/scenarios/([\w:.-]+)/start$`)
-	reClear  = regexp.MustCompile(`^/api/scenarios/([\w:.-]+)/clear$`)
-	reRun    = regexp.MustCompile(`^/api/runs/([0-9a-f]{32})$`)
+	writeJSON  = demo.WriteJSON
+	readBody   = demo.ReadBody
+	newRunID   = demo.NewRunID
+	toStr      = demo.ToStr
+	orDefault  = demo.OrDefault
+	toAnySlice = demo.AnySlice
+	strSlice   = demo.StringSlice
 )
 
-// Server implements the demo-backend contract for the flow family.
-type Server struct {
-	rt          *Runtime
-	frontendDir string
-	sdkVersion  string
-	mu          sync.Mutex // serialises requests → single-worker semantics (contract §3)
+// family implements demo.Family for the flow scenario.
+type family struct{ rt *demo.Runtime }
+
+// New binds the flow family to the shared runtime.
+func New(rt *demo.Runtime) demo.Family { return &family{rt: rt} }
+
+// Scenarios lists the single flow scenario.
+func (family) Scenarios() []demo.Scenario {
+	return []demo.Scenario{{ID: scenarioID, Kind: "runnable"}}
 }
 
-// ServeHTTP dispatches every request (static bundle OR API) behind the serialising mutex.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.rt.ensureDirs()
-	s.rt.sweep() // lazy TTL sweep on every request (contract §3)
-
-	path := r.URL.Path
-	method := r.Method
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			writeJSON(w, 500, map[string]any{"error": "server_error", "message": toStr(rec)})
-		}
-	}()
-
-	switch {
-	case path == "/api/meta" && method == http.MethodGet:
-		s.meta(w)
-	case path == "/api/clear" && method == http.MethodPost:
-		s.rt.clearAll()
-		writeJSON(w, 200, map[string]any{"ok": true})
-	case reConfig.MatchString(path) && method == http.MethodPost:
-		s.config(w, r, reConfig.FindStringSubmatch(path)[1])
-	case reStart.MatchString(path) && method == http.MethodPost:
-		s.start(w, reStart.FindStringSubmatch(path)[1])
-	case reClear.MatchString(path) && method == http.MethodPost:
-		id := reClear.FindStringSubmatch(path)[1]
-		if !isKnownScenario(id) {
-			writeJSON(w, 404, map[string]any{"error": "not_found"})
-			return
-		}
-		s.rt.clearScenario(storeID)
-		writeJSON(w, 200, map[string]any{"ok": true})
-	case reRun.MatchString(path) && method == http.MethodGet:
-		s.run(w, reRun.FindStringSubmatch(path)[1])
-	case strings.HasPrefix(path, "/api/"):
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-	default:
-		s.serveStatic(w, r, path)
-	}
-}
-
-func isKnownScenario(id string) bool { return id == scenarioID }
-
-// ── GET /api/meta ───────────────────────────────────────────────────────────
-
-func (s *Server) meta(w http.ResponseWriter) {
-	writeJSON(w, 200, map[string]any{
-		"sdk":             sdkName,
-		"sdkVersion":      s.sdkVersion,
-		"contractVersion": contractVersion,
-		"scenarios": []map[string]any{
-			{"id": scenarioID, "kind": "runnable"},
-		},
-	})
-}
+// Owns reports whether id is the flow scenario id.
+func (family) Owns(id string) bool { return id == scenarioID }
 
 // ── POST /api/scenarios/{id}/config ───────────────────────────────────────────
 
-// config writes the browser's setup values to a canonical SDK config FILE (service role). The service
+// Config writes the browser's setup values to a canonical SDK config FILE (service role). The service
 // PEM is written to config/keys/ and referenced by path; the demo-only run parameters (published flow
 // id, connection id, fixture choice) go to the meta sidecar so the config file stays a pure SDK config.
-func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
-	if !isKnownScenario(id) {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
+func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	in := readBody(r)
 
 	// Canonical SDK config — the service role (client_credentials + service PEM).
@@ -149,7 +84,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 		"key_passphrase": toStr(in["keyPassphrase"]),
 	}
 	if pem := toStr(in["servicePrivateKeyPem"]); pem != "" {
-		path, err := s.rt.materializeConfigKey(pem)
+		path, err := h.rt.MaterializeConfigKey(pem)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 			return
@@ -157,14 +92,14 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 		cfg["service_private_key"] = path
 	}
 
-	configPath, err := s.rt.writeConfig(storeID, cfg)
+	configPath, err := h.rt.WriteConfig(id, cfg)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 		return
 	}
 
 	// Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
-	s.rt.writeConfigMeta(storeID, map[string]any{
+	h.rt.WriteConfigMeta(id, map[string]any{
 		"flow_id":       toStr(in["flowId"]),
 		"connection_id": toStr(in["connectionId"]),
 		"fixture":       toStr(in["fixture"]),
@@ -175,21 +110,17 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 
 // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
-// start triggers the flow run. It builds the service Client from the persisted config file, constructs
+// Start triggers the flow run. It builds the service Client from the persisted config file, constructs
 // the bindings via the intended SDK surface (company → Identity().CompanyUserID; customer →
 // Connection.PersonID), calls TriggerFlowRun, and stores the returned platform flow-run id in the demo
 // run file. Returns {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
-func (s *Server) start(w http.ResponseWriter, id string) {
-	if !isKnownScenario(id) {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
-	if !s.rt.hasConfig(storeID) {
+func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
+	if !h.rt.HasConfig(id) {
 		// The run is built from the persisted config file, not the request body.
 		writeJSON(w, 409, map[string]any{"error": "not_configured"})
 		return
 	}
-	meta := s.rt.readConfigMeta(storeID)
+	meta := h.rt.ReadConfigMeta(id)
 	flowID := toStr(meta["flow_id"])
 	connectionID := toStr(meta["connection_id"])
 	if flowID == "" || connectionID == "" {
@@ -200,7 +131,7 @@ func (s *Server) start(w http.ResponseWriter, id string) {
 	ctx := context.Background()
 	calls := []any{}
 
-	client, err := s.serviceClient()
+	client, err := h.serviceClient(id)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
 		return
@@ -251,8 +182,8 @@ func (s *Server) start(w http.ResponseWriter, id string) {
 	}
 
 	runID := newRunID()
-	s.rt.writeRun(runID, map[string]any{
-		"scenario":      storeID,
+	h.rt.WriteRun(runID, map[string]any{
+		"scenario":      scenarioID,
 		"flowRunId":     flowRun.ID,
 		"steps":         []any{},
 		"rejectedNodes": []any{},
@@ -263,32 +194,33 @@ func (s *Server) start(w http.ResponseWriter, id string) {
 	writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "none"}})
 }
 
+// ── POST /api/scenarios/{id}/clear ────────────────────────────────────────────
+
+func (h *family) Clear(w http.ResponseWriter, r *http.Request, id string) {
+	h.rt.ClearScenario(id)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 // ── GET /api/runs/{runId} ─────────────────────────────────────────────────────
 
-// run is the idempotent, short-cycled poll that IS the drive loop and the resume. Reads the platform
+// Run is the idempotent, short-cycled poll that IS the drive loop and the resume. Reads the platform
 // run; if it is the company's turn drives exactly ONE step; on completion fetches the answers and
 // (document-mode) downloads the generated contract. A terminal run returns its cached result on every
 // poll until TTL/Clear.
-func (s *Server) run(w http.ResponseWriter, runID string) {
-	run := s.rt.readRun(runID)
-	if run == nil {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
-
+func (h *family) Run(w http.ResponseWriter, runID string, run map[string]any) {
 	// Idempotent: once terminal (completed OR errored) the outcome is returned unchanged on every
 	// subsequent poll — a failed run must stay failed, not re-drive the platform.
 	terminal := run["completed"] == true || run["error"] != nil
 	if !terminal {
-		run = s.advance(run)
-		s.rt.writeRun(runID, run)
+		run = h.advance(run)
+		h.rt.WriteRun(runID, run)
 	}
 
-	writeJSON(w, 200, s.result(run))
+	writeJSON(w, 200, result(run))
 }
 
 // advance does one poll's worth of work and returns the (possibly mutated) run map.
-func (s *Server) advance(run map[string]any) map[string]any {
+func (h *family) advance(run map[string]any) map[string]any {
 	flowRunID := toStr(run["flowRunId"])
 	if flowRunID == "" {
 		run["status"] = "error"
@@ -297,7 +229,7 @@ func (s *Server) advance(run map[string]any) map[string]any {
 	}
 
 	ctx := context.Background()
-	client, err := s.serviceClient()
+	client, err := h.serviceClient(scenarioID)
 	if err != nil {
 		return failRun(run, err)
 	}
@@ -313,9 +245,9 @@ func (s *Server) advance(run map[string]any) map[string]any {
 
 	switch {
 	case status == "completed":
-		return s.complete(run, client, flowRun, flowRunID)
+		return h.complete(run, client, flowRun, flowRunID)
 	case companyTurn:
-		return s.driveStep(run, client, flowRun, flowRunID)
+		return h.driveStep(run, client, flowRun, flowRunID)
 	case strings.HasPrefix(status, "awaiting_"):
 		// The person's turn (or the phone signature) — wait; the next poll resumes automatically.
 		run["status"] = "waiting_person"
@@ -332,7 +264,7 @@ func (s *Server) advance(run map[string]any) map[string]any {
 // rejects with a *ValidationError BEFORE any submit — recorded as accepted:false without advancing. The
 // next poll (node marked rejected) fills the VALID value → advances → accepted:true. Other fields submit
 // one valid value.
-func (s *Server) driveStep(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
+func (h *family) driveStep(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
 	ctx := context.Background()
 	nodeKey := flowRun.CurrentNode
 	rejectedNodes := strSlice(run["rejectedNodes"])
@@ -409,7 +341,7 @@ func (s *Server) driveStep(run map[string]any, client *companydata.Client, flowR
 
 // complete is terminal: fetch the decrypted answers and, for a document-mode run, download the generated
 // contract's company copy (the run-scoped, service-key-decryptable surface).
-func (s *Server) complete(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
+func (h *family) complete(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
 	ctx := context.Background()
 
 	answers, err := client.FlowRunAnswers(flowRun)
@@ -445,7 +377,7 @@ func (s *Server) complete(run map[string]any, client *companydata.Client, flowRu
 // frontend reads progress ONLY from run.result and keeps polling ONLY while the outer status is
 // "pending", so the inner flow status must NOT sit at the top level — it drives under "pending" until
 // the platform run completes ("done") or errors ("failed").
-func (s *Server) result(run map[string]any) map[string]any {
+func result(run map[string]any) map[string]any {
 	flowStatus := orDefault(toStr(run["status"]), "running")
 	outer := "pending"
 	if run["error"] != nil {
@@ -454,20 +386,20 @@ func (s *Server) result(run map[string]any) map[string]any {
 		outer = "done"
 	}
 
-	result := map[string]any{
+	res := map[string]any{
 		"status": flowStatus,
 		"steps":  toAnySlice(run["steps"]),
 	}
 	if run["answers"] != nil {
-		result["answers"] = run["answers"]
+		res["answers"] = run["answers"]
 	}
 	if run["document"] != nil {
-		result["document"] = run["document"]
+		res["document"] = run["document"]
 	}
 
 	out := map[string]any{
 		"status": outer,
-		"result": result,
+		"result": res,
 		"calls":  toAnySlice(run["calls"]),
 	}
 	if run["error"] != nil {
@@ -479,8 +411,8 @@ func (s *Server) result(run map[string]any) map[string]any {
 // ── SDK client builder — built from the persisted config FILE ─────────────────
 
 // serviceClient builds the service data client OFF the scenario's config file (service role).
-func (s *Server) serviceClient() (*companydata.Client, error) {
-	return companydata.FromConfig(s.rt.configPathFor(storeID))
+func (h *family) serviceClient(id string) (*companydata.Client, error) {
+	return companydata.FromConfig(h.rt.ConfigPath(id))
 }
 
 // cannedValue is a canned VALID plaintext for a field type (demo values over already-supported
@@ -511,30 +443,6 @@ func cannedValue(ftype string) string {
 	}
 }
 
-// ── static bundle (SPA fallback to index.html) ────────────────────────────────
-
-func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, path string) {
-	rel := path
-	if rel == "/" {
-		rel = "/index.html"
-	}
-	root, _ := filepath.Abs(s.frontendDir)
-	full, _ := filepath.Abs(filepath.Join(s.frontendDir, filepath.Clean(rel)))
-	if strings.HasPrefix(full, root+string(filepath.Separator)) || full == root {
-		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
-			http.ServeFile(w, r, full)
-			return
-		}
-	}
-	// SPA fallback.
-	index := filepath.Join(s.frontendDir, "index.html")
-	if fi, err := os.Stat(index); err == nil && !fi.IsDir() {
-		http.ServeFile(w, r, index)
-		return
-	}
-	http.Error(w, "bundle not found", 404)
-}
-
 // ── small helpers ─────────────────────────────────────────────────────────────
 
 // addCall appends a call name preserving first-occurrence order (a poll may repeat FlowRun across polls).
@@ -554,48 +462,6 @@ func failRun(run map[string]any, err error) map[string]any {
 	return run
 }
 
-func readBody(r *http.Request) map[string]any {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil || len(raw) == 0 {
-		return map[string]any{}
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return map[string]any{}
-	}
-	return m
-}
-
-func writeJSON(w http.ResponseWriter, status int, data map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.Encode(data)
-}
-
-func toStr(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
-// toAnySlice coerces a JSON-decoded value into a []any (nil → empty slice).
-func toAnySlice(v any) []any {
-	if s, ok := v.([]any); ok {
-		return s
-	}
-	return []any{}
-}
-
-// strSlice coerces a JSON-decoded value into a []string.
-func strSlice(v any) []string {
-	out := []string{}
-	for _, e := range toAnySlice(v) {
-		out = append(out, toStr(e))
-	}
-	return out
-}
-
 func contains(list []string, want string) bool {
 	for _, v := range list {
 		if v == want {
@@ -603,24 +469,4 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func asInt(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case string:
-		i, _ := strconv.Atoi(n)
-		return i
-	}
-	return 0
-}
-
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
 }

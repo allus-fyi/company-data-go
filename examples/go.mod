@@ -1,8 +1,8 @@
-module github.com/allus-fyi/company-data-go/examples/identity
+module github.com/allus-fyi/company-data-go/examples
 
 go 1.26
 
-replace github.com/allus-fyi/company-data-go => ../..
+replace github.com/allus-fyi/company-data-go => ..
 
 require (
 	github.com/allus-fyi/company-data-go v0.0.0

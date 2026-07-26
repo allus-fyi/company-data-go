@@ -1,0 +1,7 @@
+# Transients — never committed (runtime state + fetched bundle + built binary).
+# go.mod / go.sum ARE committed: they pin the reviewed third-party libraries (OIDC stack) and the SDK's
+# own transitive deps exactly, so two fresh `go run .` builds resolve the same dependency graph.
+/.runtime/
+/.frontend/
+/examples
+.DS_Store

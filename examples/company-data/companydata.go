@@ -1,44 +1,41 @@
-package main
-
-// The demo-backend contract (v3), company-data family, config-file model. One Server, one serialising
-// mutex: HTTP dispatch → handler → the intended allme SDK surface (companydata.Client) ONLY — no raw
-// platform HTTP, no SDK internals. Every company-data scenario uses the SERVICE-role data Client, built
-// from the persisted config file; there is NO OAuth leg (no /callback, no /enroll).
+// Package companydemo is the company-data scenario family of the SDK example test suite: reading
+// connected people's live values, the request-field catalog, the crash-safe changes feed, inbound
+// webhooks, and company documents / contracts — every scenario through the SDK's intended top-level
+// surface (companydata.Client) only, no raw platform HTTP.
 //
-// The five scenarios, all namespaced companydata:* (contract §"Company-data family"):
-//   read        — Client.ConnectionsList()          → connection-grouped decrypted values
-//   definitions — Client.RequestFields()            → your request-field catalog
-//   changes     — Client.ProcessChanges()           → a crash-safe pump drain (idempotent on Change.ID)
-//   webhook     — VerifyWebhook()+ParseWebhook()    → a public POST /webhook receiver + a DrainBatch()
-//                                                      feed fallback; ONE accumulating run keyed by id
-//   documents   — Client.CreateDocument() ×6        → the six document/contract types
+// The package name is companydemo (not companydata) so these handlers can import the SDK's own
+// companydata package unqualified — the SDK calls below read exactly as an integrator writes them.
 //
-// Settings flow: the browser POSTs a scenario's setup values to POST /api/scenarios/{id}/config, which
-// writes them to a canonical SDK config FILE (.runtime/config/{sid}.json). /start builds the Client from
-// that file (companydata.FromConfig → ConfigFromFile) and runs OFF it — exactly as a real integrator
-// wires the SDK. A /start with no saved config → 409 not_configured.
+// Every company-data scenario uses the SERVICE-role data Client, built from the persisted config file;
+// there is NO OAuth leg (no /callback, no /enroll). The five scenarios, all namespaced companydata:*:
+//
+//	read        — Client.ConnectionsList()          → connection-grouped decrypted values
+//	definitions — Client.RequestFields()            → your request-field catalog
+//	changes     — Client.ProcessChanges()           → a crash-safe pump drain (idempotent on Change.ID)
+//	webhook     — VerifyWebhook()+ParseWebhook()    → a public POST /webhook receiver + a DrainBatch()
+//	                                                   feed fallback; ONE accumulating run keyed by id
+//	documents   — Client.CreateDocument() ×6        → the six document/contract types
+//
+// Settings flow: the browser POSTs setup values to POST /api/scenarios/{id}/config, which writes them to
+// a canonical SDK config FILE. /start builds the Client from that file (companydata.FromConfig) and runs
+// OFF it — exactly as a real integrator wires the SDK. A /start with no saved config → 409 not_configured.
+package companydemo
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/allus-fyi/company-data-go/companydata"
+	"github.com/allus-fyi/company-data-go/examples/internal/demo"
 )
 
 const (
-	contractVersion = 3
-	sdkName         = "go"
-	defaultAPIURL   = "https://api.allme.fyi"
-	drainBatchMax   = 500 // the pump clamps to [1,500]; ask for a full batch per feed pull
+	defaultAPIURL = demo.DefaultAPIURL
+	drainBatchMax = 500 // the pump clamps to [1,500]; ask for a full batch per feed pull
 )
 
 // scenario ids (all namespaced companydata:* and all "runnable").
@@ -50,8 +47,7 @@ const (
 	scenDocuments   = "companydata:documents"
 )
 
-// scenarios maps id → "runnable". Every company-data scenario runs synchronously (data) or accumulates
-// (webhook). The frontend lists these five for this backend's family.
+// scenarioOrder is the family's display order in /api/meta.
 var scenarioOrder = []string{scenRead, scenDefinitions, scenChanges, scenWebhook, scenDocuments}
 
 func isScenario(id string) bool {
@@ -66,90 +62,45 @@ func isScenario(id string) bool {
 // pumpScenarios need a Config.CacheDir (the SDK pump's durable buffer / dead-letters).
 var pumpScenarios = map[string]bool{scenChanges: true, scenWebhook: true}
 
+// thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
-	reConfig = regexp.MustCompile(`^/api/scenarios/([a-z:]+)/config$`)
-	reStart  = regexp.MustCompile(`^/api/scenarios/([a-z:]+)/start$`)
-	reClear  = regexp.MustCompile(`^/api/scenarios/([a-z:]+)/clear$`)
-	reRun    = regexp.MustCompile(`^/api/runs/([0-9a-f]{32})$`)
+	writeJSON     = demo.WriteJSON
+	writeText     = demo.WriteText
+	readBody      = demo.ReadBody
+	newRunID      = demo.NewRunID
+	toStr         = demo.ToStr
+	asInt         = demo.AsInt
+	orDefault     = demo.OrDefault
+	toAnySlice    = demo.StringsToAny
+	toStringSlice = demo.StringSlice
 )
 
-// Server implements the demo-backend contract (company-data family).
-type Server struct {
-	rt          *Runtime
-	frontendDir string
-	sdkVersion  string
-	mu          sync.Mutex // serialises requests → single-worker semantics (contract §3)
-}
+// family implements demo.Family (+ demo.Webhooker) for the company-data scenarios.
+type family struct{ rt *demo.Runtime }
 
-// ServeHTTP dispatches every request (static bundle OR API OR the public POST /webhook) behind the
-// serialising mutex.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// New binds the company-data family to the shared runtime.
+func New(rt *demo.Runtime) demo.Family { return &family{rt: rt} }
 
-	s.rt.ensureDirs()
-	s.rt.sweep() // lazy TTL sweep on every request (contract §3)
-
-	path := r.URL.Path
-	method := r.Method
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			writeJSON(w, 500, map[string]any{"error": "server_error", "message": toStr(rec)})
-		}
-	}()
-
-	switch {
-	case path == "/api/meta" && method == http.MethodGet:
-		s.meta(w)
-	case path == "/webhook" && method == http.MethodPost:
-		s.webhook(w, r) // PUBLIC inbound delivery (not under /api/)
-	case path == "/api/clear" && method == http.MethodPost:
-		s.rt.clearAll()
-		writeJSON(w, 200, map[string]any{"ok": true})
-	case reConfig.MatchString(path) && method == http.MethodPost:
-		s.config(w, r, reConfig.FindStringSubmatch(path)[1])
-	case reStart.MatchString(path) && method == http.MethodPost:
-		s.start(w, r, reStart.FindStringSubmatch(path)[1])
-	case reClear.MatchString(path) && method == http.MethodPost:
-		s.rt.clearScenario(reClear.FindStringSubmatch(path)[1])
-		writeJSON(w, 200, map[string]any{"ok": true})
-	case reRun.MatchString(path) && method == http.MethodGet:
-		s.run(w, reRun.FindStringSubmatch(path)[1])
-	case strings.HasPrefix(path, "/api/"):
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-	default:
-		s.serveStatic(w, r, path)
-	}
-}
-
-// ── GET /api/meta ───────────────────────────────────────────────────────────
-
-func (s *Server) meta(w http.ResponseWriter) {
-	list := make([]map[string]any, 0, len(scenarioOrder))
+// Scenarios lists the five company-data scenarios in display order.
+func (family) Scenarios() []demo.Scenario {
+	list := make([]demo.Scenario, 0, len(scenarioOrder))
 	for _, id := range scenarioOrder {
-		list = append(list, map[string]any{"id": id, "kind": "runnable"})
+		list = append(list, demo.Scenario{ID: id, Kind: "runnable"})
 	}
-	writeJSON(w, 200, map[string]any{
-		"sdk":             sdkName,
-		"sdkVersion":      s.sdkVersion,
-		"contractVersion": contractVersion,
-		"scenarios":       list,
-	})
+	return list
 }
+
+// Owns reports whether id is one of the company-data scenario ids.
+func (family) Owns(id string) bool { return isScenario(id) }
 
 // ── POST /api/scenarios/{id}/config ───────────────────────────────────────────
 
-// config writes the browser's setup values to a canonical SDK config FILE. Every company-data scenario
+// Config writes the browser's setup values to a canonical SDK config FILE. Every company-data scenario
 // uses the SERVICE-role Client, so the config always carries client_id/secret + the service PEM (by path)
 // + passphrase. The webhook scenario adds the webhooks:{id:secret} map (the SDK selects the secret by the
 // X-Allus-Webhook-Id header) and records the webhook id in a meta sidecar (the routing key /start needs).
 // The documents scenario records the target person share code in the sidecar.
-func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
-	if !isScenario(id) {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
+func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	in := readBody(r)
 
 	// Canonical SDK config — the service role for every company-data scenario.
@@ -160,7 +111,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 		"key_passphrase": toStr(in["keyPassphrase"]),
 	}
 	if pem := toStr(in["servicePrivateKeyPem"]); pem != "" {
-		path, err := s.rt.materializeConfigKey(pem)
+		path, err := h.rt.MaterializeConfigKey(pem)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 			return
@@ -170,7 +121,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Pump scenarios persist their buffer/dead-letters under .runtime/cache (Config.CacheDir).
 	if pumpScenarios[id] {
-		cfg["cache_dir"] = s.rt.cacheDir
+		cfg["cache_dir"] = h.rt.CacheDir()
 	}
 
 	meta := map[string]any{}
@@ -190,24 +141,20 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request, id string) {
 		meta["share_code"] = toStr(in["shareCode"]) // the per-person/contract target
 	}
 
-	configPath, err := s.rt.writeConfig(id, cfg)
+	configPath, err := h.rt.WriteConfig(id, cfg)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 		return
 	}
-	s.rt.writeConfigMeta(id, meta)
+	h.rt.WriteConfigMeta(id, meta)
 
 	writeJSON(w, 200, map[string]any{"ok": true, "configPath": configPath})
 }
 
 // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
-func (s *Server) start(w http.ResponseWriter, r *http.Request, id string) {
-	if !isScenario(id) {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
-	if !s.rt.hasConfig(id) {
+func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
+	if !h.rt.HasConfig(id) {
 		// The run is built from the persisted config file, not the request body.
 		writeJSON(w, 409, map[string]any{"error": "not_configured"})
 		return
@@ -215,16 +162,30 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, id string) {
 
 	switch id {
 	case scenRead:
-		s.dataRun(w, id, s.doRead)
+		h.dataRun(w, id, h.doRead)
 	case scenDefinitions:
-		s.dataRun(w, id, s.doDefinitions)
+		h.dataRun(w, id, h.doDefinitions)
 	case scenChanges:
-		s.dataRun(w, id, s.doChanges)
+		h.dataRun(w, id, h.doChanges)
 	case scenDocuments:
-		s.dataRun(w, id, s.doDocuments)
+		h.dataRun(w, id, h.doDocuments)
 	case scenWebhook:
-		s.startWebhook(w, id)
+		h.startWebhook(w, id)
 	}
+}
+
+// ── POST /api/scenarios/{id}/clear ────────────────────────────────────────────
+
+// Clear removes the scenario's runs + config + meta, drops the webhook routing record (when clearing the
+// webhook scenario), and wipes the shared SDK pump cache dir.
+func (h *family) Clear(w http.ResponseWriter, r *http.Request, id string) {
+	h.rt.ClearScenario(id)
+	if id == scenWebhook {
+		h.rt.ClearRoute()
+	}
+	h.rt.WipeCache()
+	h.rt.EnsureDirs()
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // dataFn runs a synchronous data scenario's SDK call, appending the SDK-call names it made to *calls.
@@ -233,28 +194,28 @@ type dataFn func(c *companydata.Client, calls *[]string) (map[string]any, error)
 // dataRun builds the Client from the config file, runs the SDK call, and stores the terminal result. The
 // immediate outcome is read once via GET /api/runs (action {type:"data"}). A build/SDK failure is stored
 // as a "failed" run (still a 200 {runId, action} — the poll surfaces the error), NOT a non-envelope 200.
-func (s *Server) dataRun(w http.ResponseWriter, id string, do dataFn) {
+func (h *family) dataRun(w http.ResponseWriter, id string, do dataFn) {
 	runID := newRunID()
 	calls := []string{}
-	client, err := companydata.FromConfig(s.rt.configPathFor(id))
+	client, err := companydata.FromConfig(h.rt.ConfigPath(id))
 	if err != nil {
-		s.rt.writeRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": calls})
+		h.rt.WriteRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": calls})
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "data"}})
 		return
 	}
 	result, err := do(client, &calls)
 	if err != nil {
-		s.rt.writeRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": toAnySlice(calls)})
+		h.rt.WriteRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": toAnySlice(calls)})
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "data"}})
 		return
 	}
-	s.rt.writeRun(runID, map[string]any{"scenario": id, "status": "done", "result": result, "calls": toAnySlice(calls)})
+	h.rt.WriteRun(runID, map[string]any{"scenario": id, "status": "done", "result": result, "calls": toAnySlice(calls)})
 	writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "data"}})
 }
 
 // doRead — Client.ConnectionsList() grouped BY connection (one card per connected person), so two people
 // who both filled the same slug stay distinguishable.
-func (s *Server) doRead(client *companydata.Client, calls *[]string) (map[string]any, error) {
+func (h *family) doRead(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	conns, err := client.ConnectionsList(context.Background(), 0, 0)
 	*calls = append(*calls, "Client.ConnectionsList")
 	if err != nil {
@@ -285,7 +246,7 @@ func (s *Server) doRead(client *companydata.Client, calls *[]string) (map[string
 
 // doDefinitions — Client.RequestFields() → your request-field catalog (the folded mandatory bool +
 // one_time; the raw split flags are debug-only, off the intended surface).
-func (s *Server) doDefinitions(client *companydata.Client, calls *[]string) (map[string]any, error) {
+func (h *family) doDefinitions(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	fs, err := client.RequestFields(context.Background())
 	*calls = append(*calls, "Client.RequestFields")
 	if err != nil {
@@ -307,7 +268,7 @@ func (s *Server) doDefinitions(client *companydata.Client, calls *[]string) (map
 // doChanges — Client.ProcessChanges() drains the feed on start through the crash-safe pump
 // (handler-before-ack, at-least-once), so the append handler is idempotent on the pull-feed Change.ID.
 // Each event is the rendered-column projection PLUS a raw object with the full public Change fields.
-func (s *Server) doChanges(client *companydata.Client, calls *[]string) (map[string]any, error) {
+func (h *family) doChanges(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	events := []map[string]any{}
 	seen := map[string]bool{}
 	err := client.ProcessChanges(func(c companydata.Change) error {
@@ -330,8 +291,8 @@ func (s *Server) doChanges(client *companydata.Client, calls *[]string) (map[str
 // doDocuments — Client.CreateDocument() for each of the six document/contract types (payloads verbatim
 // from apitests/php/documents.php). The per-person / private / contract types target the connected person
 // by share code (from the setup sidecar).
-func (s *Server) doDocuments(client *companydata.Client, calls *[]string) (map[string]any, error) {
-	shareCode := toStr(s.rt.readConfigMeta(scenDocuments)["share_code"])
+func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[string]any, error) {
+	shareCode := toStr(h.rt.ReadConfigMeta(scenDocuments)["share_code"])
 
 	type spec struct {
 		label     string
@@ -407,14 +368,14 @@ func (s *Server) doDocuments(client *companydata.Client, calls *[]string) (map[s
 // (superseding any prior active webhook run) and returns {action:{type:"none"}} — there is NO long-poll
 // (it would wedge the single worker). Events arrive via POST /webhook and via a per-poll DrainBatch()
 // feed fallback; the frontend reads the growing list through GET /api/runs.
-func (s *Server) startWebhook(w http.ResponseWriter, id string) {
-	webhookID := toStr(s.rt.readConfigMeta(id)["webhook_id"])
+func (h *family) startWebhook(w http.ResponseWriter, id string) {
+	webhookID := toStr(h.rt.ReadConfigMeta(id)["webhook_id"])
 	if webhookID == "" {
 		writeJSON(w, 409, map[string]any{"error": "not_configured"})
 		return
 	}
 	runID := newRunID()
-	s.rt.writeRun(runID, map[string]any{
+	h.rt.WriteRun(runID, map[string]any{
 		"scenario":    scenWebhook,
 		"status":      "pending", // accumulating — the run enum is unchanged
 		"webhookId":   webhookID,
@@ -423,11 +384,11 @@ func (s *Server) startWebhook(w http.ResponseWriter, id string) {
 		"unparseable": 0,
 		"calls":       []any{"(webhook run started — POST /webhook receives; each poll also DrainBatch()s the feed)"},
 	})
-	s.rt.writeRoute(webhookID, runID)
+	h.rt.WriteRoute(webhookID, runID)
 	writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "none"}})
 }
 
-// webhook is the PUBLIC inbound delivery (POST /webhook). The exact call/status sequence (never the
+// Webhook is the PUBLIC inbound delivery (POST /webhook). The exact call/status sequence (never the
 // combined HandleWebhook(), which returns one *WebhookError for BOTH a bad-HMAC and a parse failure):
 //
 //	(1) read X-Allus-Webhook-Id; unknown/stale id or no active run → 200 acknowledge-and-discard.
@@ -437,22 +398,22 @@ func (s *Server) startWebhook(w http.ResponseWriter, id string) {
 //
 // All accepted-and-dropped cases return 200 because the platform worker counts EXACTLY 200 as success
 // (202/401/other = failure → retry + circuit-break).
-func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
+func (h *family) Webhook(w http.ResponseWriter, r *http.Request) {
 	rawBody, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	webhookID := r.Header.Get("X-Allus-Webhook-Id")
 
-	rt := s.rt.readRoute()
-	if rt == nil || webhookID == "" || webhookID != rt.WebhookID {
+	route := h.rt.ReadRoute()
+	if route == nil || webhookID == "" || webhookID != route.WebhookID {
 		writeText(w, 200, "discarded: unknown or stale webhook id")
 		return
 	}
-	run := s.rt.readRun(rt.RunID)
+	run := h.rt.ReadRun(route.RunID)
 	if run == nil {
 		writeText(w, 200, "discarded: no active webhook run")
 		return
 	}
 
-	client, err := companydata.FromConfig(s.rt.configPathFor(scenWebhook))
+	client, err := companydata.FromConfig(h.rt.ConfigPath(scenWebhook))
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 		return
@@ -462,7 +423,7 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	if !client.VerifyWebhook(rawBody, r.Header) {
 		// A genuine signature failure — persist the attempted verify so the calls trace stays truthful
 		// even on the reject path.
-		s.rt.writeRun(rt.RunID, run)
+		h.rt.WriteRun(route.RunID, run)
 		writeText(w, 401, "signature verification failed")
 		return
 	}
@@ -485,29 +446,23 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 			"note":   "received, could not parse",
 			"raw":    map[string]any{"error": we.Error()},
 		})
-		s.rt.writeRun(rt.RunID, run)
+		h.rt.WriteRun(route.RunID, run)
 		writeText(w, 200, "ok")
 		return
 	}
 	appendEvent(run, projectChange(change, "webhook"))
-	s.rt.writeRun(rt.RunID, run)
+	h.rt.WriteRun(route.RunID, run)
 	writeText(w, 200, "ok")
 }
 
 // ── GET /api/runs/{runId} ─────────────────────────────────────────────────────
 
-func (s *Server) run(w http.ResponseWriter, runID string) {
-	run := s.rt.readRun(runID)
-	if run == nil {
-		writeJSON(w, 404, map[string]any{"error": "not_found"})
-		return
-	}
-
+func (h *family) Run(w http.ResponseWriter, runID string, run map[string]any) {
 	// The accumulating webhook run: each poll also does ONE immediate DrainBatch() raw feed fetch (NOT
 	// ProcessChanges(), which loops the pump to empty and could stall the single worker) so events
 	// generated AFTER start still appear in deployed-no-tunnel mode.
 	if toStr(run["scenario"]) == scenWebhook {
-		run = s.webhookFeedFallback(runID, run)
+		run = h.webhookFeedFallback(runID, run)
 		writeJSON(w, 200, map[string]any{
 			"status": orDefault(toStr(run["status"]), "pending"),
 			"calls":  run["calls"],
@@ -534,18 +489,18 @@ func (s *Server) run(w http.ResponseWriter, runID string) {
 // source:"feed" events deduped on the pull-feed Change.ID (a feed-only seen-id set in run state). Only
 // the CURRENT active run pulls (a superseded run stops receiving). A transport/API error is swallowed so
 // a blackholed feed never fails the accumulating run — the webhook path still works.
-func (s *Server) webhookFeedFallback(runID string, run map[string]any) map[string]any {
-	rt := s.rt.readRoute()
-	if rt == nil || rt.RunID != runID {
+func (h *family) webhookFeedFallback(runID string, run map[string]any) map[string]any {
+	route := h.rt.ReadRoute()
+	if route == nil || route.RunID != runID {
 		return run // superseded/cleared — this run no longer pulls
 	}
 	seen := map[string]bool{}
 	seenList := toStringSlice(run["seenFeedIds"])
-	for _, sid := range seenList {
-		seen[sid] = true
+	for _, id := range seenList {
+		seen[id] = true
 	}
 
-	client, err := companydata.FromConfig(s.rt.configPathFor(scenWebhook))
+	client, err := companydata.FromConfig(h.rt.ConfigPath(scenWebhook))
 	if err != nil {
 		return run
 	}
@@ -555,7 +510,7 @@ func (s *Server) webhookFeedFallback(runID string, run map[string]any) map[strin
 	changes, err := client.DrainBatch(drainBatchMax)
 	if err != nil {
 		if drainNew {
-			s.rt.writeRun(runID, run)
+			h.rt.WriteRun(runID, run)
 		}
 		return run // a blackholed/failed feed fetch must not fail the accumulating webhook run
 	}
@@ -575,7 +530,7 @@ func (s *Server) webhookFeedFallback(runID string, run map[string]any) map[strin
 		run["seenFeedIds"] = toAnySlice(seenList)
 	}
 	if appended || drainNew {
-		s.rt.writeRun(runID, run)
+		h.rt.WriteRun(runID, run)
 	}
 	return run
 }
@@ -673,79 +628,7 @@ func stringifyValue(v any) any {
 	}
 }
 
-// ── static bundle (SPA fallback to index.html) ────────────────────────────────
-
-func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request, path string) {
-	rel := path
-	if rel == "/" {
-		rel = "/index.html"
-	}
-	root, _ := filepath.Abs(s.frontendDir)
-	full, _ := filepath.Abs(filepath.Join(s.frontendDir, filepath.Clean(rel)))
-	if strings.HasPrefix(full, root+string(filepath.Separator)) || full == root {
-		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
-			http.ServeFile(w, r, full)
-			return
-		}
-	}
-	// SPA fallback.
-	index := filepath.Join(s.frontendDir, "index.html")
-	if fi, err := os.Stat(index); err == nil && !fi.IsDir() {
-		http.ServeFile(w, r, index)
-		return
-	}
-	http.Error(w, "bundle not found", 404)
-}
-
 // ── small helpers ─────────────────────────────────────────────────────────────
-
-func readBody(r *http.Request) map[string]any {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil || len(raw) == 0 {
-		return map[string]any{}
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return map[string]any{}
-	}
-	return m
-}
-
-func writeJSON(w http.ResponseWriter, status int, data map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.Encode(data)
-}
-
-func writeText(w http.ResponseWriter, status int, body string) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(status)
-	io.WriteString(w, body)
-}
-
-func toStr(v any) string {
-	s, _ := v.(string)
-	return s
-}
-
-func asInt(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	}
-	return 0
-}
-
-func orDefault(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
-}
 
 func emptyToNil(s string) any {
 	if s == "" {
@@ -759,25 +642,6 @@ func isoOrNil(t *time.Time) any {
 		return nil
 	}
 	return t.Format(time.RFC3339)
-}
-
-func toAnySlice(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-	return out
-}
-
-func toStringSlice(v any) []string {
-	raw, _ := v.([]any)
-	out := make([]string, 0, len(raw))
-	for _, x := range raw {
-		if s, ok := x.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 func itoa(n int) string {

@@ -1,27 +1,28 @@
-package main
+package demo
 
-// Cross-request state for the company-data demo backend (contract §3, config-file model).
+// Cross-request state for the SDK-example demo backend (contract §3, config-file model), SHARED by all
+// three scenario families (identity, flow, company-data).
 //
-// The example runs as a SINGLE net/http server and every request is serialised behind one mutex in
+// The whole example runs as ONE net/http server and every request is serialised behind one mutex in
 // server.go, so — exactly like the PHP reference's single-worker `php -S` — there is NO cross-request
 // concurrency to guard inside here: no locks, no tombstones, no burn-on-read. Everything lives under
 // runtimeDir (git-ignored, wiped at startup):
 //
 //   - config/{sid}.json        — the canonical SDK config file a scenario runs OFF (written by
 //                                POST /api/scenarios/{id}/config from the browser settings; NOT TTL-swept)
-//   - config/{sid}.meta.json   — demo-only run parameters that are not SDK Config fields (a documents
-//                                target share_code; the webhook id)
-//   - config/keys/<sha1>.pem   — the service private-key file(s) a config references by path (mode 0600)
-//   - runs/{runId}.json        — one run's accumulated result (events / rows / docs) + calls
-//   - webhook-route.json       — the SINGLE active webhook run: {webhookId, runId}. A new
-//                                companydata:webhook run supersedes it; TTL/Clear of the run drops it.
+//   - config/{sid}.meta.json   — demo-only run parameters that are not SDK Config fields
+//   - config/keys/<sha1>.pem   — the private-key file(s) a config references by path (mode 0600)
+//   - runs/{runId}.json        — one run's PKCE/verifier/state, accumulated steps/events, and outcome
+//   - webhook-route.json       — the SINGLE active company-data webhook run: {webhookId, runId}
 //   - cache/                   — the SDK pump's buffer + dead-letter dir (Config.CacheDir), wiped by Clear
 //
-// {sid} is a filesystem-safe token of the scenario id (e.g. "companydata:read" → "companydata_read").
-// Config files persist across runs (they are configuration, not runs) and are removed only by a Clear or
-// the startup wipe. Run files are written via write-temp + atomic rename (crash hygiene only) and removed
-// by their 30-minute TTL (lazy sweep on any request, which also collects orphaned *.tmp files), by Clear,
-// or by the startup wipe.
+// {sid} is a filesystem-safe token of the scenario id — the SAME scheme for every family, so identity's
+// numeric ids ("3" → "3.json"), the flow id ("flow:run" → "flow_run.json") and the company-data ids
+// ("companydata:read" → "companydata_read.json") all key the store uniformly (contract: config is kept
+// per scenario id). Config files persist across runs (they are configuration, not runs) and are removed
+// only by a Clear or the startup wipe. Run files are written via write-temp + atomic rename (crash
+// hygiene only) and removed by their 30-minute TTL (lazy sweep on any request, which also collects
+// orphaned *.tmp files), by Clear, or by the startup wipe.
 
 import (
 	"crypto/rand"
@@ -37,6 +38,10 @@ import (
 
 // runTTL is the 30-minute run TTL. Config files are exempt (they are configuration, not runs).
 const runTTL = 30 * time.Minute
+
+// keyFields are every config field that references a materialized private-key PEM by path — used by the
+// key garbage collector. The union across families (identity's OAuth-app key + every service key).
+var keyFields = []string{"oauth_private_key", "service_private_key"}
 
 var (
 	runIDRe  = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -66,8 +71,11 @@ func NewRuntime(baseDir string) *Runtime {
 	return rt
 }
 
-// ensureDirs creates the runtime directories (idempotent).
-func (rt *Runtime) ensureDirs() error {
+// CacheDir is the SDK pump's durable buffer / dead-letter directory (Config.CacheDir).
+func (rt *Runtime) CacheDir() string { return rt.cacheDir }
+
+// EnsureDirs creates the runtime directories (idempotent).
+func (rt *Runtime) EnsureDirs() error {
 	for _, d := range []string{rt.runtimeDir, rt.runsDir, rt.configDir, rt.configKeysDir, rt.cacheDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
@@ -76,18 +84,18 @@ func (rt *Runtime) ensureDirs() error {
 	return nil
 }
 
-// wipeAll removes ALL runtime state (configs + keys + runs + cache + route) and recreates the empty tree.
-func (rt *Runtime) wipeAll() error {
+// WipeAll removes ALL runtime state (configs + keys + runs + cache + route) and recreates the empty tree.
+func (rt *Runtime) WipeAll() error {
 	os.RemoveAll(rt.runtimeDir)
-	return rt.ensureDirs()
+	return rt.EnsureDirs()
 }
 
 // ── lazy TTL sweep ──────────────────────────────────────────────────────────
 
-// sweep removes expired run files and orphaned *.tmp files. Called on every request (contract §3). When
+// Sweep removes expired run files and orphaned *.tmp files. Called on every request (contract §3). When
 // the active webhook run expires, its routing record is dropped too (a stale record never routes to a
 // burned run). Config files carry NO TTL — they are wiped only at startup or by Clear.
-func (rt *Runtime) sweep() {
+func (rt *Runtime) Sweep() {
 	now := time.Now()
 	entries, _ := os.ReadDir(rt.runsDir)
 	for _, e := range entries {
@@ -103,71 +111,71 @@ func (rt *Runtime) sweep() {
 			}
 		}
 	}
-	// Drop the routing record if its run is gone (expired/swept above).
-	if route := rt.readRoute(); route != nil {
-		if _, err := os.Stat(filepath.Join(rt.runsDir, route.RunID+".json")); err != nil {
-			os.Remove(rt.routePath)
-		}
-	}
+	rt.reconcileRoute()
 }
 
 // ── config files ────────────────────────────────────────────────────────────
 
-// sid is a filesystem-safe token for a scenario's string id ("companydata:read" → "companydata_read").
+// sid is a filesystem-safe token for a scenario's id (identity "3" → "3"; "flow:run" → "flow_run";
+// "companydata:read" → "companydata_read").
 func sid(scenarioID string) string {
 	return strings.Trim(nonTokRe.ReplaceAllString(strings.ToLower(scenarioID), "_"), "_")
 }
 
-func (rt *Runtime) configPathFor(scenarioID string) string {
+// ConfigPath is the ABSOLUTE path to a scenario's canonical SDK config file (fed to the SDK's
+// FromConfig / ConfigFromFile constructors).
+func (rt *Runtime) ConfigPath(scenarioID string) string {
 	return filepath.Join(rt.configDir, sid(scenarioID)+".json")
 }
 
-func (rt *Runtime) metaPathFor(scenarioID string) string {
+func (rt *Runtime) metaPath(scenarioID string) string {
 	return filepath.Join(rt.configDir, sid(scenarioID)+".meta.json")
 }
 
-func (rt *Runtime) hasConfig(scenarioID string) bool {
-	_, err := os.Stat(rt.configPathFor(scenarioID))
+// HasConfig reports whether a scenario's config file has been saved.
+func (rt *Runtime) HasConfig(scenarioID string) bool {
+	_, err := os.Stat(rt.ConfigPath(scenarioID))
 	return err == nil
 }
 
-// writeConfig writes a scenario's canonical SDK config file (atomic). Returns the RELATIVE path (for
+// WriteConfig writes a scenario's canonical SDK config file (atomic). Returns the RELATIVE path (for
 // display/inspection in the setup panel). config is the canonical SDK config shape (snake_case keys).
-func (rt *Runtime) writeConfig(scenarioID string, config map[string]any) (string, error) {
-	if err := rt.ensureDirs(); err != nil {
+func (rt *Runtime) WriteConfig(scenarioID string, config map[string]any) (string, error) {
+	if err := rt.EnsureDirs(); err != nil {
 		return "", err
 	}
 	blob, _ := json.MarshalIndent(config, "", "  ")
-	if err := atomicWrite(rt.configPathFor(scenarioID), blob, 0o600); err != nil {
+	if err := atomicWrite(rt.ConfigPath(scenarioID), blob, 0o600); err != nil {
 		return "", err
 	}
 	return ".runtime/config/" + sid(scenarioID) + ".json", nil
 }
 
-// writeConfigMeta writes a scenario's demo-only meta sidecar (share_code, webhook id) — run parameters
-// that are NOT SDK Config fields, kept out of the canonical config file.
-func (rt *Runtime) writeConfigMeta(scenarioID string, meta map[string]any) error {
-	if err := rt.ensureDirs(); err != nil {
+// WriteConfigMeta writes a scenario's demo-only meta sidecar — run parameters that are NOT SDK Config
+// fields (authorize base, one-time claims, share codes, flow/connection ids, webhook id), kept out of
+// the canonical config file so it stays a pure SDK config.
+func (rt *Runtime) WriteConfigMeta(scenarioID string, meta map[string]any) error {
+	if err := rt.EnsureDirs(); err != nil {
 		return err
 	}
 	blob, _ := json.MarshalIndent(meta, "", "  ")
-	return atomicWrite(rt.metaPathFor(scenarioID), blob, 0o600)
+	return atomicWrite(rt.metaPath(scenarioID), blob, 0o600)
 }
 
-// readConfigMeta reads a scenario's meta sidecar; empty map when absent.
-func (rt *Runtime) readConfigMeta(scenarioID string) map[string]any {
-	m := readJSONMap(rt.metaPathFor(scenarioID))
+// ReadConfigMeta reads a scenario's meta sidecar; empty map when absent.
+func (rt *Runtime) ReadConfigMeta(scenarioID string) map[string]any {
+	m := readJSONMap(rt.metaPath(scenarioID))
 	if m == nil {
 		return map[string]any{}
 	}
 	return m
 }
 
-// materializeConfigKey writes a browser-sent PEM to config/keys/<sha1>.pem (0600) and returns its
+// MaterializeConfigKey writes a browser-sent PEM to config/keys/<sha1>.pem (0600) and returns its
 // ABSOLUTE path — the value recorded in the config file (the SDK reads keys by path). Content-addressed:
 // identical PEM reuses the same file. Removed only by Clear or the startup wipe (never TTL).
-func (rt *Runtime) materializeConfigKey(pem string) (string, error) {
-	if err := rt.ensureDirs(); err != nil {
+func (rt *Runtime) MaterializeConfigKey(pem string) (string, error) {
+	if err := rt.EnsureDirs(); err != nil {
 		return "", err
 	}
 	sum := sha1.Sum([]byte(pem))
@@ -183,7 +191,8 @@ func (rt *Runtime) materializeConfigKey(pem string) (string, error) {
 
 // ── runs ────────────────────────────────────────────────────────────────────
 
-func newRunID() string {
+// NewRunID returns a fresh 128-bit hex run id.
+func NewRunID() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
@@ -191,16 +200,16 @@ func newRunID() string {
 
 func isRunID(s string) bool { return runIDRe.MatchString(s) }
 
-// writeRun writes a run atomically (write-temp + rename). A reader never sees a partial file.
-func (rt *Runtime) writeRun(runID string, data map[string]any) error {
+// WriteRun writes a run atomically (write-temp + rename). A reader never sees a partial file.
+func (rt *Runtime) WriteRun(runID string, data map[string]any) error {
 	data["runId"] = runID
 	blob, _ := json.MarshalIndent(data, "", "  ")
 	return atomicWrite(filepath.Join(rt.runsDir, runID+".json"), blob, 0o600)
 }
 
-// readRun reads a run, honouring the TTL. Returns nil for unknown/expired ids (idempotent reads — an
+// ReadRun reads a run, honouring the TTL. Returns nil for unknown/expired ids (idempotent reads — an
 // outcome, once written, is returned on every poll until TTL/Clear removes it).
-func (rt *Runtime) readRun(runID string) map[string]any {
+func (rt *Runtime) ReadRun(runID string) map[string]any {
 	if !isRunID(runID) {
 		return nil
 	}
@@ -218,44 +227,58 @@ func (rt *Runtime) readRun(runID string) map[string]any {
 
 // ── webhook routing record (contract §3 — single active webhook run) ──────────
 
-// route is the single active webhook route.
-type route struct {
+// Route is the single active company-data webhook route.
+type Route struct {
 	WebhookID string `json:"webhookId"`
 	RunID     string `json:"runId"`
 }
 
-// writeRoute persists the single active webhook route {webhookId, runId}, superseding any prior one. A
+// WriteRoute persists the single active webhook route {webhookId, runId}, superseding any prior one. A
 // new companydata:webhook run calls this on /start; the old run stops receiving (its file stays readable
 // until TTL/Clear).
-func (rt *Runtime) writeRoute(webhookID, runID string) error {
-	if err := rt.ensureDirs(); err != nil {
+func (rt *Runtime) WriteRoute(webhookID, runID string) error {
+	if err := rt.EnsureDirs(); err != nil {
 		return err
 	}
-	blob, _ := json.Marshal(route{WebhookID: webhookID, RunID: runID})
+	blob, _ := json.Marshal(Route{WebhookID: webhookID, RunID: runID})
 	return atomicWrite(rt.routePath, blob, 0o600)
 }
 
-// readRoute returns the active webhook route, or nil when none is set.
-func (rt *Runtime) readRoute() *route {
+// ReadRoute returns the active webhook route, or nil when none is set.
+func (rt *Runtime) ReadRoute() *Route {
 	raw, err := os.ReadFile(rt.routePath)
 	if err != nil {
 		return nil
 	}
-	var r route
+	var r Route
 	if json.Unmarshal(raw, &r) != nil || r.WebhookID == "" || r.RunID == "" {
 		return nil
 	}
 	return &r
 }
 
-func (rt *Runtime) clearRoute() { os.Remove(rt.routePath) }
+// ClearRoute drops the active webhook routing record.
+func (rt *Runtime) ClearRoute() { os.Remove(rt.routePath) }
+
+// reconcileRoute drops the routing record if its run is gone (expired/swept/cleared).
+func (rt *Runtime) reconcileRoute() {
+	if route := rt.ReadRoute(); route != nil {
+		if _, err := os.Stat(filepath.Join(rt.runsDir, route.RunID+".json")); err != nil {
+			os.Remove(rt.routePath)
+		}
+	}
+}
+
+// WipeCache removes the SDK pump's buffer / dead-letter directory (recreated on next EnsureDirs).
+func (rt *Runtime) WipeCache() { os.RemoveAll(rt.cacheDir) }
 
 // ── clear ─────────────────────────────────────────────────────────────────
 
-// clearScenario deletes a scenario's run files AND its config + meta files, then garbage-collects any
-// key PEM no surviving config still references (keys are content-addressed and may be shared). Clearing
-// the webhook scenario also drops the routing record; clearing anything wipes the shared pump cache dir.
-func (rt *Runtime) clearScenario(scenarioID string) {
+// ClearScenario deletes a scenario's run files AND its config + meta files, then garbage-collects any
+// key PEM no surviving config still references (keys are content-addressed and may be shared) and drops
+// the routing record if it pointed at a now-removed run. Families layer any extra teardown (the company-
+// data family also wipes the pump cache) on top.
+func (rt *Runtime) ClearScenario(scenarioID string) {
 	entries, _ := os.ReadDir(rt.runsDir)
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".json") {
@@ -263,30 +286,26 @@ func (rt *Runtime) clearScenario(scenarioID string) {
 		}
 		path := filepath.Join(rt.runsDir, e.Name())
 		m := readJSONMap(path)
-		if m != nil && toStr(m["scenario"]) == scenarioID {
+		if m != nil && ToStr(m["scenario"]) == scenarioID {
 			os.Remove(path)
 		}
 	}
-	os.Remove(rt.configPathFor(scenarioID))
-	os.Remove(rt.metaPathFor(scenarioID))
-	if scenarioID == scenWebhook {
-		rt.clearRoute()
-	}
-	os.RemoveAll(rt.cacheDir)
+	os.Remove(rt.ConfigPath(scenarioID))
+	os.Remove(rt.metaPath(scenarioID))
 	rt.gcConfigKeys()
-	rt.ensureDirs()
+	rt.reconcileRoute()
 }
 
-// clearAll wipes all run files, the entire config tree (configs, metas, keys), the route + pump cache.
-func (rt *Runtime) clearAll() {
+// ClearAll wipes all run files, the entire config tree (configs, metas, keys), the route + pump cache.
+func (rt *Runtime) ClearAll() {
 	entries, _ := os.ReadDir(rt.runsDir)
 	for _, e := range entries {
 		os.Remove(filepath.Join(rt.runsDir, e.Name()))
 	}
 	os.RemoveAll(rt.configDir)
 	os.RemoveAll(rt.cacheDir)
-	rt.clearRoute()
-	rt.ensureDirs()
+	rt.ClearRoute()
+	rt.EnsureDirs()
 }
 
 // gcConfigKeys deletes any key PEM in config/keys that no surviving config/{sid}.json references.
@@ -302,8 +321,10 @@ func (rt *Runtime) gcConfigKeys() {
 		if m == nil {
 			continue
 		}
-		if p, ok := m["service_private_key"].(string); ok && p != "" {
-			referenced[p] = true
+		for _, field := range keyFields {
+			if p, ok := m[field].(string); ok && p != "" {
+				referenced[p] = true
+			}
 		}
 	}
 	keys, _ := os.ReadDir(rt.configKeysDir)
