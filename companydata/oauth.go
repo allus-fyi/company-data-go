@@ -26,20 +26,69 @@ var nonClaimable = map[string]bool{"photo": true, "document": true, "legal_docum
 
 const maxClaims = 15
 
-// Claim is a one_time claim the RP asks for: a field TYPE + an advisory suggestion.
+// Claim is a claim the relying party asks for — a REQUEST FIELD (#498).
+//
+// You describe what you need: a Name (the claim's identity on the wire), a field Type, an advisory
+// Suggest-ion, whether it is Required, and whether only a #311-Verified answer will do. You never
+// name one of the person's fields — THEY decide which of theirs answers it.
+//
+// Name is MANDATORY and must be unique within one request: everything downstream is keyed by it (the
+// stored mapping, the consent outcome, and the Values/Attestations maps CompleteSignIn returns). Two
+// claims sharing a name are rejected rather than silently coalesced.
+//
+// Verified is accepted only where it can be honoured (#498 §3.1b): on the OIDC flow, and only for a
+// type #311 can attest (v1: email). Sending it on a one_time request is refused with
+// invalid_request — that leg carries no source row id, so the server could neither enforce the
+// requirement nor attest it, and an unhonourable requirement is refused rather than quietly dropped.
 type Claim struct {
+	// Name is REQUIRED — the claim's identity on the wire; Values/Attestations are keyed by it.
+	Name     string
 	Type     string
 	Suggest  string
 	Required bool
+	// Verified: only a #311-verified answer satisfies this claim. OIDC flow + verifiable types only.
+	Verified bool
 	Label    string
 }
 
+// Attestation is proof that a delivered value is the #311-verified one (#498 §3.1a).
+//
+// Present only for a Verified claim under ENCRYPTED delivery. The server builds and seals it against
+// your app key — a client-supplied attestation is never accepted — so it attests the server's own
+// record of the row the person chose, which is the only thing that makes it evidence.
+//
+// Verified is computed BY THIS SDK, in constant time, over the plaintext it just decrypted; it is
+// never passed through from the server. A Verified==false entry means MISMATCH and the RP MUST
+// reject the value. A claim ABSENT from Attestations means "not attested" — never "wrong" — and must
+// be treated as unverified.
+//
+// VerifiedAt carries the snapshot caveat: it attests the value as verified AT THAT MOMENT, not
+// verified today. A field loses its verification whenever the person re-saves it.
+type Attestation struct {
+	// Verified is recomputed here: sha256(salt ‖ plaintext) == hash, constant-time.
+	Verified bool
+	// Hash is lowercase hex.
+	Hash string
+	// Salt is lowercase hex.
+	Salt       string
+	VerifiedAt string
+}
+
 // SignInResult is the decrypted conclusion of CompleteSignIn.
+//
+// #498 §5: User["sub"] IS the person's SHARE CODE and is byte-identical to the id_token's sub;
+// "share_code" is retained beside it and now simply equals it. "display_name" is GONE — it is a
+// consented name claim now, or nothing: ask for Claim{Name: "name", Type: "text"} and read
+// Values["name"].
 type SignInResult struct {
 	User      map[string]string
 	Mode      string
 	TwoFactor bool
-	Values    map[string]string
+	// Values maps claim name → plaintext. Unchanged by #498.
+	Values map[string]string
+	// Attestations maps claim name → Attestation, keyed by the SAME slug as Values (#498 §3.1a).
+	// Additive: an integration that never reads it behaves exactly as before. ABSENT = not attested.
+	Attestations map[string]Attestation
 }
 
 // OAuthClient is the RP-side "Sign in with allme" client.
@@ -139,7 +188,11 @@ func (c *OAuthClient) AuthorizeURL(mode string, opts *AuthorizeURLOptions) (stri
 		q.Set("code_challenge", opts.CodeChallenge)
 		q.Set("code_challenge_method", "S256")
 	}
-	if cleaned := cleanClaims(opts.Claims); len(cleaned) > 0 {
+	cleaned, err := cleanClaims(opts.Claims)
+	if err != nil {
+		return "", err
+	}
+	if len(cleaned) > 0 {
 		b, err := json.Marshal(cleaned)
 		if err != nil {
 			return "", err
@@ -149,18 +202,32 @@ func (c *OAuthClient) AuthorizeURL(mode string, opts *AuthorizeURLOptions) (stri
 	return c.authorizeURL + "?" + q.Encode(), nil
 }
 
-func cleanClaims(claims []Claim) []map[string]any {
+func cleanClaims(claims []Claim) ([]map[string]any, error) {
 	out := []map[string]any{}
+	seen := map[string]bool{}
 	for _, c := range claims {
 		if c.Type == "" || nonClaimable[c.Type] {
 			continue
 		}
-		entry := map[string]any{"type": c.Type}
+		// #498 §2: Name is the claim's identity and it is mandatory. Refused HERE rather than left
+		// to the API, so the integration error surfaces at the call that made it.
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			return nil, newConfigError("every claim must carry a `Name` (#498)")
+		}
+		if seen[name] {
+			return nil, newConfigError("duplicate claim name %q (#498)", name)
+		}
+		seen[name] = true
+		entry := map[string]any{"name": name, "type": c.Type}
 		if c.Suggest != "" {
 			entry["suggest"] = c.Suggest
 		}
 		if c.Required {
 			entry["required"] = true
+		}
+		if c.Verified {
+			entry["verified"] = true
 		}
 		if c.Label != "" {
 			entry["label"] = c.Label
@@ -170,7 +237,7 @@ func cleanClaims(claims []Claim) []map[string]any {
 			break
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ExchangeCode swaps the authorization code for a token (POST /oauth2/token).
@@ -224,13 +291,13 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 	}
 	res := &SignInResult{
 		User: map[string]string{
-			"sub":          asString(info["sub"]),
-			"share_code":   asString(info["share_code"]),
-			"display_name": asString(info["display_name"]),
+			"sub":        asString(info["sub"]),
+			"share_code": asString(info["share_code"]),
 		},
-		Mode:      mode,
-		TwoFactor: asBool(info["two_factor"]),
-		Values:    map[string]string{},
+		Mode:         mode,
+		TwoFactor:    asBool(info["two_factor"]),
+		Values:       map[string]string{},
+		Attestations: map[string]Attestation{},
 	}
 	if raw, ok := info["values"].(map[string]any); ok && len(raw) > 0 {
 		vals, err := c.decryptValues(raw)
@@ -238,8 +305,66 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 			return nil, err
 		}
 		res.Values = vals
+		if rawAttest, ok := info["values_attestation"].(map[string]any); ok && len(rawAttest) > 0 {
+			att, err := c.decryptAttestations(rawAttest, vals)
+			if err != nil {
+				return nil, err
+			}
+			res.Attestations = att
+		}
 	}
 	return res, nil
+}
+
+// decryptAttestations opens the app-key-sealed attestations and attests each value itself (#498 §3.1a).
+//
+// A SECOND decrypt per verified claim: Values is byte-identical to before, but each attestation is
+// its own {"_enc":1,...} object. A passthrough accessor handing back an undecrypted blob would not be
+// an implementation of this.
+//
+// An attestation that cannot be opened or parsed is DROPPED, not surfaced as Verified==false —
+// absence means "not attested" and a mismatch means "reject the value", and conflating the two would
+// turn a key or transport problem into an accusation that the data was tampered with.
+func (c *OAuthClient) decryptAttestations(raw map[string]any, values map[string]string) (map[string]Attestation, error) {
+	pem, err := os.ReadFile(c.config.OAuthPrivateKey)
+	if err != nil {
+		return nil, newConfigError("could not read oauth_private_key: %v", err)
+	}
+	key, err := LoadPrivateKey(pem, c.config.OAuthKeyPassphrase)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]Attestation{}
+	for slug, wrapper := range raw {
+		plaintext, ok := values[slug]
+		if !ok {
+			continue
+		}
+		opened, err := Decrypt(wrapper, key)
+		if err != nil {
+			continue
+		}
+		var parsed struct {
+			Hash       string `json:"hash"`
+			Salt       string `json:"salt"`
+			VerifiedAt string `json:"verified_at"`
+		}
+		if err := json.Unmarshal([]byte(opened), &parsed); err != nil {
+			continue
+		}
+		if parsed.Hash == "" || parsed.Salt == "" {
+			continue
+		}
+		out[slug] = Attestation{
+			// Recomputed here, constant-time, over the plaintext just decrypted — never trusted
+			// from the server. false = the delivered value is NOT the verified one; reject it.
+			Verified:   HashMatches(parsed.Salt, parsed.Hash, plaintext),
+			Hash:       parsed.Hash,
+			Salt:       parsed.Salt,
+			VerifiedAt: parsed.VerifiedAt,
+		}
+	}
+	return out, nil
 }
 
 func (c *OAuthClient) decryptValues(raw map[string]any) (map[string]string, error) {

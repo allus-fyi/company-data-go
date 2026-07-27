@@ -183,7 +183,10 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		var claims []companydata.Claim
 		if n == 3 {
 			for _, t := range claimTypes(h.rt.ReadConfigMeta(id)) {
-				claims = append(claims, companydata.Claim{Type: t})
+				// #498: a claim carries a mandatory, unique Name — the key Values and Attestations
+				// come back under. The demo's config lists claim TYPES, so the type doubles as the
+				// name; a real integration usually names them for its own domain ("billing_email").
+				claims = append(claims, companydata.Claim{Name: t, Type: t})
 			}
 		}
 		oauth, err := h.oauthClientFor(id, 0)

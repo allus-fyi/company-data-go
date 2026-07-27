@@ -5,6 +5,7 @@ package companydata
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -106,11 +107,12 @@ func TestAuthorizeURLPKCEAndDetached(t *testing.T) {
 
 func TestAuthorizeURLClaimValidation(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
+	// #498: every claim carries a mandatory `name` — the identity everything downstream is keyed by.
 	got, _ := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: []Claim{
-		{Type: "email", Suggest: "email_personal"},
-		{Type: "photo"},
-		{Type: "phone", Required: true},
-		{Type: ""},
+		{Name: "email", Type: "email", Suggest: "email_personal"},
+		{Name: "avatar", Type: "photo"},
+		{Name: "phone", Type: "phone", Required: true},
+		{Name: "nothing", Type: ""},
 	}})
 	u, _ := url.Parse(got)
 	var parsed []map[string]any
@@ -118,8 +120,42 @@ func TestAuthorizeURLClaimValidation(t *testing.T) {
 	if len(parsed) != 2 || parsed[0]["type"] != "email" || parsed[1]["type"] != "phone" {
 		t.Fatalf("claims = %v", parsed)
 	}
+	if parsed[0]["name"] != "email" || parsed[1]["name"] != "phone" {
+		t.Fatalf("claim names = %v", parsed)
+	}
 	if parsed[0]["suggest"] != "email_personal" || parsed[1]["required"] != true {
 		t.Fatalf("claim details = %v", parsed)
+	}
+}
+
+// #498 §2: a claim with no name, and two claims sharing one, are refused at the call that made them
+// rather than left to fail at the API.
+func TestAuthorizeURLClaimNameRequired(t *testing.T) {
+	c, _ := NewOAuthClient(idwConfig(t, nil))
+	if _, err := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: []Claim{
+		{Type: "email"},
+	}}); err == nil {
+		t.Fatal("expected an error for a claim with no name")
+	}
+	if _, err := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: []Claim{
+		{Name: "email", Type: "email"},
+		{Name: "email", Type: "text"},
+	}}); err == nil {
+		t.Fatal("expected an error for a duplicate claim name")
+	}
+}
+
+// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+func TestAuthorizeURLClaimVerified(t *testing.T) {
+	c, _ := NewOAuthClient(idwConfig(t, nil))
+	got, _ := c.AuthorizeURL("signin", &AuthorizeURLOptions{Claims: []Claim{
+		{Name: "email", Type: "email", Verified: true},
+	}})
+	u, _ := url.Parse(got)
+	var parsed []map[string]any
+	json.Unmarshal([]byte(u.Query().Get("claims")), &parsed)
+	if len(parsed) != 1 || parsed[0]["verified"] != true {
+		t.Fatalf("claims = %v", parsed)
 	}
 }
 
@@ -127,7 +163,7 @@ func TestAuthorizeURLCaps15(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
 	var claims []Claim
 	for i := 0; i < 30; i++ {
-		claims = append(claims, Claim{Type: "text"})
+		claims = append(claims, Claim{Name: fmt.Sprintf("c%d", i), Type: "text"})
 	}
 	got, _ := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: claims})
 	u, _ := url.Parse(got)
@@ -148,7 +184,7 @@ func TestAuthorizeURLInvalidMode(t *testing.T) {
 func TestExchangeAndUserinfo(t *testing.T) {
 	d := &oauthFake{
 		postQ: []fakeResponse{{status: 200, body: `{"access_token":"AT","mode":"signin"}`}},
-		getQ:  []fakeResponse{{status: 200, body: `{"sub":"u1","share_code":"AB12CD","display_name":"Alice","mode":"signin","two_factor":false}`}},
+		getQ:  []fakeResponse{{status: 200, body: `{"sub":"AB12CD","share_code":"AB12CD","mode":"signin","two_factor":false}`}},
 	}
 	c, _ := NewOAuthClient(idwConfig(t, nil), WithOAuthDoer(d))
 	tok, err := c.ExchangeCode("CODE", "V")
@@ -159,8 +195,12 @@ func TestExchangeAndUserinfo(t *testing.T) {
 		t.Fatalf("form = %v", d.posts[0].form)
 	}
 	info, err := c.Userinfo("AT")
-	if err != nil || info["display_name"] != "Alice" {
+	// #498 §5: `sub` IS the share code (byte-identical to the id_token's), and `display_name` is gone.
+	if err != nil || info["sub"] != "AB12CD" || info["sub"] != info["share_code"] {
 		t.Fatalf("userinfo: %v %v", info, err)
+	}
+	if _, present := info["display_name"]; present {
+		t.Fatalf("display_name must not be returned any more: %v", info)
 	}
 }
 
@@ -172,7 +212,7 @@ func TestCompleteSignInDecrypts(t *testing.T) {
 	wrapperJSON, _ := json.Marshal(vec.Text.Wrapper)
 	d := &oauthFake{
 		postQ: []fakeResponse{{status: 200, body: `{"access_token":"AT","mode":"one_time"}`}},
-		getQ: []fakeResponse{{status: 200, body: `{"sub":"u1","display_name":"Alice","mode":"one_time","two_factor":true,"values":{"email_personal":` + string(wrapperJSON) + `}}`}},
+		getQ: []fakeResponse{{status: 200, body: `{"sub":"AB12CD","share_code":"AB12CD","mode":"one_time","two_factor":true,"values":{"email_personal":` + string(wrapperJSON) + `}}`}},
 	}
 	cfg := idwConfig(t, map[string]string{"oauth_private_key": pem, "oauth_key_passphrase": vec.Passphrase})
 	c, _ := NewOAuthClient(cfg, WithOAuthDoer(d))
@@ -180,8 +220,12 @@ func TestCompleteSignInDecrypts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Mode != "one_time" || !out.TwoFactor || out.User["display_name"] != "Alice" {
+	if out.Mode != "one_time" || !out.TwoFactor || out.User["sub"] != "AB12CD" {
 		t.Fatalf("result = %+v", out)
+	}
+	// #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+	if len(out.Attestations) != 0 {
+		t.Fatalf("attestations = %v (expected none)", out.Attestations)
 	}
 	if out.Values["email_personal"] != vec.Text.Plaintext {
 		t.Fatalf("decrypted = %q want %q", out.Values["email_personal"], vec.Text.Plaintext)
