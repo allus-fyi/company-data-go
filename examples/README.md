@@ -59,6 +59,14 @@ passphrases, and webhook signing secrets. It is a local developer example, not a
 hardened service: run it only on a network you trust, and only with sandbox
 credentials.
 
+**`localhost` and `127.0.0.1` are different origins.** Whichever address you open the
+example on is the one the backend registers as the redirect URI — it never substitutes
+a default — so open the example on the address you registered and stay on it for the
+whole round-trip. Registering both spellings on the OAuth app makes either one work,
+but that is a convenience, not a remedy for switching mid-flow: the browser also keeps
+your saved setup per origin, so a flow that returns to the other spelling lands on a
+page whose stored settings are simply not there.
+
 **Port.** `8091` is the default, overridable with the `PORT` env var:
 
 ```bash

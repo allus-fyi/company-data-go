@@ -15,6 +15,7 @@ package identity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -30,6 +31,19 @@ const (
 	pollTimeout        = 2 * time.Second                 // short-cycled SDK wait per poll (contract §3)
 	oidcNetworkTimeout = 15 * time.Second                // bounds OIDC discovery + token exchange
 )
+
+// noOrigin is the refusal when the request carries no Host header, so the browser's origin is unknown
+// (#574). There is NO default host: substituting one (localhost) silently sends the round-trip to a
+// DIFFERENT origin than the browser is on — a different localStorage and a redirect URI the OAuth app
+// never registered.
+const noOrigin = "no_origin — this request carried no Host header, so the OAuth redirect URI cannot be " +
+	"derived from the origin your browser is using. Open the example by its address " +
+	"(http://<host>:<port>/) and save the setup again."
+
+// noStoredOrigin is the refusal when the scenario's saved config holds no redirect URI to complete the
+// exchange with.
+const noStoredOrigin = "no_origin — the saved config has no oauth_redirect_uri. Save the scenario setup " +
+	"again from the browser you will complete the sign-in in."
 
 // scenarios maps id → "runnable" | "guide". Scenario 7 is the guide card (no /start).
 var scenarios = map[int]string{
@@ -90,6 +104,12 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	n := asInt(id)
 	if scenarios[n] != "runnable" {
 		writeJSON(w, 404, map[string]any{"error": "not_found"})
+		return
+	}
+	// The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse
+	// rather than store a hostless URI: the suite renders this sentence on Save.
+	if strings.TrimSpace(r.Host) == "" {
+		writeJSON(w, 400, map[string]any{"error": noOrigin})
 		return
 	}
 	in := readBody(r)
@@ -554,13 +574,23 @@ func (h *family) oidcSetupFor(ctx context.Context, id string) (*oidcSetup, error
 	if cfg == nil {
 		cfg = map[string]any{}
 	}
+	// The SAME value the authorize URL carried, so the two legs of the exchange cannot diverge. An
+	// absent record is a loud failure, never a substituted host (#574).
+	redirectURI := strings.TrimSpace(toStr(cfg["oauth_redirect_uri"]))
+	if redirectURI == "" {
+		return nil, errors.New(noStoredOrigin)
+	}
 	return newOIDCSetup(ctx, toStr(cfg["api_url"]), toStr(cfg["oauth_client_id"]),
-		toStr(cfg["oauth_client_secret"]), toStr(cfg["oauth_redirect_uri"]))
+		toStr(cfg["oauth_client_secret"]), redirectURI)
 }
 
-// redirectURI is the registered redirect URI: http://{host}/callback (host = the serving origin).
+// redirectURI is the registered redirect URI: http://{host}/callback, host = the origin the browser
+// actually used. Never falls back to a hardcoded host (#574) — 127.0.0.1 and localhost are DIFFERENT
+// origins for redirect matching and for browser storage alike, so a substituted default drops the
+// developer on an origin whose localStorage never held the setup and whose URI the OAuth app never
+// registered. Callers refuse an empty r.Host before reaching here.
 func (h *family) redirectURI(r *http.Request) string {
-	return "http://" + r.Host + "/callback"
+	return "http://" + strings.TrimSpace(r.Host) + "/callback"
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────
