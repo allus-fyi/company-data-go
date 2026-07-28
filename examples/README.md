@@ -36,7 +36,8 @@ on http://localhost:8091**. In detail it:
    re-fetched),
 3. checks the bundle's `contract.json` version against the backend's (**3**),
 4. refuses a busy port with a clear message, then
-5. serves `http://localhost:8091` — a **single** `net/http` server whose requests are serialised behind
+5. serves port `8091` on **all interfaces** and prints every URL it is reachable on — a **single**
+   `net/http` server whose requests are serialised behind
    one mutex (the Go equivalent of the PHP reference's single-worker `php -S`).
 
 Open **http://localhost:8091** and pick a scenario. Each scenario's setup panel has a **Save** button:
@@ -45,6 +46,18 @@ it POSTs your settings to the backend, which writes them to a canonical SDK **co
 wires by hand. The panel shows the written path so you can open and read the real config; **Run** then
 builds the SDK from that file (`companydata.OAuthClientFromConfig` / `companydata.FromConfig`) and runs
 off it. You never hand-create or edit the file — the backend writes it from your browser inputs.
+
+**From a phone or another machine on the same network.** The server binds **all
+interfaces**, so any device on your network can reach it — startup prints the exact
+`http://<your-lan-ip>:8091` URL to type, alongside the localhost one. Open that URL on
+the phone and press **Save** there: the redirect URI written into the config file
+follows the origin you used, so register the same `http://<your-lan-ip>:8091/callback`
+on your OAuth app. Binding all interfaces also means **anyone on your network can reach
+this demo**, and its setup panels accept and store real credentials under
+`.runtime/config/` — OAuth and data-client secrets, private-key PEMs and their
+passphrases, and webhook signing secrets. It is a local developer example, not a
+hardened service: run it only on a network you trust, and only with sandbox
+credentials.
 
 **Port.** `8091` is the default, overridable with the `PORT` env var:
 
@@ -79,8 +92,10 @@ deployed platform (`https://api.allme.fyi`), so no environment setup is required
 ### Identity (scenarios 1–8)
 
 Register an **OAuth app** (idw client) in the portal and enter its client id (and secret, if
-confidential). The redirect URI the backend registers is `http://localhost:8091/callback` (or your
-`PORT`). Scenario 3 (one-time claims) also needs the OAuth app's **private key** to decrypt the returned
+confidential). The redirect URI the backend registers follows the origin your browser used, so
+register that same URI on the OAuth app: **`http://localhost:8091/callback`** when you browse from
+this machine, **`http://<your-lan-ip>:8091/callback`** when you drive the example from a phone (the
+startup output prints the exact address). Adjust the port if you set `PORT`. Scenario 3 (one-time claims) also needs the OAuth app's **private key** to decrypt the returned
 claim values; scenarios 4 and 8 additionally use the **service** data client to read live values / run
 2FA. Scenario 7 is a **guide** card (no run) — it points you at scenarios 1 & 5 where the 2FA prompt is
 observed.

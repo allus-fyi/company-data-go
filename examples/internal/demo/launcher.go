@@ -8,8 +8,9 @@ package demo
 //     sha256, unpack to .frontend/<tag>/ (a present, verified bundle is a cache hit — nothing refetched)
 //  3. assert the bundle's contract.json version == the backend's implemented ContractVersion
 //  4. refuse a busy port with a clear message
-//  5. serve http://localhost:${PORT:-8091} with a SINGLE serialising net/http server that hosts all
-//     three scenario families.
+//  5. serve port ${PORT:-8091} on ALL interfaces with a SINGLE serialising net/http server that hosts
+//     all three scenario families — so a phone on the same network can reach it — printing every URL
+//     it is reachable on (#553).
 
 import (
 	"archive/tar"
@@ -78,7 +79,8 @@ func run(factories []FamilyFactory) error {
 	if port == "" {
 		port = "8091"
 	}
-	addr := "localhost:" + port
+	// An empty host binds ALL interfaces (dual-stack), so a phone on the same network can reach it (#553).
+	addr := ":" + port
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("port %s is busy (%v). Set PORT=<n> to use another port "+
@@ -91,9 +93,71 @@ func run(factories []FamilyFactory) error {
 		families = append(families, f(rt))
 	}
 	srv := &Server{rt: rt, frontendDir: frontendDir, sdkVersion: sdkVersion(), families: families}
-	fmt.Fprintf(os.Stderr, "serving http://%s  (all three scenario families; Ctrl-C to stop)\n", addr)
+	printReachableURLs(port)
 	httpSrv := &http.Server{Handler: srv}
 	return httpSrv.Serve(ln)
+}
+
+// printReachableURLs announces every URL the server is reachable on (#553).
+//
+// The server binds all interfaces, so a phone on the same network can reach it — but only if the
+// person holding the phone knows which address to type. Print the loopback URL AND every
+// non-loopback IPv4 address of this host, plus the plain warning that this is now open to the
+// local network.
+func printReachableURLs(port string) {
+	fmt.Fprintf(os.Stderr, "serving on ALL interfaces, port %s  (all three scenario families; Ctrl-C to stop)\n", port)
+	fmt.Fprintf(os.Stderr, "  on this machine:  http://localhost:%s\n", port)
+	lan := lanAddresses()
+	if len(lan) == 0 {
+		fmt.Fprintln(os.Stderr, "  on this network:  (no non-loopback IPv4 address found — is this machine on a network?)")
+	} else {
+		for i, addr := range lan {
+			label := "                    "
+			if i == 0 {
+				label = "  on this network:  "
+			}
+			fmt.Fprintf(os.Stderr, "%shttp://%s:%s\n", label, addr, port)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "  NOTE: anyone on your network can now reach this demo, and its setup panels accept and")
+	fmt.Fprintln(os.Stderr, "        store real credentials under .runtime/config/ — OAuth and data-client secrets,")
+	fmt.Fprintln(os.Stderr, "        private-key PEMs and their passphrases, and webhook signing secrets. It is a local")
+	fmt.Fprintln(os.Stderr, "        developer example, not a hardened service: run it only on a network you trust, and")
+	fmt.Fprintln(os.Stderr, "        only with sandbox credentials.")
+}
+
+// lanAddresses reports every non-loopback, non-link-local IPv4 address of this host. IPv4 only — an
+// IPv6 literal is not what anyone types into a phone.
+func lanAddresses() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			v4 := ip.To4()
+			if v4 == nil || v4.IsLoopback() || v4.IsLinkLocalUnicast() {
+				continue
+			}
+			out = append(out, v4.String())
+		}
+	}
+	return out
 }
 
 // ── frontend bundle ───────────────────────────────────────────────────────────
