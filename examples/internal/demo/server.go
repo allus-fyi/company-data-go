@@ -12,6 +12,7 @@ package demo
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -104,17 +105,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The guard is registered FIRST, so any unexpected panic in request preprocessing is covered too
+	// (#583 review pass 1). Ordinary runtime-directory creation failures are rejected at startup by
+	// WipeAll; this ordering closes the separate panic-before-recover hole.
+	defer func() {
+		if rec := recover(); rec != nil {
+			WriteFailure(w, 500, "server_error", rec)
+		}
+	}()
+
 	s.rt.EnsureDirs()
 	s.rt.Sweep() // lazy TTL sweep on every request (contract §3)
 
 	path := r.URL.Path
 	method := r.Method
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			WriteJSON(w, 500, map[string]any{"error": "server_error", "message": ToStr(rec)})
-		}
-	}()
 
 	switch {
 	case path == "/api/meta" && method == http.MethodGet:
@@ -262,6 +266,32 @@ func WriteJSON(w http.ResponseWriter, status int, data map[string]any) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	enc.Encode(data)
+}
+
+// WriteFailure writes the contract's FAILURE envelope (#583):
+// {"error": "<token> — <reason>", "message": "<reason>"}. reason is the error, the recovered panic
+// value, or a sentence.
+//
+// The suite's shared client raises body.error VERBATIM and ignores every other key (api.js:
+// `throw new Error(body.error || "start failed (…)")`), so a bare token in `error` reaches the developer
+// as one uninformative word and the REASON — which the backend has right there — is dropped. That is the
+// swallowed failure of standards.html §9: a failure converted into something indistinguishable from any
+// other failure. The token is kept and the reason appended in the shape this contract already uses for
+// exactly this (`no_origin — …`, #574); `message` keeps the bare reason for a programmatic reader.
+//
+// fmt.Sprint, not ToStr: a recovered panic value is almost never a string (a runtime fault arrives as
+// runtime.Error), and a type assertion to string answers "" for every one of them — reporting the panic
+// as an empty reason, the very defect this function exists to close.
+//
+// NOT used for the token-only refusals the suite handles by STATUS rather than body — 409
+// not_configured (startScenario maps the 409 before reading the body) and 404 not_found.
+func WriteFailure(w http.ResponseWriter, status int, token string, reason any) {
+	text := strings.TrimSpace(fmt.Sprint(reason))
+	shown := text
+	if shown == "" {
+		shown = "no reason was reported"
+	}
+	WriteJSON(w, status, map[string]any{"error": token + " — " + shown, "message": text})
 }
 
 // WriteText writes a plain-text response (the webhook receiver's acknowledgements).

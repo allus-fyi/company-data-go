@@ -91,12 +91,13 @@ var (
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
-	writeJSON = demo.WriteJSON
-	readBody  = demo.ReadBody
-	newRunID  = demo.NewRunID
-	toStr     = demo.ToStr
-	asInt     = demo.AsInt
-	orDefault = demo.OrDefault
+	writeJSON    = demo.WriteJSON
+	writeFailure = demo.WriteFailure
+	readBody     = demo.ReadBody
+	newRunID     = demo.NewRunID
+	toStr        = demo.ToStr
+	asInt        = demo.AsInt
+	orDefault    = demo.OrDefault
 )
 
 // family implements demo.Family (+ demo.Callbacker, demo.Enroller) for the identity scenarios.
@@ -161,7 +162,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 		if pem := toStr(in["oauthPrivateKeyPem"]); pem != "" {
 			path, err := h.rt.MaterializeConfigKey(pem)
 			if err != nil {
-				writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+				writeFailure(w, 500, "server_error", err)
 				return
 			}
 			cfg["oauth_private_key"] = path
@@ -179,7 +180,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 		if pem := toStr(in["servicePrivateKeyPem"]); pem != "" {
 			path, err := h.rt.MaterializeConfigKey(pem)
 			if err != nil {
-				writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+				writeFailure(w, 500, "server_error", err)
 				return
 			}
 			cfg["service_private_key"] = path
@@ -189,7 +190,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 	configPath, err := h.rt.WriteConfig(id, cfg)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+		writeFailure(w, 500, "server_error", err)
 		return
 	}
 
@@ -336,7 +337,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 // developer with no failure message and no pollable run (#482 review-pass-1). Both /start and /enroll
 // route their error paths here.
 func (h *family) startErr(w http.ResponseWriter, err error) {
-	writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+	writeFailure(w, 500, "server_error", err)
 }
 
 // ── POST /api/scenarios/{id}/enroll (scenario 8) ──────────────────────────────

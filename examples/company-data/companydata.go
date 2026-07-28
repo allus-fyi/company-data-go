@@ -83,6 +83,7 @@ var pumpScenarios = map[string]bool{scenChanges: true, scenWebhook: true}
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
 	writeJSON     = demo.WriteJSON
+	writeFailure  = demo.WriteFailure
 	writeText     = demo.WriteText
 	readBody      = demo.ReadBody
 	newRunID      = demo.NewRunID
@@ -131,7 +132,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	if pem := toStr(in["servicePrivateKeyPem"]); pem != "" {
 		path, err := h.rt.MaterializeConfigKey(pem)
 		if err != nil {
-			writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+			writeFailure(w, 500, "server_error", err)
 			return
 		}
 		cfg["service_private_key"] = path
@@ -161,7 +162,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 	configPath, err := h.rt.WriteConfig(id, cfg)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+		writeFailure(w, 500, "server_error", err)
 		return
 	}
 	h.rt.WriteConfigMeta(id, meta)
@@ -435,7 +436,7 @@ func (h *family) Webhook(w http.ResponseWriter, r *http.Request) {
 	recordCall(run, callServiceBuild)
 	client, err := companydata.FromConfig(h.rt.ConfigPath(scenWebhook))
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+		writeFailure(w, 500, "server_error", err)
 		return
 	}
 
@@ -454,7 +455,7 @@ func (h *family) Webhook(w http.ResponseWriter, r *http.Request) {
 		var we *companydata.WebhookError
 		if !errors.As(err, &we) {
 			// Not a webhook parse/decrypt failure (e.g. the request-fields fetch failed) — surface it.
-			writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+			writeFailure(w, 500, "server_error", err)
 			return
 		}
 		// Verified but unparseable/undecryptable — acknowledge (200) and note it in the raw view.

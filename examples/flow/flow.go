@@ -61,13 +61,14 @@ const (
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
-	writeJSON  = demo.WriteJSON
-	readBody   = demo.ReadBody
-	newRunID   = demo.NewRunID
-	toStr      = demo.ToStr
-	orDefault  = demo.OrDefault
-	toAnySlice = demo.AnySlice
-	strSlice   = demo.StringSlice
+	writeJSON    = demo.WriteJSON
+	writeFailure = demo.WriteFailure
+	readBody     = demo.ReadBody
+	newRunID     = demo.NewRunID
+	toStr        = demo.ToStr
+	orDefault    = demo.OrDefault
+	toAnySlice   = demo.AnySlice
+	strSlice     = demo.StringSlice
 )
 
 // family implements demo.Family for the flow scenario.
@@ -102,7 +103,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	if pem := toStr(in["servicePrivateKeyPem"]); pem != "" {
 		path, err := h.rt.MaterializeConfigKey(pem)
 		if err != nil {
-			writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+			writeFailure(w, 500, "server_error", err)
 			return
 		}
 		cfg["service_private_key"] = path
@@ -110,7 +111,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 	configPath, err := h.rt.WriteConfig(id, cfg)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
+		writeFailure(w, 500, "server_error", err)
 		return
 	}
 
@@ -150,7 +151,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	calls = append(calls, callServiceBuild)
 	client, err := h.serviceClient(id)
 	if err != nil {
-		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
+		writeFailure(w, 502, "start_failed", err)
 		return
 	}
 
@@ -158,12 +159,12 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	calls = append(calls, callIdentity)
 	identity, err := client.Identity(ctx)
 	if err != nil {
-		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
+		writeFailure(w, 502, "start_failed", err)
 		return
 	}
 	companyUserID := identity.CompanyUserID
 	if companyUserID == "" {
-		writeJSON(w, 502, map[string]any{"error": "identity_error", "message": "Identity() returned no company_user_id"})
+		writeFailure(w, 502, "identity_error", "Identity() returned no company_user_id")
 		return
 	}
 
@@ -171,15 +172,13 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	calls = append(calls, callConnection)
 	connection, err := client.Connection(ctx, connectionID)
 	if err != nil {
-		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
+		writeFailure(w, 502, "start_failed", err)
 		return
 	}
 	personID := connection.PersonID
 	if personID == "" {
-		writeJSON(w, 502, map[string]any{
-			"error":   "connection_error",
-			"message": "connection " + connectionID + " has no personId (not found or not connected)",
-		})
+		writeFailure(w, 502, "connection_error",
+			"connection "+connectionID+" has no personId (not found or not connected)")
 		return
 	}
 
@@ -190,11 +189,11 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	calls = append(calls, callTrigger)
 	flowRun, err := client.TriggerFlowRun(ctx, flowID, connectionID, bindings)
 	if err != nil {
-		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
+		writeFailure(w, 502, "start_failed", err)
 		return
 	}
 	if flowRun.ID == "" {
-		writeJSON(w, 502, map[string]any{"error": "trigger_error", "message": "TriggerFlowRun returned no run id"})
+		writeFailure(w, 502, "trigger_error", "TriggerFlowRun returned no run id")
 		return
 	}
 
