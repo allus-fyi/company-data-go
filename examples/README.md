@@ -82,11 +82,13 @@ time** (a busy port is refused with a clear message).
 ## Set up in the portal
 
 Every non-trivial scenario needs a bit of setup in the **allus portal at
-[`https://portal.allus.fyi`](https://portal.allus.fyi)**: register a **data client**
-(client_credentials) for the service, create/reuse the **service** and download its **private key
-(PEM)** (it decrypts values, answers, documents, and webhook payloads), and — for the flow scenario —
-import + publish a flow fixture. Each scenario's setup panel names the exact steps; the summary below
-covers what is specific to each family. Every scenario's advanced **API url** input defaults to the
+[`https://portal.allus.fyi`](https://portal.allus.fyi)**. Each scenario's setup checklist
+in the UI is followed by a table giving the intended value for **every control on every
+portal form it sends you to**, including the ones to leave alone — read that rather than
+guessing from the summary here, which only says what is specific to each family: register a
+**data client** (client_credentials) for the service, create/reuse the **service** and download
+its **private key (PEM)** (it decrypts values, answers, documents, and webhook payloads), and —
+for the flow scenario — import + publish a flow fixture. Every scenario's advanced **API url** input defaults to the
 deployed platform (`https://api.allme.fyi`), so no environment setup is required.
 
 ### Identity (scenarios 1–8)
