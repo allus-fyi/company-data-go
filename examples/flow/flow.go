@@ -43,6 +43,22 @@ const (
 	partyCustomer = "customer"
 )
 
+// The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+// scenario>`, appended AT the call site, in the order the calls were made. The annotations are
+// byte-identical in all six SDK examples — only the method reference is written in the language's own
+// idiom — so one scenario teaches one thing whichever example a reader starts. Keep them in step when
+// this file changes.
+const (
+	callServiceBuild = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
+	callIdentity     = "Client.Identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to"
+	callConnection   = "Client.Connection — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to"
+	callTrigger      = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version"
+	callFlowRun      = "Client.FlowRun — re-read on every poll to see whose turn the run is on"
+	callProcess      = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf"
+	callAnswers      = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key"
+	callDocument     = "Client.FlowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key"
+)
+
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
 var (
 	writeJSON  = demo.WriteJSON
@@ -131,6 +147,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := context.Background()
 	calls := []any{}
 
+	calls = append(calls, callServiceBuild)
 	client, err := h.serviceClient(id)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
@@ -138,12 +155,12 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// The COMPANY party binds to this service's own company_user_id.
+	calls = append(calls, callIdentity)
 	identity, err := client.Identity(ctx)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
 		return
 	}
-	calls = append(calls, "Client.Identity")
 	companyUserID := identity.CompanyUserID
 	if companyUserID == "" {
 		writeJSON(w, 502, map[string]any{"error": "identity_error", "message": "Identity() returned no company_user_id"})
@@ -151,12 +168,12 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// The CUSTOMER party binds to the connected person's public personId (no public user_id).
+	calls = append(calls, callConnection)
 	connection, err := client.Connection(ctx, connectionID)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
 		return
 	}
-	calls = append(calls, "Client.Connection")
 	personID := connection.PersonID
 	if personID == "" {
 		writeJSON(w, 502, map[string]any{
@@ -170,12 +187,12 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		partyCompany:  companyUserID,
 		partyCustomer: personID,
 	}
+	calls = append(calls, callTrigger)
 	flowRun, err := client.TriggerFlowRun(ctx, flowID, connectionID, bindings)
 	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": "start_failed", "message": err.Error()})
 		return
 	}
-	calls = append(calls, "Client.TriggerFlowRun")
 	if flowRun.ID == "" {
 		writeJSON(w, 502, map[string]any{"error": "trigger_error", "message": "TriggerFlowRun returned no run id"})
 		return
@@ -229,15 +246,16 @@ func (h *family) advance(run map[string]any) map[string]any {
 	}
 
 	ctx := context.Background()
+	run["calls"] = demo.AddCall(run["calls"], callServiceBuild)
 	client, err := h.serviceClient(scenarioID)
 	if err != nil {
 		return failRun(run, err)
 	}
+	run["calls"] = demo.AddCall(run["calls"], callFlowRun)
 	flowRun, err := client.FlowRun(ctx, flowRunID)
 	if err != nil {
 		return failRun(run, err)
 	}
-	run["calls"] = addCall(run["calls"], "Client.FlowRun")
 
 	status := flowRun.Status
 	companyParty := flowRun.CompanyPartyKey()
@@ -297,8 +315,8 @@ func (h *family) driveStep(run map[string]any, client *companydata.Client, flowR
 		return fill
 	}
 
+	run["calls"] = demo.AddCall(run["calls"], callProcess)
 	_, err := client.ProcessFlowRun(ctx, flowRunID, fillNode, nil)
-	run["calls"] = addCall(run["calls"], "Client.ProcessFlowRun")
 
 	var ve *companydata.ValidationError
 	switch {
@@ -344,11 +362,11 @@ func (h *family) driveStep(run map[string]any, client *companydata.Client, flowR
 func (h *family) complete(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
 	ctx := context.Background()
 
+	run["calls"] = demo.AddCall(run["calls"], callAnswers)
 	answers, err := client.FlowRunAnswers(flowRun)
 	if err != nil {
 		return failRun(run, err)
 	}
-	run["calls"] = addCall(run["calls"], "Client.FlowRunAnswers")
 	answersOut := make([]any, 0, len(answers))
 	for slug, value := range answers {
 		answersOut = append(answersOut, map[string]any{"slug": slug, "value": value})
@@ -356,12 +374,12 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 	run["answers"] = answersOut
 
 	if flowRun.OutputMode == "document" {
+		run["calls"] = demo.AddCall(run["calls"], callDocument)
 		bytes, err := client.FlowRunDocument(ctx, flowRunID)
 		if err != nil {
 			// The run completed but the document is not retrievable yet — report it, don't fail.
 			run["document"] = map[string]any{"status": "unavailable", "downloaded": false, "error": err.Error()}
 		} else {
-			run["calls"] = addCall(run["calls"], "Client.FlowRunDocument")
 			run["document"] = map[string]any{"status": "downloaded", "downloaded": true, "bytes": len(bytes)}
 		}
 	}
@@ -444,17 +462,6 @@ func cannedValue(ftype string) string {
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────
-
-// addCall appends a call name preserving first-occurrence order (a poll may repeat FlowRun across polls).
-func addCall(existing any, name string) []any {
-	calls := toAnySlice(existing)
-	for _, c := range calls {
-		if toStr(c) == name {
-			return calls
-		}
-	}
-	return append(calls, name)
-}
 
 func failRun(run map[string]any, err error) map[string]any {
 	run["status"] = "error"

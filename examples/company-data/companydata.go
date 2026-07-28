@@ -24,6 +24,7 @@ package companydemo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -36,6 +37,23 @@ import (
 const (
 	defaultAPIURL = demo.DefaultAPIURL
 	drainBatchMax = 500 // the pump clamps to [1,500]; ask for a full batch per feed pull
+)
+
+// The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+// scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+// parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
+// six SDK examples — only the method reference is written in the language's own idiom — so one scenario
+// teaches one thing whichever example a reader starts. Keep them in step when this file changes.
+const (
+	callServiceBuild   = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
+	callConnections    = "Client.ConnectionsList — pages GET /api/company-data/connections: loads your request-field catalog first for value typing, then decrypts each person's values with the service key"
+	callRequestFields  = "Client.RequestFields — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client"
+	callProcessChanges = "Client.ProcessChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store"
+	callCreateDocument = "Client.CreateDocument — %s"
+	callWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback"
+	callVerifyWebhook  = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401"
+	callParseWebhook   = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key"
+	callDrainBatch     = "Client.DrainBatch — the per-poll feed fallback: one unbuffered drain, so events still show up when no delivery can reach this machine"
 )
 
 // scenario ids (all namespaced companydata:* and all "runnable").
@@ -197,9 +215,10 @@ type dataFn func(c *companydata.Client, calls *[]string) (map[string]any, error)
 func (h *family) dataRun(w http.ResponseWriter, id string, do dataFn) {
 	runID := newRunID()
 	calls := []string{}
+	calls = append(calls, callServiceBuild)
 	client, err := companydata.FromConfig(h.rt.ConfigPath(id))
 	if err != nil {
-		h.rt.WriteRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": calls})
+		h.rt.WriteRun(runID, map[string]any{"scenario": id, "status": "failed", "error": err.Error(), "calls": toAnySlice(calls)})
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "data"}})
 		return
 	}
@@ -216,8 +235,8 @@ func (h *family) dataRun(w http.ResponseWriter, id string, do dataFn) {
 // doRead — Client.ConnectionsList() grouped BY connection (one card per connected person), so two people
 // who both filled the same slug stay distinguishable.
 func (h *family) doRead(client *companydata.Client, calls *[]string) (map[string]any, error) {
+	*calls = append(*calls, callConnections)
 	conns, err := client.ConnectionsList(context.Background(), 0, 0)
-	*calls = append(*calls, "Client.ConnectionsList")
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +266,8 @@ func (h *family) doRead(client *companydata.Client, calls *[]string) (map[string
 // doDefinitions — Client.RequestFields() → your request-field catalog (the folded mandatory bool +
 // one_time; the raw split flags are debug-only, off the intended surface).
 func (h *family) doDefinitions(client *companydata.Client, calls *[]string) (map[string]any, error) {
+	*calls = append(*calls, callRequestFields)
 	fs, err := client.RequestFields(context.Background())
-	*calls = append(*calls, "Client.RequestFields")
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +290,7 @@ func (h *family) doDefinitions(client *companydata.Client, calls *[]string) (map
 func (h *family) doChanges(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	events := []map[string]any{}
 	seen := map[string]bool{}
+	*calls = append(*calls, callProcessChanges)
 	err := client.ProcessChanges(func(c companydata.Change) error {
 		if c.ID != "" {
 			if seen[c.ID] {
@@ -281,7 +301,6 @@ func (h *family) doChanges(client *companydata.Client, calls *[]string) (map[str
 		events = append(events, projectChange(c, ""))
 		return nil
 	}, companydata.PumpOptions{})
-	*calls = append(*calls, "Client.ProcessChanges")
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +366,7 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 			}
 			opts.ShareCode = shareCode
 		}
+		*calls = append(*calls, fmt.Sprintf(callCreateDocument, sp.label))
 		doc, err := client.CreateDocument(context.Background(), opts)
 		if err != nil {
 			return nil, err
@@ -358,7 +378,6 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 			"status":      doc.Status,
 		})
 	}
-	*calls = append(*calls, "Client.CreateDocument ×6")
 	return map[string]any{"docs": docs}, nil
 }
 
@@ -382,7 +401,7 @@ func (h *family) startWebhook(w http.ResponseWriter, id string) {
 		"events":      []any{},
 		"seenFeedIds": []any{}, // feed-only dedup set for the DrainBatch() fallback
 		"unparseable": 0,
-		"calls":       []any{"(webhook run started — POST /webhook receives; each poll also DrainBatch()s the feed)"},
+		"calls":       []any{callWebhookStarted},
 	})
 	h.rt.WriteRoute(webhookID, runID)
 	writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "none"}})
@@ -413,13 +432,14 @@ func (h *family) Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recordCall(run, callServiceBuild)
 	client, err := companydata.FromConfig(h.rt.ConfigPath(scenWebhook))
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": "server_error", "message": err.Error()})
 		return
 	}
 
-	recordCall(run, "Client.VerifyWebhook")
+	recordCall(run, callVerifyWebhook)
 	if !client.VerifyWebhook(rawBody, r.Header) {
 		// A genuine signature failure — persist the attempted verify so the calls trace stays truthful
 		// even on the reject path.
@@ -428,7 +448,7 @@ func (h *family) Webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recordCall(run, "Client.ParseWebhook")
+	recordCall(run, callParseWebhook)
 	change, err := client.ParseWebhook(rawBody, r.Header)
 	if err != nil {
 		var we *companydata.WebhookError
@@ -500,16 +520,20 @@ func (h *family) webhookFeedFallback(runID string, run map[string]any) map[strin
 		seen[id] = true
 	}
 
+	buildNew := recordCall(run, callServiceBuild)
 	client, err := companydata.FromConfig(h.rt.ConfigPath(scenWebhook))
 	if err != nil {
+		if buildNew {
+			h.rt.WriteRun(runID, run)
+		}
 		return run
 	}
 	// Every poll ATTEMPTS the feed pull — record the call now (deduped), so an empty poll still reports
 	// the DrainBatch it performed rather than claiming no call.
-	drainNew := recordCall(run, "Client.DrainBatch")
+	drainNew := recordCall(run, callDrainBatch)
 	changes, err := client.DrainBatch(drainBatchMax)
 	if err != nil {
-		if drainNew {
+		if drainNew || buildNew {
 			h.rt.WriteRun(runID, run)
 		}
 		return run // a blackholed/failed feed fetch must not fail the accumulating webhook run
@@ -529,7 +553,7 @@ func (h *family) webhookFeedFallback(runID string, run map[string]any) map[strin
 	if appended {
 		run["seenFeedIds"] = toAnySlice(seenList)
 	}
-	if appended || drainNew {
+	if appended || drainNew || buildNew {
 		h.rt.WriteRun(runID, run)
 	}
 	return run
@@ -539,14 +563,7 @@ func (h *family) webhookFeedFallback(runID string, run map[string]any) map[strin
 // small no matter how many deliveries/polls a call spans. Returns true when newly added. A call is
 // recorded when it is ATTEMPTED — the trace must be truthful on every path.
 func recordCall(run map[string]any, name string) bool {
-	calls := toStringSlice(run["calls"])
-	for _, c := range calls {
-		if c == name {
-			return false
-		}
-	}
-	run["calls"] = toAnySlice(append(calls, name))
-	return true
+	return demo.RecordCall(run, name) // ONE implementation for all three families (standards §1)
 }
 
 // appendEvent appends one projected event to a run's events list.

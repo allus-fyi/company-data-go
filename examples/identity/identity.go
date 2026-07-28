@@ -45,6 +45,38 @@ const noOrigin = "no_origin — this request carried no Host header, so the OAut
 const noStoredOrigin = "no_origin — the saved config has no oauth_redirect_uri. Save the scenario setup " +
 	"again from the browser you will complete the sign-in in."
 
+// The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+// scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
+// parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
+// six SDK examples — only the method reference is written in the language's own idiom — so one scenario
+// teaches one thing whichever example a reader starts. Keep them in step when this file changes: the
+// panel is headed "What just happened", and a list that no longer matches the code is worse than a short
+// one.
+const (
+	callIDWBuild           = "companydata.OAuthClientFromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI"
+	callAuthSignin         = "OAuthClient.AuthorizeURL — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)"
+	callAuthSigninDetached = "OAuthClient.AuthorizeURL — the sign-in URL behind the link + QR (mode signin, response_mode detached, PKCE S256, state = this run id)"
+	callAuthOneTime        = "OAuthClient.AuthorizeURL — the consent URL the person is sent to (mode one_time, claims email + phone, PKCE S256, state = this run id)"
+	callAuthConnect        = "OAuthClient.AuthorizeURL — the consent URL the person is sent to (mode connect, PKCE S256, state = this run id)"
+	callAuthEnroll         = "OAuthClient.AuthorizeURL — the enrollment URL the person is sent to (mode 2fa_enroll, response_mode redirect)"
+	callAuthEnrollDetached = "OAuthClient.AuthorizeURL — the enrollment URL behind the link + QR (mode 2fa_enroll, response_mode detached)"
+	callPollSignin         = "OAuthClient.PollResult — polls POST /oauth2/result until the phone delivers the code (one 2s-bounded call per browser poll)"
+	callPollEnroll         = "OAuthClient.PollResult — polls POST /oauth2/result until the phone delivers {enrolled: true} (one 2s-bounded call per browser poll)"
+	callCompleteSignin     = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; mode signin returns the identity only, no claim values"
+	callCompleteOneTime    = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key"
+	callCompleteConnect    = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below"
+	callEnrolledCallback   = "(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call"
+	callServiceBuild       = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
+	callConnectionsLive    = "Client.ConnectionsList — pages GET /api/company-data/connections and decrypts each person's values with the service key; the run keeps the one whose share code just signed in"
+	callTwoFactor          = "Client.TwoFactor — the service-2FA sub-client, on the same data-client credentials"
+	callChallenge          = "TwoFactorClient.Challenge — POST /api/service-2fa/challenges for the person's share code with a per-run idempotency key; returns the challenge id, plus matching digits when the service has number matching on"
+	callWaitResult         = "TwoFactorClient.WaitForResult — polls GET /api/service-2fa/challenges/{id} until the status leaves pending: approved, denied, expired or revoked (one 2s-bounded call per browser poll; the first terminal read burns the result)"
+	callOIDCDiscovery      = "(oidc) oidc.NewProvider — discovery: fetches /.well-known/openid-configuration from the configured API base"
+	callOIDCAuthURL        = "(oidc) oauth2.Config.AuthCodeURL — the authorization URL (scope openid profile email, PKCE S256, nonce, state = this run id)"
+	callOIDCToken          = "(oidc) oauth2.Config.Exchange — exchanges the code at the discovered token endpoint (client_secret_post + PKCE verifier)"
+	callOIDCVerify         = "(oidc) IDTokenVerifier.Verify — verifies the id_token against the JWKS: signature, issuer, audience and nonce; the claims shown are that verified token's"
+)
+
 // scenarios maps id → "runnable" | "guide". Scenario 7 is the guide card (no /start).
 var scenarios = map[int]string{
 	1: "runnable", 2: "runnable", 3: "runnable", 4: "runnable",
@@ -209,6 +241,13 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 				claims = append(claims, companydata.Claim{Name: t, Type: t})
 			}
 		}
+		authCall := callAuthSignin
+		if n == 3 {
+			authCall = callAuthOneTime
+		} else if n == 4 {
+			authCall = callAuthConnect
+		}
+		run["calls"] = []any{callIDWBuild, authCall}
 		oauth, err := h.oauthClientFor(id, 0)
 		if err != nil {
 			h.startErr(w, err)
@@ -221,7 +260,6 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 			h.startErr(w, err)
 			return
 		}
-		run["calls"] = []any{"OAuthClient.AuthorizeURL"}
 		h.rt.WriteRun(runID, run)
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "redirect", "url": url}})
 
@@ -229,6 +267,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		verifier, challenge := generatePKCE()
 		run["verifier"] = verifier
 		run["wait"] = "detached_signin"
+		run["calls"] = []any{callIDWBuild, callAuthSigninDetached}
 		oauth, err := h.oauthClientFor(id, 0)
 		if err != nil {
 			h.startErr(w, err)
@@ -241,7 +280,6 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 			h.startErr(w, err)
 			return
 		}
-		run["calls"] = []any{"OAuthClient.AuthorizeURL"}
 		h.rt.WriteRun(runID, run)
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "detached", "url": url}})
 
@@ -258,7 +296,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		url := setup.authCodeURL(runID, nonce, challenge)
-		run["calls"] = []any{"(oidc) oidc.NewProvider", "(oidc) oauth2.Config.AuthCodeURL"}
+		run["calls"] = []any{callOIDCDiscovery, callOIDCAuthURL}
 		h.rt.WriteRun(runID, run)
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "redirect", "url": url}})
 
@@ -271,6 +309,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 			idemKey = idemKey[:64]
 		}
 		run["wait"] = "challenge"
+		run["calls"] = []any{callServiceBuild, callTwoFactor, callChallenge}
 		client, err := h.serviceClientFor(id, 0)
 		if err != nil {
 			h.startErr(w, err)
@@ -282,7 +321,6 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		run["challengeId"] = challenge.ChallengeID
-		run["calls"] = []any{"Client.TwoFactor", "TwoFactorClient.Challenge"}
 		h.rt.WriteRun(runID, run)
 		var digits any
 		if challenge.MatchingDigits != "" {
@@ -332,13 +370,13 @@ func (h *family) Enroll(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	wait := "enroll_redirect"
+	wait, enrollCall := "enroll_redirect", callAuthEnroll
 	if responseMode == "detached" {
-		wait = "detached_enroll"
+		wait, enrollCall = "detached_enroll", callAuthEnrollDetached
 	}
 	run := map[string]any{
 		"scenario": id, "isEnroll": true, "status": "pending", "state": runID,
-		"calls": []any{"OAuthClient.AuthorizeURL"}, "wait": wait,
+		"calls": []any{callIDWBuild, enrollCall}, "wait": wait,
 	}
 	h.rt.WriteRun(runID, run)
 
@@ -370,7 +408,7 @@ func (h *family) Callback(w http.ResponseWriter, r *http.Request) {
 		// Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
 		run["status"] = "done"
 		run["result"] = map[string]any{"enrolled": true}
-		appendCall(run, "callback(enrolled=true)")
+		appendCall(run, callEnrolledCallback)
 	} else if code := q.Get("code"); code != "" {
 		if n == 5 || n == 6 {
 			run = h.completeOidc(run, code)
@@ -412,6 +450,7 @@ func (h *family) advance(run map[string]any) map[string]any {
 	id := toStr(run["scenario"])
 	switch toStr(run["wait"]) {
 	case "detached_signin":
+		appendCall(run, callPollSignin)
 		oauth, err := h.oauthClientFor(id, pollTimeout)
 		if err != nil {
 			return failRun(run, err)
@@ -420,11 +459,11 @@ func (h *family) advance(run map[string]any) map[string]any {
 		if err != nil {
 			return pollErr(run, err)
 		}
-		appendCall(run, "OAuthClient.PollResult")
 		if code := toStr(body["code"]); code != "" {
 			run = h.completeSignin(run, code)
 		}
 	case "detached_enroll":
+		appendCall(run, callPollEnroll)
 		oauth, err := h.oauthClientFor(id, pollTimeout)
 		if err != nil {
 			return failRun(run, err)
@@ -433,12 +472,12 @@ func (h *family) advance(run map[string]any) map[string]any {
 		if err != nil {
 			return pollErr(run, err)
 		}
-		appendCall(run, "OAuthClient.PollResult")
 		if b, _ := body["enrolled"].(bool); b {
 			run["status"] = "done"
 			run["result"] = map[string]any{"enrolled": true}
 		}
 	case "challenge":
+		appendCall(run, callWaitResult)
 		client, err := h.serviceClientFor(id, pollTimeout)
 		if err != nil {
 			return failRun(run, err)
@@ -447,7 +486,6 @@ func (h *family) advance(run map[string]any) map[string]any {
 		if err != nil {
 			return pollErr(run, err)
 		}
-		appendCall(run, "TwoFactorClient.WaitForResult")
 		run["status"] = "done"
 		run["result"] = map[string]any{"status": res.Status, "completed_at": res.CompletedAt}
 	}
@@ -471,6 +509,13 @@ func pollErr(run map[string]any, err error) map[string]any {
 // identity via CompleteSignIn, and for connect (4) read the person's LIVE values via the service client.
 func (h *family) completeSignin(run map[string]any, code string) map[string]any {
 	id := toStr(run["scenario"])
+	completeCall := callCompleteSignin
+	if asInt(id) == 3 {
+		completeCall = callCompleteOneTime
+	} else if asInt(id) == 4 {
+		completeCall = callCompleteConnect
+	}
+	appendCall(run, completeCall)
 	oauth, err := h.oauthClientFor(id, 0)
 	if err != nil {
 		return failRun(run, err)
@@ -479,7 +524,6 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 	if err != nil {
 		return failRun(run, err)
 	}
-	appendCall(run, "OAuthClient.CompleteSignIn")
 	result := map[string]any{
 		"user":       res.User,
 		"mode":       res.Mode,
@@ -489,10 +533,12 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 
 	if asInt(id) == 4 {
 		shareCode := res.User["share_code"]
+		appendCall(run, callServiceBuild)
 		client, err := h.serviceClientFor(id, 0)
 		if err != nil {
 			return failRun(run, err)
 		}
+		appendCall(run, callConnectionsLive)
 		conns, err := client.ConnectionsList(context.Background(), 0, 0)
 		if err != nil {
 			return failRun(run, err)
@@ -506,7 +552,6 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 				break
 			}
 		}
-		appendCall(run, "Client.ConnectionsList")
 		result["live_values"] = live
 	}
 
@@ -520,16 +565,16 @@ func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 	id := toStr(run["scenario"])
 	ctx, cancel := oidcContext(context.Background(), oidcNetworkTimeout)
 	defer cancel()
+	appendCall(run, callOIDCDiscovery)
 	setup, err := h.oidcSetupFor(ctx, id)
 	if err != nil {
 		return failRun(run, err)
 	}
-	appendCall(run, "(oidc) oidc.NewProvider")
+	appendCall(run, callOIDCToken, callOIDCVerify)
 	claims, err := setup.exchangeAndVerify(ctx, code, toStr(run["verifier"]), toStr(run["nonce"]))
 	if err != nil {
 		return failRun(run, err)
 	}
-	appendCall(run, "(oidc) oauth2.Config.Exchange", "(oidc) IDTokenVerifier.Verify")
 	run["status"] = "done"
 	run["result"] = map[string]any{"claims": claims}
 	return run
@@ -606,12 +651,12 @@ func claimTypes(in map[string]any) []string {
 	return []string{"email", "phone"} // a small default claim set (scenario 3)
 }
 
+// appendCall records call names on a run's "what just happened" trace through the shared, deduping
+// implementation (#578, standards §1) — the identity family used to append unconditionally.
 func appendCall(run map[string]any, names ...string) {
-	calls, _ := run["calls"].([]any)
 	for _, n := range names {
-		calls = append(calls, n)
+		demo.RecordCall(run, n)
 	}
-	run["calls"] = calls
 }
 
 func failRun(run map[string]any, err error) map[string]any {
