@@ -247,7 +247,7 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   email := conn.Values["work_email"].Value.(string)
   addr  := conn.Values["billing_address"].Value.(map[string]any)
   logo  := conn.Values["logo"].Value.(*BinaryHandle)
-  bytes, err := logo.Bytes()          // fetches the slot file endpoint + decrypts on demand
+  bytes, err := logo.Bytes()          // fetches the slot file endpoint on demand → the file bytes
   n,     err := logo.Save("./logo.png") // atomic write (temp + fsync + rename)
   ```
 
@@ -268,11 +268,44 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 
 ### Binary fields
 
-A binary answer is a `*BinaryHandle`: `Bytes()` GETs the slot-keyed file
-endpoint, decrypts the wrapper, parses the envelope (`{"full":…}` /
-`{"file":…}`), and base64-decodes the primary data-URI payload into the file
-bytes. `Save(path)` writes those bytes atomically. The handle is lazy and caches
-the decrypted envelope, so repeated `Bytes()`/`Save()` don't re-fetch.
+A binary answer is a `*BinaryHandle`: `Bytes()` GETs the slot-keyed file endpoint
+and returns the file bytes. `Save(path)` writes those bytes atomically. The handle
+is lazy and caches what it fetched, so repeated `Bytes()`/`Save()` don't re-fetch.
+
+**That endpoint has two 200 shapes, and which one you get is the person's choice,
+not yours** — it depends on whether their source field is private, they can change
+it at any time, and nothing announces it in advance. The handle absorbs the
+difference; you never branch on it:
+
+- **private source** → `application/json` `{"encrypted":true,"value":<wrapper>}`.
+  The wrapper is decrypted with your service key, the envelope (`{"full":…}` /
+  `{"file":…}`) parsed, and its primary data-URI payload base64-decoded into the
+  file bytes.
+- **plaintext source** → the file's own `Content-Type` and the body **is** the
+  file. Nothing is decrypted; no service key is involved.
+
+The shape is decided on the response `Content-Type`, never by sniffing the body.
+
+```go
+data, err := logo.Bytes()
+logo.ContentType()    // the Content-Type the bytes arrived with, e.g. "image/jpeg"
+logo.ContentSha256()  // the platform's X-Allus-Content-Sha256 for exactly those bytes
+```
+
+`ContentSha256()` is the platform's `X-Allus-Content-Sha256` header, sent on both
+shapes — record it and you can later show your archived copy has not drifted. It
+is the platform's word, not a signature: it proves agreement with the platform's
+record, not anything to a third party who doubts that record.
+
+There is **no variant selection** — one slot has one byte sequence and therefore
+one digest. Photos resolve to the `full` representation.
+
+**Expiry.** A frozen (share-once) answer is retained for 90 days. After that the
+endpoint returns a `410` with error key `company_data.file_expired`, surfaced as an
+`*ApiError` whose `Details` carry `content_sha256` and `expired_at` — so you can
+still prove what the copy you archived was. A slot whose file has expired may also
+carry `content_sha256` and `expired`/`expired_at` in the value's `Raw` map, and a
+`field_deleted` change may carry them in its `Raw` too.
 
 ---
 
@@ -722,9 +755,12 @@ if errors.As(err, &apiErr) {
   cross-language test vector.
 - **Slug catalog.** `RequestFields` is fetched once and cached; its slug→type
   map types every value.
-- **Binary.** A `*BinaryHandle.Bytes()` GETs the slot file endpoint, unwraps the
-  API's `{"encrypted":true,"value":<wrapper>}` envelope, and runs the same
-  service-key decrypt → the file bytes.
+- **Binary.** A `*BinaryHandle.Bytes()` GETs the slot file endpoint and returns the
+  file bytes for either shape it may serve: the API's
+  `{"encrypted":true,"value":<wrapper>}` envelope run through the same service-key
+  decrypt, or — when the person's source field is not private — the raw file bytes
+  the response already carries. The two are told apart on `Content-Type`, never by
+  sniffing the body.
 - **Changes feed.** `ProcessChanges` delegates to the durable-buffered `Pump`,
   injecting a drain closure (`GET /changes?limit=`, returning the raw ciphertext
   events) and a decrypt closure that builds a typed `Change`.

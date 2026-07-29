@@ -78,6 +78,17 @@ type ApiError struct {
 	Status   int
 	ErrorKey string
 	Message  string
+	// Details holds the error body's remaining fields, verbatim (nil when the
+	// body carried nothing beside the key and the message — reads of a nil map
+	// still yield the zero value, so callers need no nil check).
+	//
+	// #590 added the first response that carries actionable data BESIDE the key:
+	// a 410 company_data.file_expired returns the expired answer's content_sha256
+	// and expired_at, so a consumer can record that its archived copy is now the
+	// only one and still prove what it holds. Generic rather than a bespoke error
+	// type — every error body's extra fields become reachable, and no future one
+	// needs a new type to be readable.
+	Details map[string]any
 }
 
 func (e *ApiError) Error() string {
@@ -97,6 +108,16 @@ func (e *ApiError) Is(target error) bool { return target == ErrAPI }
 // NewApiError builds an *ApiError. Exported for advanced use / tests.
 func NewApiError(status int, errorKey, message string) *ApiError {
 	return &ApiError{Status: status, ErrorKey: errorKey, Message: message}
+}
+
+// NewApiErrorWithDetails builds an *ApiError carrying the error body's remaining
+// fields (#590).
+//
+// A second constructor rather than a fourth parameter on NewApiError: that one is
+// exported and already called from consumer code, so widening its signature would
+// break every caller to carry a field almost none of them set.
+func NewApiErrorWithDetails(status int, errorKey, message string, details map[string]any) *ApiError {
+	return &ApiError{Status: status, ErrorKey: errorKey, Message: message, Details: details}
 }
 
 // DecryptError is raised when a wrapper is malformed, the wrong key is used, or

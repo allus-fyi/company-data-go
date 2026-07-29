@@ -30,8 +30,12 @@ import (
 // returns the token.
 type routerDoer struct {
 	route func(path string, params map[string][]string) (int, string)
-	gets  []string
-	posts int
+	// respHeaders, when set, supplies a GET's response headers. #590: the binary
+	// file route is classified on Content-Type and carries the digest header, so a
+	// test has to be able to say what came back — a scripted body alone can't.
+	respHeaders func(path string) http.Header
+	gets        []string
+	posts       int
 }
 
 func (d *routerDoer) Do(req *http.Request) (*http.Response, error) {
@@ -41,7 +45,13 @@ func (d *routerDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 	d.gets = append(d.gets, req.URL.Path)
 	status, body := d.route(req.URL.Path, req.URL.Query())
-	return jsonResp(status, body), nil
+	resp := jsonResp(status, body)
+	if d.respHeaders != nil {
+		if h := d.respHeaders(req.URL.Path); h != nil {
+			resp.Header = h
+		}
+	}
+	return resp, nil
 }
 
 func jsonResp(status int, body string) *http.Response {
@@ -268,6 +278,124 @@ func TestBinaryHandleFetchesSlotAndDecrypts(t *testing.T) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != v.Binary.InnerFullSHA256 {
 		t.Fatal("binary bytes sha256 mismatch")
+	}
+}
+
+// #590 — the SAME slot URL serves raw file bytes when the person's source field
+// is NOT private. The handle must return the file either way, without the caller
+// knowing which shape arrived, and must not try to decrypt bytes that were never
+// encrypted.
+func TestBinaryHandleServesPlaintextBytes(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	page := map[string]any{
+		"total": 1,
+		"items": []any{
+			map[string]any{
+				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
+				"values": map[string]any{
+					"logo": map[string]any{"value_url": "https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file", "live": true},
+				},
+			},
+		},
+	}
+	pageJSON, _ := json.Marshal(page)
+	fileBytes := "\xff\xd8\xff\xe0not-really-a-jpeg"
+	digestSum := sha256.Sum256([]byte(fileBytes))
+	digest := hex.EncodeToString(digestSum[:])
+
+	c, d := newTestClient(t, cfg, func(path string, _ map[string][]string) (int, string) {
+		switch {
+		case strings.HasSuffix(path, "/request-fields"):
+			return 200, requestFieldsBody
+		case strings.HasSuffix(path, "/connections"):
+			return 200, string(pageJSON)
+		case strings.HasSuffix(path, "/slots/sf-9/file"):
+			return 200, fileBytes
+		}
+		t.Fatalf("unexpected GET %s", path)
+		return 0, ""
+	})
+	d.respHeaders = func(path string) http.Header {
+		if !strings.HasSuffix(path, "/slots/sf-9/file") {
+			return nil
+		}
+		h := http.Header{}
+		h.Set("Content-Type", "image/jpeg")
+		h.Set("X-Allus-Content-Sha256", digest)
+		return h
+	}
+
+	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	if err != nil {
+		t.Fatalf("ConnectionsList: %v", err)
+	}
+	handle := conns[0].Values["logo"].Value.(*BinaryHandle)
+	data, err := handle.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(data) != fileBytes {
+		t.Fatalf("plaintext bytes = %q, want %q", data, fileBytes)
+	}
+	if handle.ContentType() != "image/jpeg" {
+		t.Fatalf("ContentType = %q", handle.ContentType())
+	}
+	if handle.ContentSha256() != digest {
+		t.Fatalf("ContentSha256 = %q, want %q", handle.ContentSha256(), digest)
+	}
+}
+
+// #590 — a 410 file_expired surfaces the digest and the expiry date through
+// ApiError.Details.
+func TestBinaryHandleExpiredAnswerCarriesDigest(t *testing.T) {
+	v := loadVector(t)
+	cfg := clientConfig(t, v)
+	page := map[string]any{
+		"total": 1,
+		"items": []any{
+			map[string]any{
+				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
+				"values": map[string]any{
+					"logo": map[string]any{"value_url": "https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file", "live": false},
+				},
+			},
+		},
+	}
+	pageJSON, _ := json.Marshal(page)
+
+	c, _ := newTestClient(t, cfg, func(path string, _ map[string][]string) (int, string) {
+		switch {
+		case strings.HasSuffix(path, "/request-fields"):
+			return 200, requestFieldsBody
+		case strings.HasSuffix(path, "/connections"):
+			return 200, string(pageJSON)
+		}
+		return 410, `{"error":"This file has expired","error_key":"company_data.file_expired",` +
+			`"content_sha256":"abc123","expired_at":"2026-07-01T00:00:00Z"}`
+	})
+
+	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	if err != nil {
+		t.Fatalf("ConnectionsList: %v", err)
+	}
+	handle := conns[0].Values["logo"].Value.(*BinaryHandle)
+	if _, err := handle.Bytes(); err == nil {
+		t.Fatal("expected an *ApiError")
+	} else {
+		var apiErr *ApiError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("expected *ApiError, got %T: %v", err, err)
+		}
+		if apiErr.Status != 410 || apiErr.ErrorKey != "company_data.file_expired" {
+			t.Fatalf("status/key = %d %q", apiErr.Status, apiErr.ErrorKey)
+		}
+		if got, _ := apiErr.Details["content_sha256"].(string); got != "abc123" {
+			t.Fatalf("Details[content_sha256] = %#v", apiErr.Details["content_sha256"])
+		}
+		if got, _ := apiErr.Details["expired_at"].(string); got != "2026-07-01T00:00:00Z" {
+			t.Fatalf("Details[expired_at] = %#v", apiErr.Details["expired_at"])
+		}
 	}
 }
 

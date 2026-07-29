@@ -126,7 +126,7 @@ func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorKey, message := extractError(body, c.config.Format)
+		errorKey, message, _ := extractError(body, c.config.Format)
 		return "", newAuthError("token request rejected (HTTP %d)%s%s", resp.StatusCode,
 			bracket(errorKey), colon(message))
 	}
@@ -186,7 +186,31 @@ func (c *HTTPClient) Get(ctx context.Context, path string, params url.Values) (a
 // a broadcast document's file endpoint returns raw plaintext file bytes, while a
 // per-person document returns the normal JSON encrypted wrapper.
 func (c *HTTPClient) GetRaw(ctx context.Context, path string) ([]byte, error) {
-	return c.doRequestBytes(ctx, http.MethodGet, path, nil, nil, "", false)
+	resp, err := c.doRequestRaw(ctx, http.MethodGet, path, nil, nil, "", false)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// RawResponse is a 2xx response with its status, headers AND unparsed body.
+//
+// #590: the company-facing binary file endpoints have two 200 shapes (a JSON
+// wrapper for an encrypted answer, raw file bytes for a plaintext one) that are
+// told apart by Content-Type, and both carry an X-Allus-Content-Sha256 digest
+// header. Neither Get (which parses) nor GetRaw (which drops the headers) can
+// express that, so GetResponse hands the caller the response itself.
+type RawResponse struct {
+	Status int
+	Header http.Header
+	Body   []byte
+}
+
+// GetResponse GETs path → the whole 2xx response (status, headers and raw body),
+// with no parse. Auth/refresh/retry and error mapping are identical to Get. See
+// RawResponse for why this exists (#590).
+func (c *HTTPClient) GetResponse(ctx context.Context, path string) (*RawResponse, error) {
+	return c.doRequestRaw(ctx, http.MethodGet, path, nil, nil, "", false)
 }
 
 // Post POSTs path with a JSON body (jsonBody) → parsed body. A nil jsonBody
@@ -243,18 +267,18 @@ func (c *HTTPClient) requestRaw(ctx context.Context, method, path string, rawBod
 // Content-Type contentType when hasBody) and applying params to the URL, then
 // parses the 2xx response body as JSON or XML per Config.Format.
 func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) (any, error) {
-	respBody, err := c.doRequestBytes(ctx, method, path, params, body, contentType, hasBody)
+	resp, err := c.doRequestRaw(ctx, method, path, params, body, contentType, hasBody)
 	if err != nil {
 		return nil, err
 	}
-	return parseBody(respBody, c.config.Format == "xml")
+	return parseBody(resp.Body, c.config.Format == "xml")
 }
 
-// doRequestBytes is the shared auth + retry loop, sending body (with
-// Content-Type contentType when hasBody) and applying params to the URL. It
-// returns the RAW response bytes for a 2xx response (no parsing) — doRequest
-// parses them; GetRaw returns them verbatim.
-func (c *HTTPClient) doRequestBytes(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) ([]byte, error) {
+// doRequestRaw is the shared auth + retry loop, sending body (with Content-Type
+// contentType when hasBody) and applying params to the URL. It returns the
+// UNPARSED 2xx response — doRequest parses its body; GetRaw returns the body
+// verbatim; GetResponse hands the whole thing over (#590 needs the headers).
+func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) (*RawResponse, error) {
 	wantsXML := c.config.Format == "xml"
 	accept := "application/json"
 	if wantsXML {
@@ -296,7 +320,7 @@ func (c *HTTPClient) doRequestBytes(ctx context.Context, method, path string, pa
 
 		switch {
 		case status >= 200 && status < 300:
-			return respBody, nil
+			return &RawResponse{Status: status, Header: resp.Header, Body: respBody}, nil
 
 		case status == 401:
 			// One refresh-and-retry, then give up as AuthError.
@@ -307,11 +331,11 @@ func (c *HTTPClient) doRequestBytes(ctx context.Context, method, path string, pa
 				}
 				continue
 			}
-			errorKey, message := extractError(respBody, c.config.Format)
+			errorKey, message, _ := extractError(respBody, c.config.Format)
 			return nil, newAuthError("unauthorized after token refresh%s%s", bracket(errorKey), colon(message))
 
 		case status == 429:
-			errorKey, message := extractError(respBody, c.config.Format)
+			errorKey, message, _ := extractError(respBody, c.config.Format)
 			// #481: a twofa.pending_cap 429 means the caller already holds the maximum
 			// concurrent 2FA challenges — a retry can never clear that, so surface it
 			// immediately as an ApiError instead of the blind Retry-After backoff every
@@ -328,8 +352,8 @@ func (c *HTTPClient) doRequestBytes(ctx context.Context, method, path string, pa
 			return nil, NewRateLimitError(retryAfter, errorKey, message)
 
 		default:
-			errorKey, message := extractError(respBody, c.config.Format)
-			return nil, NewApiError(status, errorKey, message)
+			errorKey, message, details := extractError(respBody, c.config.Format)
+			return nil, NewApiErrorWithDetails(status, errorKey, message, details)
 		}
 	}
 }
@@ -364,17 +388,23 @@ func parseBody(body []byte, wantsXML bool) (any, error) {
 
 // ── module helpers ──────────────────────────────────────────────────────────
 
-// extractError pulls error_key + a message out of a non-2xx body (JSON or XML).
-func extractError(body []byte, format string) (errorKey, message string) {
+// extractError pulls error_key + a message out of a non-2xx body (JSON or XML),
+// plus everything BESIDE those two as details.
+//
+// #590: details lets a body that carries actionable data (a 410 file_expired's
+// content_sha256 + expired_at) reach the caller without a bespoke error type per
+// response. It stays nil when there is nothing left, so the common error carries
+// no allocation.
+func extractError(body []byte, format string) (errorKey, message string, details map[string]any) {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return "", ""
+		return "", "", nil
 	}
 	var parsed any
 	if format == "xml" && strings.HasPrefix(text, "<") {
 		p, err := parseXML(text)
 		if err != nil {
-			return "", text
+			return "", text, nil
 		}
 		parsed = p
 	} else {
@@ -387,10 +417,10 @@ func extractError(body []byte, format string) (errorKey, message string) {
 				if p, perr := parseXML(text); perr == nil {
 					parsed = p
 				} else {
-					return "", text
+					return "", text, nil
 				}
 			} else {
-				return "", text
+				return "", text, nil
 			}
 		} else {
 			parsed = j
@@ -398,7 +428,7 @@ func extractError(body []byte, format string) (errorKey, message string) {
 	}
 	m, ok := parsed.(map[string]any)
 	if !ok {
-		return "", ""
+		return "", "", nil
 	}
 	if v, ok := m["error_key"].(string); ok {
 		errorKey = v
@@ -408,7 +438,16 @@ func extractError(body []byte, format string) (errorKey, message string) {
 	} else if v, ok := m["message"].(string); ok {
 		message = v
 	}
-	return errorKey, message
+	for k, v := range m {
+		if k == "error_key" || k == "error" || k == "message" {
+			continue
+		}
+		if details == nil {
+			details = make(map[string]any, len(m))
+		}
+		details[k] = v
+	}
+	return errorKey, message, details
 }
 
 // parseRetryAfter parses the Retry-After header (delta-seconds form) → *float64.

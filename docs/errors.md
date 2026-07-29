@@ -8,7 +8,7 @@ fields with `errors.As`. The names + behavior match all six SDKs.
 |------------|----------|----------------|------|
 | `*ConfigError` | `ErrConfig` | — (wraps a cause via `Unwrap`) | Missing/invalid config or key file at construction (fail fast). |
 | `*AuthError` | `ErrAuth` | — | Token fetch/refresh failed (bad client_id/secret, revoked client; a 401 that survived one refresh-and-retry). |
-| `*ApiError` | `ErrAPI` | `Status int`, `ErrorKey string`, `Message string` | Any non-2xx from the API. |
+| `*ApiError` | `ErrAPI` | `Status int`, `ErrorKey string`, `Message string`, `Details map[string]any` | Any non-2xx from the API. |
 | `*DecryptError` | `ErrDecrypt` | — | Wrapper malformed, wrong key, or GCM tag mismatch. |
 | `*WebhookError` | `ErrWebhook` | — | Signature verification failed or an envelope couldn't be unwrapped. |
 | `*RateLimitError` | `ErrRateLimit` (and `ErrAPI`) | embeds `*ApiError` (Status 429) + `RetryAfter *float64` | A 429 from a rate-limited endpoint. |
@@ -32,6 +32,15 @@ if errors.As(err, &apiErr) {
     log.Printf("API %d %s: %s", apiErr.Status, apiErr.ErrorKey, apiErr.Message)
 }
 
+// Details carries whatever the error body held beside the key and the message.
+// A 410 company_data.file_expired (a frozen share-once binary answer past its
+// 90-day retention) names the file it can no longer serve:
+if errors.As(err, &apiErr) && apiErr.ErrorKey == "company_data.file_expired" {
+    sum, _ := apiErr.Details["content_sha256"].(string)
+    at, _ := apiErr.Details["expired_at"].(string)
+    log.Printf("slot file expired at %s; archived copy should hash to %s", at, sum)
+}
+
 var rl *companydata.RateLimitError
 if errors.As(err, &rl) {
     if rl.RetryAfter != nil {
@@ -42,6 +51,10 @@ if errors.As(err, &rl) {
 
 ## Behavior notes
 
+- **`ApiError.Details` is `nil` when the body carried nothing extra**, which reads
+  the same as an empty map in Go — no nil check needed. Numbers inside it are
+  `json.Number` (the decoder preserves the wire form), so type-assert to
+  `json.Number` or `string`, not to `float64`.
 - **`ConfigError` is fail-fast** — a bad passphrase, an unreadable PEM, a missing
   required field, or an invalid `format` all surface here at construction
   (`FromConfig` / `New`), before any network call. A bad service-key passphrase

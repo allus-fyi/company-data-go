@@ -70,14 +70,31 @@ fmt.Println(v.Live, v.UpdatedAt)
 
 ```go
 handle := conn.Values["logo"].Value.(*companydata.BinaryHandle)
-data, err := handle.Bytes()        // GETs the slot file endpoint, decrypts, decodes
+data, err := handle.Bytes()         // GETs the slot file endpoint → the file bytes
 n, err := handle.Save("./logo.png") // atomic write (temp + fsync + rename)
 url := handle.ValueURL()            // the slot-keyed file URL (opaque)
+ct := handle.ContentType()          // the Content-Type the bytes arrived with
+sum := handle.ContentSha256()       // the platform's X-Allus-Content-Sha256 for those bytes
 ```
 
-The handle is lazy — nothing is fetched until `Bytes()`/`Save()` — and caches the
-decrypted envelope so repeated calls don't re-fetch. `Save` is crash-safe: a
-crash mid-write never leaves a truncated file.
+The handle is lazy — nothing is fetched until `Bytes()`/`Save()` — and caches what
+it fetched so repeated calls don't re-fetch. `Save` is crash-safe: a crash
+mid-write never leaves a truncated file.
+
+**Two 200 shapes, absorbed by the handle.** Whether the slot endpoint returns
+`application/json` `{"encrypted":true,"value":<wrapper>}` (decrypted with the
+service key, envelope parsed, data-URI decoded) or the file's own `Content-Type`
+with the raw bytes as the body depends on whether the person's source field is
+private — their choice, changeable at any time, unannounced. `Bytes()` returns the
+file either way. The shape is decided on `Content-Type`, never by sniffing the
+body, and there is no variant selection: one slot has one byte sequence and one
+digest.
+
+`ContentSha256()` and `ContentType()` are empty until something has been fetched,
+and on a handle built from an envelope directly. A `410`
+`company_data.file_expired` (a frozen share-once answer past its 90-day retention)
+surfaces as an `*ApiError` whose `Details` carry `content_sha256` and `expired_at`;
+see [errors](errors.md).
 
 ## Change — a feed / webhook event
 
@@ -101,7 +118,7 @@ type Change struct {
 |-------|---------|
 | `connection_created` / `connection_deleted` | identity only (no slot/value) |
 | `field_updated` | `Slug` + decrypted `Value` + `Live` (binary → a lazy `*BinaryHandle`) |
-| `field_deleted` | `Slug` (no value) |
+| `field_deleted` | `Slug` (no value). A binary slot whose file expired may add `content_sha256` + `expired` in `Raw` |
 | `consent_accepted` / `consent_declined` | `Slug` |
 
 ## LogEntry — ops log

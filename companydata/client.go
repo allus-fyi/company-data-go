@@ -50,9 +50,11 @@ import (
 //   - Slug catalog — RequestFields is fetched once and cached; its slug→type map
 //     types every value (so address parses to a map, photo becomes a lazy binary
 //     handle, etc.).
-//   - Binary — a value's *BinaryHandle.Bytes() GETs the slot file endpoint,
-//     unwraps the API's {"encrypted":true,"value":<wrapper>} envelope, and runs
-//     the same service-key decrypt → the file bytes.
+//   - Binary — a value's *BinaryHandle.Bytes() GETs the slot file endpoint and
+//     returns the file bytes for either shape it may serve (#590): the API's
+//     {"encrypted":true,"value":<wrapper>} envelope run through the same
+//     service-key decrypt, or — when the person's source field is not private —
+//     the raw file bytes the response already carries.
 //   - Changes feed — ProcessChanges delegates to the Pump, injecting a
 //     fetchChanges closure (GET /changes?limit=, returning the raw ciphertext
 //     events) and a decrypt closure that builds a typed Change.
@@ -191,21 +193,71 @@ func (c *Client) decryptValue(wrapper any) (string, error) {
 	return Decrypt(wrapper, c.privateKey)
 }
 
-// binaryFetch fetches a slot file endpoint and unwraps its
-// {"encrypted":true,"value":...} envelope, returning the inner {"_enc":1,...}
-// wrapper for the BinaryHandle to decrypt.
-func (c *Client) binaryFetch(valueURL string) (any, error) {
-	body, err := c.http.Get(context.Background(), valueURL, nil)
+// binaryFetch fetches a company-facing binary file endpoint and classifies its
+// response. The model factories hold no context, so the handles they build fetch
+// on the background context; binaryFetchCtx carries a caller's own.
+func (c *Client) binaryFetch(valueURL string) (BinaryFetchResult, error) {
+	return c.binaryFetchCtx(context.Background(), valueURL)
+}
+
+// binaryFetchCtx fetches a company-facing binary file endpoint and classifies its
+// response.
+//
+// #590 — the endpoint has TWO 200 shapes and which one arrives is not the
+// company's to predict: a person whose source field is PRIVATE yields
+// application/json {"encrypted":true,"value":<wrapper>}, a person whose field is
+// not yields the file's own Content-Type and the bytes themselves. The decision is
+// made on Content-Type and never by sniffing the body — a PDF or an image that
+// happened to start with a brace would be indistinguishable from a wrapper.
+//
+// A 410 company_data.file_expired (the answer's 90-day retention has elapsed)
+// surfaces as an *ApiError whose Details carry content_sha256 and expired_at.
+func (c *Client) binaryFetchCtx(ctx context.Context, valueURL string) (BinaryFetchResult, error) {
+	resp, err := c.http.GetResponse(ctx, valueURL)
 	if err != nil {
-		return nil, err
+		return BinaryFetchResult{}, err
 	}
+	contentType := resp.Header.Get("Content-Type")
+	digest := resp.Header.Get("X-Allus-Content-Sha256")
+
+	// Plaintext is claimed ONLY on a Content-Type that positively says so. A
+	// missing or empty header falls through to the JSON path — the historical
+	// shape — because the two failure modes are not symmetrical: mistaking a
+	// wrapper for file bytes writes the ciphertext envelope to disk as if it were
+	// the document and nothing complains, while mistaking bytes for a wrapper
+	// fails loudly at the parse. Guess towards the loud one.
+	lowered := strings.ToLower(contentType)
+	isJSONish := contentType == "" ||
+		strings.Contains(lowered, "json") ||
+		strings.Contains(lowered, "xml")
+	if !isJSONish {
+		return BinaryFetchResult{
+			Encrypted:     false,
+			Bytes:         resp.Body,
+			ContentType:   contentType,
+			ContentSha256: digest,
+		}, nil
+	}
+
+	// The wrapper shape is served in whichever of JSON/XML this service asked for,
+	// so it goes through the same parser every other response does.
+	body, err := parseBody(resp.Body, c.config.Format == "xml")
+	if err != nil {
+		return BinaryFetchResult{}, err
+	}
+	wrapper := body
 	if m, ok := body.(map[string]any); ok {
 		if v, ok := m["value"]; ok {
-			return v, nil
+			wrapper = v
 		}
+		// Defensive: some shapes might return the wrapper directly.
 	}
-	// Defensive: some shapes might return the wrapper directly.
-	return body, nil
+	return BinaryFetchResult{
+		Encrypted:     true,
+		Wrapper:       wrapper,
+		ContentType:   contentType,
+		ContentSha256: digest,
+	}, nil
 }
 
 // typeForSlug resolves a request slug to its field type (loads the catalog once).
@@ -837,23 +889,14 @@ func (c *Client) DocumentFile(ctx context.Context, documentID string) ([]byte, e
 // 2). GET /flow-runs/{runID}/document/file returns the company-party copy,
 // encrypted to the SERVICE key — the same {"_enc":1,...} wrapper shape the
 // slot-file download uses, fetched + decrypted via the same BinaryHandle path as
-// the (now-fixed) DocumentFile used to: fetch unwraps the API's
-// {"encrypted":true,"value":<wrapper>} envelope, decrypt runs the service-key
-// decrypt to the {"file":"data:…;base64,…"} envelope, and the data-URI is
-// decoded to the PLAINTEXT file bytes. A 404 (no generated document yet)
-// propagates as the normal *ApiError.
+// the (now-fixed) DocumentFile used to: binaryFetchCtx classifies the response
+// and unwraps the API's {"encrypted":true,"value":<wrapper>} envelope, decrypt
+// runs the service-key decrypt to the {"file":"data:…;base64,…"} envelope, and
+// the data-URI is decoded to the PLAINTEXT file bytes. A 404 (no generated
+// document yet) propagates as the normal *ApiError.
 func (c *Client) FlowRunDocument(ctx context.Context, runID string) ([]byte, error) {
-	fetch := func(valueURL string) (any, error) {
-		body, err := c.http.Get(ctx, valueURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		if m, ok := body.(map[string]any); ok {
-			if v, ok := m["value"]; ok {
-				return v, nil
-			}
-		}
-		return body, nil
+	fetch := func(valueURL string) (BinaryFetchResult, error) {
+		return c.binaryFetchCtx(ctx, valueURL)
 	}
 	return newLazyBinaryHandle(epFlowRuns+"/"+runID+"/document/file", fetch, c.decryptValue).Bytes()
 }

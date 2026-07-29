@@ -335,24 +335,67 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 // URI, in priority order (photo → "full", document → "file").
 var envelopeDataURIKeys = []string{"full", "file"}
 
+// BinaryFetchResult is one response from a company-facing binary file endpoint,
+// in the shape a BinaryHandle needs.
+//
+// #590 — the route has TWO 200 shapes and the company cannot predict which it
+// will get, because the answer depends on whether the person's source field is
+// private, which is theirs to change:
+//
+//   - encrypted — application/json, {"encrypted":true,"value":<wrapper>}. The
+//     wrapper decrypts to the binary ENVELOPE string, from which the file bytes
+//     are extracted.
+//   - plaintext — the file's own Content-Type (e.g. image/jpeg, application/pdf)
+//     and the body IS the file bytes. Nothing to decrypt.
+//
+// The distinction is made on the response's Content-Type, never guessed from the
+// body: a plaintext answer's first byte is whatever the file starts with, and a
+// PDF or a JPEG that happened to begin with a brace would be indistinguishable
+// from a wrapper by sniffing.
+//
+// ContentSha256 is the platform's X-Allus-Content-Sha256 — the sha256 of exactly
+// these bytes, present on both shapes — so a consumer can record what it received
+// and later prove its archived copy has not drifted.
+type BinaryFetchResult struct {
+	Encrypted bool
+	// Wrapper is the {"_enc":1,…} wrapper (encrypted shape only).
+	Wrapper any
+	// Bytes are the file bytes themselves (plaintext shape only).
+	Bytes         []byte
+	ContentType   string
+	ContentSha256 string
+}
+
 // BinaryHandle is a lazy handle for a binary (photo/document) value.
 //
 // A binary answer is stored server-side as a file, exposed in the hardened API
-// as a slot-keyed value_url (never the source field). On Bytes()/Save() the
-// handle GETs that URL, receives the {"_enc":1,...} wrapper, runs the same
-// decrypt as text → a JSON envelope STRING (photo: {"full":"data:...","thumb":...};
-// document: {"file":"data:...",...}) — NOT raw bytes — then parses the envelope
-// and base64-decodes the primary data-URI payload ("full" for photos, "file"
-// for documents) into the file bytes.
+// as a slot-keyed value_url (never the source field). Bytes() and Save() GET
+// that URL and return the FILE BYTES either way — the caller never has to know
+// which of the two response shapes arrived.
+//
+// #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT
+// THE COMPANY'S. Whether the person's source field is private decides it, they
+// can change it at any time, and nothing in the API announces it in advance:
+//
+//   - private source → application/json {"encrypted":true,"value":<wrapper>}. The
+//     wrapper decrypts to a JSON envelope STRING (photo: {"full":"data:...","thumb":...};
+//     document: {"file":"data:...",...}) — NOT raw bytes — whose primary data-URI
+//     payload ("full" for photos, "file" for documents) base64-decodes to the file.
+//   - plaintext source → the file's own Content-Type and the body IS the file.
+//     There is nothing to decrypt, and a handle built this way needs no service
+//     key at all.
+//
+// Photos resolve to the "full" representation. There is no variant selection: one
+// slot has one byte sequence and therefore one digest.
 //
 // The fetch + decrypt are supplied by the client as plain callables, so the
 // handle never holds a key (config-only key handling):
 //
-//   - valueURL + fetch — fetch(valueURL) returns the encrypted wrapper (the way
-//     the slot file endpoint serves {"encrypted":true,"value":<wrapper>}; the
-//     client passes a callback that does the GET + unwraps to the inner wrapper).
+//   - valueURL + fetch — fetch(valueURL) returns a BinaryFetchResult saying which
+//     shape arrived (the client classifies it on the response's Content-Type; the
+//     body is never sniffed).
 //   - decrypt — decrypt(wrapper) returns the decrypted envelope string (a closure
-//     over the loaded service private key).
+//     over the loaded service private key). Only ever called for the encrypted shape.
 //
 // For the shared crypto test vector the decrypted envelope is already in hand,
 // so a handle can also be built directly from an envelope string (no fetch) via
@@ -361,8 +404,16 @@ type BinaryHandle struct {
 	envelopeJSON string
 	hasEnvelope  bool
 	valueURL     string
-	fetch        func(string) (any, error)
+	fetch        func(string) (BinaryFetchResult, error)
 	decrypt      func(any) (string, error)
+
+	// Plaintext file bytes + the response metadata, once a response has been
+	// fetched (#590). hasPlain distinguishes "fetched a zero-byte file" from
+	// "not fetched yet" — a nil slice alone cannot.
+	plainBytes    []byte
+	hasPlain      bool
+	contentType   string
+	contentSha256 string
 }
 
 // NewBinaryHandleFromEnvelope builds a BinaryHandle from an already-decrypted
@@ -373,7 +424,7 @@ func NewBinaryHandleFromEnvelope(envelopeJSON string) *BinaryHandle {
 }
 
 // newLazyBinaryHandle builds a BinaryHandle that fetches + decrypts on first use.
-func newLazyBinaryHandle(valueURL string, fetch func(string) (any, error), decrypt func(any) (string, error)) *BinaryHandle {
+func newLazyBinaryHandle(valueURL string, fetch func(string) (BinaryFetchResult, error), decrypt func(any) (string, error)) *BinaryHandle {
 	return &BinaryHandle{valueURL: valueURL, fetch: fetch, decrypt: decrypt}
 }
 
@@ -381,26 +432,71 @@ func newLazyBinaryHandle(valueURL string, fetch func(string) (any, error), decry
 // callers; empty for an inline-envelope handle).
 func (h *BinaryHandle) ValueURL() string { return h.valueURL }
 
+// ContentSha256 returns the platform's X-Allus-Content-Sha256 for the bytes this
+// handle fetched — the sha256 of exactly what Bytes() returns, so a consumer can
+// record it and later show that its archived copy has not drifted. Empty until
+// something has been fetched, and on a handle built from an envelope that was
+// never fetched through this class.
+//
+// It is the platform's word, not a signature: it proves agreement with the
+// platform's record, not anything to a third party who doubts that record.
+func (h *BinaryHandle) ContentSha256() string { return h.contentSha256 }
+
+// ContentType returns the response Content-Type the bytes arrived with, once
+// fetched (empty otherwise).
+func (h *BinaryHandle) ContentType() string { return h.contentType }
+
+// fetchOnce fetches once and records which shape arrived. Idempotent: the result
+// is cached on the handle so repeated Bytes()/Save() calls do not re-fetch, and so
+// a plaintext answer's digest survives for ContentSha256().
+func (h *BinaryHandle) fetchOnce() error {
+	if h.hasPlain || h.hasEnvelope {
+		return nil
+	}
+	if h.fetch == nil || h.valueURL == "" {
+		return &DecryptError{msg: "BinaryHandle has no envelope and no fetch wiring " +
+			"(build it with an envelope, or valueURL + fetch + decrypt)"}
+	}
+	res, err := h.fetch(h.valueURL)
+	if err != nil {
+		return err
+	}
+	h.contentType = res.ContentType
+	h.contentSha256 = res.ContentSha256
+
+	if !res.Encrypted {
+		// A plaintext answer needs no service key. Demanding decrypt up front (as
+		// this did before #590) would make a handle built without one fail on
+		// exactly the answers that do not need it.
+		h.plainBytes = res.Bytes
+		h.hasPlain = true
+		return nil
+	}
+	if h.decrypt == nil {
+		return &DecryptError{msg: "binary answer is encrypted but this handle has no decrypt wiring"}
+	}
+	env, err := h.decrypt(res.Wrapper)
+	if err != nil {
+		return err
+	}
+	h.envelopeJSON = env
+	h.hasEnvelope = true
+	return nil
+}
+
 // resolveEnvelope returns the decrypted envelope string, fetching+decrypting on
 // first use and caching so repeated Bytes()/Save() don't re-fetch.
 func (h *BinaryHandle) resolveEnvelope() (string, error) {
 	if h.hasEnvelope {
 		return h.envelopeJSON, nil
 	}
-	if h.fetch == nil || h.decrypt == nil || h.valueURL == "" {
-		return "", &DecryptError{msg: "BinaryHandle has no envelope and no fetch/decrypt wiring"}
-	}
-	wr, err := h.fetch(h.valueURL)
-	if err != nil {
+	if err := h.fetchOnce(); err != nil {
 		return "", err
 	}
-	env, err := h.decrypt(wr)
-	if err != nil {
-		return "", err
+	if !h.hasEnvelope {
+		return "", &DecryptError{msg: "binary answer arrived as plaintext bytes; use Bytes()/Save()"}
 	}
-	h.envelopeJSON = env
-	h.hasEnvelope = true
-	return env, nil
+	return h.envelopeJSON, nil
 }
 
 // ParseEnvelopeBytes turns a decrypted binary envelope STRING into the primary
@@ -440,8 +536,20 @@ func ParseEnvelopeBytes(envelopeJSON string) ([]byte, error) {
 }
 
 // Bytes fetches (if needed), decrypts, and returns the decoded primary file
-// bytes.
+// bytes — the same bytes for either #590 response shape, so a caller never has
+// to branch on which one the person's privacy setting produced.
 func (h *BinaryHandle) Bytes() ([]byte, error) {
+	if h.hasPlain {
+		return h.plainBytes, nil
+	}
+	if !h.hasEnvelope {
+		if err := h.fetchOnce(); err != nil {
+			return nil, err
+		}
+		if h.hasPlain {
+			return h.plainBytes, nil
+		}
+	}
 	env, err := h.resolveEnvelope()
 	if err != nil {
 		return nil, err

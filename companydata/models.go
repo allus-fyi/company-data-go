@@ -47,8 +47,9 @@ type decryptValueFn func(any) (string, error)
 // typeForSlugFn resolves a request slug to its field type (e.g. "email", "photo").
 type typeForSlugFn func(string) string
 
-// binaryFetchFn fetches a slot file endpoint and unwraps it to the inner wrapper.
-type binaryFetchFn func(string) (any, error)
+// binaryFetchFn fetches a slot file endpoint and classifies its response —
+// #590: an encrypted wrapper or the raw file bytes, decided on Content-Type.
+type binaryFetchFn func(string) (BinaryFetchResult, error)
 
 // ── definitions ──────────────────────────────────────────────────────────────
 

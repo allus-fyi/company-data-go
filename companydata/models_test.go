@@ -140,11 +140,12 @@ func TestBinaryHandleLazyFetchAndDecrypt(t *testing.T) {
 	decryptValue, _ := vectorDecryptValue(t, v)
 
 	fetchCalls := 0
-	binaryFetch := func(url string) (any, error) {
+	binaryFetch := func(url string) (BinaryFetchResult, error) {
 		fetchCalls++
-		// The slot endpoint serves {"encrypted":true,"value":<wrapper>}; here the
-		// fetch callback already unwraps to the inner wrapper.
-		return v.Binary.Wrapper, nil
+		// #590: the fetch callback classifies the response. Here it reports the
+		// ENCRYPTED shape — what the route serves when the person's source field is
+		// private — already unwrapped to the inner wrapper.
+		return BinaryFetchResult{Encrypted: true, Wrapper: v.Binary.Wrapper}, nil
 	}
 	obj := map[string]any{
 		"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
