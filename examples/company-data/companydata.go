@@ -14,7 +14,8 @@
 //	changes     — Client.ProcessChanges()           → a crash-safe pump drain (idempotent on Change.ID)
 //	webhook     — VerifyWebhook()+ParseWebhook()    → a public POST /webhook receiver + a DrainBatch()
 //	                                                   feed fallback; ONE accumulating run keyed by id
-//	documents   — Client.CreateDocument() ×6        → the six document/contract types
+//	documents   — Client.CreateDocument()           → the document/contract types selected in setup
+//	                                                   (six offered, all ticked by default)
 //
 // Settings flow: the browser POSTs setup values to POST /api/scenarios/{id}/config, which writes them to
 // a canonical SDK config FILE. /start builds the Client from that file (companydata.FromConfig) and runs
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -156,6 +158,11 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if id == scenDocuments {
 		meta["share_code"] = toStr(in["shareCode"]) // the per-person/contract target
+		// Preserve presence so doDocuments can distinguish an explicit empty selection from an
+		// absent selection; absence means all document types.
+		if raw, ok := in["documentTypes"]; ok {
+			meta["document_types"] = toAnySlice(toStringSlice(raw))
+		}
 	}
 
 	configPath, err := h.rt.WriteConfig(id, cfg)
@@ -306,41 +313,46 @@ func (h *family) doChanges(client *companydata.Client, calls *[]string) (map[str
 	return map[string]any{"events": events, "drained": true}, nil
 }
 
-// doDocuments — Client.CreateDocument() for each of the six document/contract types (payloads verbatim
-// from apitests/php/documents.php). The per-person / private / contract types target the connected person
-// by share code (from the setup sidecar).
+// doDocuments — Client.CreateDocument() for each SELECTED document/contract type, of the six the
+// scenario offers (payloads verbatim from apitests/php/documents.php). The per-person / private /
+// contract types target the connected person by share code (from the setup sidecar). Selection
+// comes from the setup sidecar's document_types list; absence means all six.
 func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[string]any, error) {
-	shareCode := toStr(h.rt.ReadConfigMeta(scenDocuments)["share_code"])
+	meta := h.rt.ReadConfigMeta(scenDocuments)
+	shareCode := toStr(meta["share_code"])
+	rawTypes, hasTypes := meta["document_types"]
+	selectedTypes := toStringSlice(rawTypes)
 
 	type spec struct {
+		key       string
 		label     string
 		perPerson bool
 		opts      companydata.CreateDocumentOptions
 	}
 	specs := []spec{
-		{"Broadcast plaintext JSON (no target)", false, companydata.CreateDocumentOptions{
+		{"broadcast_json", "Broadcast plaintext JSON (no target)", false, companydata.CreateDocumentOptions{
 			Name: "Service notice", PayloadKind: "json",
 			JSONValue: map[string]any{"msg": "Scheduled maintenance Sunday"},
 		}},
-		{"Broadcast PDF file (no target)", false, companydata.CreateDocumentOptions{
+		{"broadcast_pdf", "Broadcast PDF file (no target)", false, companydata.CreateDocumentOptions{
 			Name: "Price list", PayloadKind: "file",
 			FileBytes: minimalPDF("Price list"), FileMime: "application/pdf",
 		}},
-		{"Per-person NON-private file", true, companydata.CreateDocumentOptions{
+		{"per_person_file", "Per-person NON-private file", true, companydata.CreateDocumentOptions{
 			Name: "Your invoice", PayloadKind: "file",
 			FileBytes: minimalPDF("Your invoice"), FileMime: "application/pdf",
 		}},
-		{"Per-person PRIVATE file (lock → reveal)", true, companydata.CreateDocumentOptions{
+		{"per_person_private", "Per-person PRIVATE file (lock → reveal)", true, companydata.CreateDocumentOptions{
 			Name: "Confidential report", PayloadKind: "file", IsPrivate: true,
 			FileBytes: minimalPDF("Confidential report"), FileMime: "application/pdf",
 		}},
-		{"CONTRACT requiring SIGNATURE", true, companydata.CreateDocumentOptions{
+		{"contract_signature", "CONTRACT requiring SIGNATURE", true, companydata.CreateDocumentOptions{
 			Name: "Service agreement", Kind: "agreement", PayloadKind: "file",
 			RequiresSignature: true,
 			FileBytes:         minimalPDF("Service agreement"), FileMime: "application/pdf",
 			Metadata: map[string]any{"can_be_cancelled_in_app": true},
 		}},
-		{"CONTRACT requiring ACCEPTANCE", true, companydata.CreateDocumentOptions{
+		{"contract_acceptance", "CONTRACT requiring ACCEPTANCE", true, companydata.CreateDocumentOptions{
 			Name: "Terms update", Kind: "agreement", PayloadKind: "json",
 			RequiresAcceptance: true, JSONValue: map[string]any{"version": "2.0"},
 			Metadata: map[string]any{
@@ -357,7 +369,10 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 	}
 
 	docs := make([]map[string]any, 0, len(specs))
-	for i, sp := range specs {
+	for _, sp := range specs {
+		if hasTypes && !slices.Contains(selectedTypes, sp.key) {
+			continue // deselected in setup — the scenario runs exactly what was chosen
+		}
 		opts := sp.opts
 		if sp.perPerson {
 			if shareCode == "" {
@@ -371,7 +386,7 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 			return nil, err
 		}
 		docs = append(docs, map[string]any{
-			"index":       i + 1,
+			"index":       len(docs) + 1,
 			"label":       sp.label,
 			"document_id": doc.ID,
 			"status":      doc.Status,

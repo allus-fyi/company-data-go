@@ -180,7 +180,7 @@ header). Once started, events arrive two ways, both appended to the same accumul
 | `companydata:definitions` | `Client.RequestFields` — your request-field catalog (folded `mandatory` + `one_time`) |
 | `companydata:changes` | `Client.ProcessChanges` — crash-safe pump drain on start, idempotent on `Change.ID` |
 | `companydata:webhook` | `Client.VerifyWebhook` + `Client.ParseWebhook` on `POST /webhook`; `Client.DrainBatch` as the per-poll feed fallback |
-| `companydata:documents` | `Client.CreateDocument` ×6 — the six document / contract types |
+| `companydata:documents` | `Client.CreateDocument` per selected document / contract type — six offered, pick which to create |
 
 ---
 
