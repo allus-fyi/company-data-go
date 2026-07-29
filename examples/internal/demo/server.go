@@ -8,7 +8,7 @@ package demo
 // scenario request (/config, /start, /clear) to the family that Owns() the id, dispatches a run poll by
 // the run's stored scenario id, and forwards the two public OAuth/webhook routes to whichever family
 // implements them (identity's GET /callback + POST .../enroll, company-data's POST /webhook). Everything
-// runs behind one mutex — the Go equivalent of the PHP reference's single-worker `php -S`.
+// runs behind one mutex, so the whole server behaves as a single serialised worker.
 
 import (
 	"encoding/json"
@@ -105,8 +105,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// The guard is registered FIRST, so any unexpected panic in request preprocessing is covered too
-	// (#583 review pass 1). Ordinary runtime-directory creation failures are rejected at startup by
+	// The guard is registered FIRST, so any unexpected panic in request preprocessing is covered too.
+	// Ordinary runtime-directory creation failures are rejected at startup by
 	// WipeAll; this ordering closes the separate panic-before-recover hole.
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -268,23 +268,23 @@ func WriteJSON(w http.ResponseWriter, status int, data map[string]any) {
 	enc.Encode(data)
 }
 
-// WriteFailure writes the contract's FAILURE envelope (#583):
+// WriteFailure writes the contract's FAILURE envelope:
 // {"error": "<token> — <reason>", "message": "<reason>"}. reason is the error, the recovered panic
 // value, or a sentence.
 //
-// The suite's shared client raises body.error VERBATIM and ignores every other key (api.js:
-// `throw new Error(body.error || "start failed (…)")`), so a bare token in `error` reaches the developer
-// as one uninformative word and the REASON — which the backend has right there — is dropped. That is the
-// swallowed failure of standards.html §9: a failure converted into something indistinguishable from any
-// other failure. The token is kept and the reason appended in the shape this contract already uses for
-// exactly this (`no_origin — …`, #574); `message` keeps the bare reason for a programmatic reader.
+// The consuming client is documented to raise body.error VERBATIM and ignore every other key, so a
+// bare token in `error` reaches the developer as one uninformative word and the REASON — which the
+// backend has right there — is dropped. That is the swallowed failure of standards.html §9: a
+// failure converted into something indistinguishable from any other failure. The token is kept and
+// the reason appended in the shape this contract already uses for exactly this (`no_origin — …`);
+// `message` keeps the bare reason for a programmatic reader.
 //
 // fmt.Sprint, not ToStr: a recovered panic value is almost never a string (a runtime fault arrives as
 // runtime.Error), and a type assertion to string answers "" for every one of them — reporting the panic
 // as an empty reason, the very defect this function exists to close.
 //
 // NOT used for the token-only refusals the suite handles by STATUS rather than body — 409
-// not_configured (startScenario maps the 409 before reading the body) and 404 not_found.
+// not_configured (mapped from the status before the body is read) and 404 not_found.
 func WriteFailure(w http.ResponseWriter, status int, token string, reason any) {
 	text := strings.TrimSpace(fmt.Sprint(reason))
 	shown := text

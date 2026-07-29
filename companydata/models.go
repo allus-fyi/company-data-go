@@ -48,7 +48,7 @@ type decryptValueFn func(any) (string, error)
 type typeForSlugFn func(string) string
 
 // binaryFetchFn fetches a slot file endpoint and classifies its response —
-// #590: an encrypted wrapper or the raw file bytes, decided on Content-Type.
+// an encrypted wrapper or the raw file bytes, decided on Content-Type.
 type binaryFetchFn func(string) (BinaryFetchResult, error)
 
 // ── definitions ──────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ type RequestField struct {
 	OneTime   bool
 	Mandatory bool
 	// Audience: which customer TYPE this row applies to — "person" | "company" |
-	// "both" (B2B, #163). Empty on an older API.
+	// "both" (B2B). Empty on an older API.
 	Audience string
 	Raw      map[string]any
 }
@@ -107,7 +107,7 @@ type Value struct {
 	Value     any
 	Live      bool
 	UpdatedAt *time.Time
-	Verified  bool // #311: true iff the value carries verified metadata AND the hash matches
+	Verified  bool // true iff the value carries verified metadata AND the hash matches
 	Raw       map[string]any
 }
 
@@ -181,8 +181,8 @@ type Connection struct {
 	DisplayName string
 	ConnectedAt *time.Time
 	Values      map[string]Value
-	// CustomerType: the connected customer's TYPE — "person" | "company" (B2B,
-	// #163). Empty on an older API. PersonID keeps its name (wire person_user_id)
+	// CustomerType: the connected customer's TYPE — "person" | "company" (B2B).
+	// Empty on an older API. PersonID keeps its name (wire person_user_id)
 	// but semantically holds the customer's user id.
 	CustomerType string
 	// ShareCode: the customer's profile share code (previously only via Raw).
@@ -244,7 +244,7 @@ type Change struct {
 	Event               string
 	PersonID            string
 	ShareCode           string // the person's profile share code (every event; may be empty)
-	CustomerType        string // "person" | "company" (B2B, #163); empty on an older API
+	CustomerType        string // "person" | "company" (B2B); empty on an older API
 	Slug                string
 	Value               any
 	Live                bool
@@ -258,8 +258,8 @@ type Change struct {
 	SignedAt            string // set on a signature: ISO timestamp the signature was recorded
 	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
 	RequestID           string // set on connection_request_accepted | connection_request_rejected
-	PublicKeySHA256     string // #344: set on key_rotated — SHA-256 fingerprint of the person's NEW public key
-	Verified            bool   // #311: true iff a field_updated value is verified (hash matches the decrypted plaintext)
+	PublicKeySHA256     string // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
+	Verified            bool   // true iff a field_updated value is verified (hash matches the decrypted plaintext)
 	At                  *time.Time
 	Raw                 map[string]any
 }
@@ -299,7 +299,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		cancelEffectiveDate = asString(obj["cancel_effective_date"])
 	}
 
-	// #436: 2fa_challenge_completed carries the outcome in status (approved|denied|revoked); its
+	// 2fa_challenge_completed carries the outcome in status (approved|denied|revoked); its
 	// challenge_id/completed_at stay in Raw. The poll is the record (spec §3).
 	if event == "2fa_challenge_completed" {
 		status = asString(obj["status"])
@@ -719,7 +719,7 @@ func extractList(body any, key string) []any {
 	}
 }
 
-// verifiedFrom recomputes the #311 verified flag from the just-decrypted plaintext (email string only).
+// verifiedFrom recomputes the verified flag from the just-decrypted plaintext (email string only).
 func verifiedFrom(obj map[string]any, plaintext any) bool {
 	pt, ok := plaintext.(string)
 	if !ok {

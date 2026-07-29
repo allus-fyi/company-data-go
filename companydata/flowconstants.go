@@ -1,6 +1,6 @@
 package companydata
 
-// Flow constants (computed variables) — issue #79. Pure port of the canonical
+// Flow constants (computed variables). Pure port of the canonical
 // computeConstants/evalExpr reference; pinned by contract-flow-constants-vector.json.
 //
 // A "constant" = {key, label, result_type, expr}. ComputeConstants materialises

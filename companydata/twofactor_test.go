@@ -1,7 +1,7 @@
 package companydata
 
-// #481 additions to the 2FA client: WaitForResult (the base Challenge/Result client landed via
-// #436). Ports tests/test_two_factor.py. A fake Doer replays scripted GET bodies through a real
+// The 2FA client's additions on top of the base Challenge/Result client: WaitForResult.
+// Ports tests/test_two_factor.py. A fake Doer replays scripted GET bodies through a real
 // HTTPClient so each poll consumes one GET.
 
 import (

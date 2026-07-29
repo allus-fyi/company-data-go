@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Config-loading tests. Mirrors the Python reference's test_config.
+// Config-loading tests.
 
 func writeFile(t *testing.T, dir, name, content string) string {
 	t.Helper()

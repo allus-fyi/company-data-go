@@ -5,8 +5,7 @@ import (
 	"fmt"
 )
 
-// Error taxonomy — the same names across all six SDKs, adapted to
-// idiomatic Go error types. Each error type also has a sentinel
+// Error taxonomy, expressed as idiomatic Go error types. Each error type also has a sentinel
 // (Err*) so callers can match with errors.Is, and the concrete types can be
 // extracted with errors.As to read the carried fields (status, error_key,
 // retry_after, …).
@@ -82,7 +81,7 @@ type ApiError struct {
 	// body carried nothing beside the key and the message — reads of a nil map
 	// still yield the zero value, so callers need no nil check).
 	//
-	// #590 added the first response that carries actionable data BESIDE the key:
+	// Some responses carry actionable data BESIDE the key:
 	// a 410 company_data.file_expired returns the expired answer's content_sha256
 	// and expired_at, so a consumer can record that its archived copy is now the
 	// only one and still prove what it holds. Generic rather than a bespoke error
@@ -111,7 +110,7 @@ func NewApiError(status int, errorKey, message string) *ApiError {
 }
 
 // NewApiErrorWithDetails builds an *ApiError carrying the error body's remaining
-// fields (#590).
+// fields.
 //
 // A second constructor rather than a fourth parameter on NewApiError: that one is
 // exported and already called from consumer code, so widening its signature would
@@ -145,7 +144,7 @@ func newWebhookError(format string, a ...any) *WebhookError {
 }
 
 // ValidationError is raised when a freshly-typed value fails its field type's
-// shape/format check (#302) before encryption. It names the offending Slug and
+// shape/format check before encryption. It names the offending Slug and
 // the resolved FieldType. Client validation is UX, never a security boundary.
 type ValidationError struct {
 	Slug      string

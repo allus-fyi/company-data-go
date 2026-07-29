@@ -1,7 +1,7 @@
 package companydata
 
-// Field-type validation parity — every case in the shared vector must match.
-// The same vector pins the web reference + the allus/iOS/Android/other-SDK ports.
+// Field-type validation parity — every case in the shared vector must match, keeping
+// this port aligned with every other implementation of the same contract.
 
 import (
 	"encoding/json"

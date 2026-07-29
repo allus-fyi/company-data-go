@@ -1,6 +1,6 @@
 package companydata
 
-// CustomerClient (b2b, #168) — the connecting company's client.
+// CustomerClient (b2b) — the connecting company's client.
 //
 // A CUSTOMER consumes and answers another company's service over its acct_*
 // credentials: list company↔company connections, provide/edit typed consent
@@ -76,23 +76,24 @@ type CustomerClient struct {
 	sleep       func(time.Duration)
 	accountKey  *rsa.PrivateKey
 	pubkeyCache map[string]*rsa.PublicKey
-	// #344 review pass 2: pubkeyCache is reachable from two goroutines now — batchKey during an
-	// encryption, and InvalidatePublicKey which the README tells webhook consumers to call from
-	// their own handler. An unsynchronised map under concurrent read+write is a hard crash in Go,
-	// not a stale-value bug, so the cache gets a mutex covering lookup, write and invalidation.
-	// #344 review pass 3 corrects the pass-2 note that once stood here: serviceKeyCache and
-	// requestTypeCache ARE reachable from concurrent encryptions (they sit on the same
-	// encryptFor* paths as pubkeyCache), so an unsynchronised map there is the same hard crash.
-	// They now share otherMu. requestTypeCache still has no invalidator, so it needs no generation
-	// counter — but adding one later MUST bring a generation with it, for the reason spelled out
-	// below.
-	// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+	// pubkeyCache is reachable from two goroutines: batchKey during an encryption, and
+	// InvalidatePublicKey which the README tells webhook consumers to call from their own
+	// handler. An unsynchronised map under concurrent read+write is a hard crash in Go, not a
+	// stale-value bug, so the cache gets a mutex covering lookup, write and invalidation.
+	//
+	// serviceKeyCache and requestTypeCache are reachable from concurrent encryptions too (they
+	// sit on the same encryptFor* paths as pubkeyCache), so an unsynchronised map there would be
+	// the same hard crash; they share otherMu. requestTypeCache has no invalidator, so it needs
+	// no generation counter — but adding one later MUST bring a generation with it, for the
+	// reason below.
+	//
+	// A per-key GENERATION counter, bumped by every invalidation.
 	//
 	// Locking the map alone is not enough. The fetch path is check (locked) → unlock → HTTP →
 	// store (locked), so an InvalidatePublicKey that lands between the unlock and the store is
 	// silently undone: the pre-rotation key is written back AFTER the delete, the key_rotated
 	// event has already been consumed, and with no TTL the process encrypts to the dead key for
-	// the rest of its life — the exact symptom this issue exists to fix.
+	// the rest of its life.
 	//
 	// The fetch snapshots the generation before releasing the mutex and stores only if it is
 	// still current; otherwise it discards its result and the next caller refetches. Invalidation
@@ -103,12 +104,12 @@ type CustomerClient struct {
 	// fetch and a service-key fetch never serialise on each other.
 	otherMu         sync.Mutex
 	serviceKeyCache map[string]*rsa.PublicKey
-	// #411 is the "later" the note above warns about: serviceKeyCache now HAS an invalidator
-	// (InvalidateServiceKey, driven by the service_key_rotated change), so it carries its own
-	// generation counter under otherMu, on exactly the same check→unlock→HTTP→store reasoning.
+	// serviceKeyCache HAS an invalidator (InvalidateServiceKey, driven by the
+	// service_key_rotated change), so it carries its own generation counter under otherMu, on
+	// exactly the same check→unlock→HTTP→store reasoning.
 	serviceKeyGen map[string]uint64
 	// requestTypeCache maps "companyCode/serviceCode" → {request_field_id: field_type},
-	// resolved from the connect-screen lookup for typed-answer validation (#302).
+	// resolved from the connect-screen lookup for typed-answer validation.
 	requestTypeCache map[string]map[string]string
 	pump             *Pump
 }
@@ -390,7 +391,7 @@ func (c *CustomerClient) fetchChanges(limit int) ([]map[string]any, error) {
 }
 
 // InvalidatePublicKey drops a person's cached RSA public key, by user id. See the Client method of
-// the same name (#344); the changes feed calls this for you, webhook consumers must call it.
+// the same name; the changes feed calls this for you, webhook consumers must call it.
 func (c *CustomerClient) InvalidatePublicKey(userID string) {
 	c.pubkeyMu.Lock()
 	delete(c.pubkeyCache, userID)
@@ -399,7 +400,7 @@ func (c *CustomerClient) InvalidatePublicKey(userID string) {
 }
 
 // InvalidateServiceKey drops a SERVICE's cached RSA public key, so the next answer or document
-// encrypted to it refetches (#411). The mirror of InvalidatePublicKey in the service→customer
+// encrypted to it refetches. The mirror of InvalidatePublicKey in the service→customer
 // direction; the changes feed calls this for you on a service_key_rotated event, webhook consumers
 // must call it themselves with the body's company_share_code and service_share_code.
 func (c *CustomerClient) InvalidateServiceKey(companyCode, serviceCode string) {
@@ -411,10 +412,10 @@ func (c *CustomerClient) InvalidateServiceKey(companyCode, serviceCode string) {
 }
 
 func (c *CustomerClient) decryptChange(event map[string]any) (Change, error) {
-	// #344: see Client.decryptChange. Note this cache also stores a negative (nil) result, so
+	// See Client.decryptChange. Note this cache also stores a negative (nil) result, so
 	// without invalidation a person who had no key yet would stay unresolvable for the process
 	// lifetime too.
-	// #344: the pull feed names it `event`; a raw webhook body names it `action` (and on document
+	// The pull feed names it `event`; a raw webhook body names it `action` (and on document
 	// rows `action` carries signed|accepted|cancelled instead) — so match either key.
 	evType, _ := event["event"].(string)
 	act, _ := event["action"].(string)
@@ -423,7 +424,7 @@ func (c *CustomerClient) decryptChange(event map[string]any) (Change, error) {
 			c.InvalidatePublicKey(id)
 		}
 	}
-	// #411: a service this customer connects to replaced its keypair — drop the cached copy so the
+	// A service this customer connects to replaced its keypair — drop the cached copy so the
 	// next encryption refetches. Same either-key match as above.
 	if evType == "service_key_rotated" || act == "service_key_rotated" {
 		company, _ := event["company_share_code"].(string)
@@ -499,7 +500,7 @@ func (c *CustomerClient) decryptAccount(wrapper any) (string, error) {
 
 // requestFieldTypes resolves {request_field_id: field_type} for a service from the
 // connect-screen lookup, cached per company/service. Best-effort — a lookup failure
-// yields an empty map so typed-answer validation is simply skipped (#302).
+// yields an empty map so typed-answer validation is simply skipped.
 func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[string]string {
 	key := companyCode + "/" + serviceCode
 	c.otherMu.Lock()
@@ -538,7 +539,7 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 	if pub == nil {
 		return nil, fmt.Errorf("no service key for %s/%s", companyCode, serviceCode)
 	}
-	// #302: validate each typed answer against its request row's field type, BEFORE
+	// Validate each typed answer against its request row's field type, BEFORE
 	// encryption. Skip an answer whose type can't be resolved (do not invent one).
 	types := c.requestFieldTypes(companyCode, serviceCode)
 	for _, a := range answers {
@@ -586,7 +587,7 @@ func (c *CustomerClient) serviceKey(companyCode, serviceCode string) (*rsa.Publi
 		}
 	}
 	c.otherMu.Lock()
-	// #411: store ONLY if no invalidation happened while the request was in flight; otherwise
+	// Store ONLY if no invalidation happened while the request was in flight; otherwise
 	// discard and let the next caller refetch.
 	if c.serviceKeyGen[key] == gen {
 		c.serviceKeyCache[key] = pub

@@ -4,7 +4,7 @@ package identity
 // a guide card with no /start). Every handler goes through the SDK's intended top-level surface
 // (companydata.OAuthClient, companydata.Client, companydata.TwoFactorClient) — never internals, never raw
 // platform HTTP — except the OIDC scenarios (5/6), which deliberately use the standard third-party
-// go-oidc + x/oauth2 stack to prove real OIDC interop (#314; see oidc.go).
+// go-oidc + x/oauth2 stack to prove real OIDC interop (see oidc.go).
 //
 // Settings flow: the browser POSTs a scenario's setup values to POST /api/scenarios/{id}/config, which
 // writes them to a canonical SDK config FILE. /start and /enroll then build the SDK from that file via
@@ -32,8 +32,8 @@ const (
 	oidcNetworkTimeout = 15 * time.Second                // bounds OIDC discovery + token exchange
 )
 
-// noOrigin is the refusal when the request carries no Host header, so the browser's origin is unknown
-// (#574). There is NO default host: substituting one (localhost) silently sends the round-trip to a
+// noOrigin is the refusal when the request carries no Host header, so the browser's origin is unknown.
+// There is NO default host: substituting one (localhost) silently sends the round-trip to a
 // DIFFERENT origin than the browser is on — a different localStorage and a redirect URI the OAuth app
 // never registered.
 const noOrigin = "no_origin — this request carried no Host header, so the OAuth redirect URI cannot be " +
@@ -45,11 +45,9 @@ const noOrigin = "no_origin — this request carried no Host header, so the OAut
 const noStoredOrigin = "no_origin — the saved config has no oauth_redirect_uri. Save the scenario setup " +
 	"again from the browser you will complete the sign-in in."
 
-// The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+// The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
 // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
-// parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
-// six SDK examples — only the method reference is written in the language's own idiom — so one scenario
-// teaches one thing whichever example a reader starts. Keep them in step when this file changes: the
+// parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this file changes: the
 // panel is headed "What just happened", and a list that no longer matches the code is worse than a short
 // one.
 const (
@@ -139,7 +137,7 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 		writeJSON(w, 404, map[string]any{"error": "not_found"})
 		return
 	}
-	// The redirect URI is derived from THIS request's origin and from nothing else (#574). Refuse
+	// The redirect URI is derived from THIS request's origin and from nothing else. Refuse
 	// rather than store a hostless URI: the suite renders this sentence on Save.
 	if strings.TrimSpace(r.Host) == "" {
 		writeJSON(w, 400, map[string]any{"error": noOrigin})
@@ -236,7 +234,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		var claims []companydata.Claim
 		if n == 3 {
 			for _, t := range claimTypes(h.rt.ReadConfigMeta(id)) {
-				// #498: a claim carries a mandatory, unique Name — the key Values and Attestations
+				// A claim carries a mandatory, unique Name — the key Values and Attestations
 				// come back under. The demo's config lists claim TYPES, so the type doubles as the
 				// name; a real integration usually names them for its own domain ("billing_email").
 				claims = append(claims, companydata.Claim{Name: t, Type: t})
@@ -331,10 +329,10 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-// startErr surfaces a start-time SDK/OIDC/2FA failure as a NON-2xx the shared frontend client raises
-// (parity with the other ports' top-level 500 guard). A 200 without {runId,action} looks like a
-// successful start to the client, which then clears any prior error and installs no run id — leaving the
-// developer with no failure message and no pollable run (#482 review-pass-1). Both /start and /enroll
+// startErr surfaces a start-time SDK/OIDC/2FA failure as a NON-2xx the consuming client is documented
+// to raise. A 200 without {runId,action} looks like a successful start to the client, which then clears
+// any prior error and installs no run id — leaving the developer with no failure message and no
+// pollable run. Both /start and /enroll
 // route their error paths here.
 func (h *family) startErr(w http.ResponseWriter, err error) {
 	writeFailure(w, 500, "server_error", err)
@@ -406,7 +404,7 @@ func (h *family) Callback(w http.ResponseWriter, r *http.Request) {
 	n := asInt(id)
 
 	if q.Get("enrolled") == "true" {
-		// Redirect-leg enrollment outcome (#436) — nothing to exchange; record it.
+		// Redirect-leg enrollment outcome — nothing to exchange; record it.
 		run["status"] = "done"
 		run["result"] = map[string]any{"enrolled": true}
 		appendCall(run, callEnrolledCallback)
@@ -614,14 +612,14 @@ func (h *family) serviceClientFor(id string, timeout time.Duration) (*companydat
 	))
 }
 
-// oidcSetupFor builds the OIDC discovery + oauth2 config (the #314 compliance surface) from the config file.
+// oidcSetupFor builds the OIDC discovery + oauth2 config (the OIDC compliance surface) from the config file.
 func (h *family) oidcSetupFor(ctx context.Context, id string) (*oidcSetup, error) {
 	cfg := readJSONMap(h.rt.ConfigPath(id))
 	if cfg == nil {
 		cfg = map[string]any{}
 	}
 	// The SAME value the authorize URL carried, so the two legs of the exchange cannot diverge. An
-	// absent record is a loud failure, never a substituted host (#574).
+	// absent record is a loud failure, never a substituted host.
 	redirectURI := strings.TrimSpace(toStr(cfg["oauth_redirect_uri"]))
 	if redirectURI == "" {
 		return nil, errors.New(noStoredOrigin)
@@ -631,7 +629,7 @@ func (h *family) oidcSetupFor(ctx context.Context, id string) (*oidcSetup, error
 }
 
 // redirectURI is the registered redirect URI: http://{host}/callback, host = the origin the browser
-// actually used. Never falls back to a hardcoded host (#574) — 127.0.0.1 and localhost are DIFFERENT
+// actually used. Never falls back to a hardcoded host — 127.0.0.1 and localhost are DIFFERENT
 // origins for redirect matching and for browser storage alike, so a substituted default drops the
 // developer on an origin whose localStorage never held the setup and whose URI the OAuth app never
 // registered. Callers refuse an empty r.Host before reaching here.
@@ -653,7 +651,7 @@ func claimTypes(in map[string]any) []string {
 }
 
 // appendCall records call names on a run's "what just happened" trace through the shared, deduping
-// implementation (#578, standards §1) — the identity family used to append unconditionally.
+// implementation (standards §1), deduping repeat calls across a run's polls.
 func appendCall(run map[string]any, names ...string) {
 	for _, n := range names {
 		demo.RecordCall(run, n)

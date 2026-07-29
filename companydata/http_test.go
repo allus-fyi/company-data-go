@@ -222,7 +222,7 @@ func Test429ExhaustsRetriesThenRaisesRateLimitError(t *testing.T) {
 }
 
 func Test429PendingCapSurfacesImmediatelyWithoutRetry(t *testing.T) {
-	// #481: a twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
+	// A twofa.pending_cap 429 can never be cleared by a retry — it must surface at once as
 	// ApiError, NOT go through the Retry-After backoff (which every other 429 gets).
 	var sleeps []time.Duration
 	d := &fakeDoer{

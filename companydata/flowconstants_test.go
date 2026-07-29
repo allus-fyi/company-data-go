@@ -1,6 +1,6 @@
 package companydata
 
-// Flow constants (computed variables) parity — issue #79.
+// Flow constants (computed variables) parity.
 // Every case in docs/contract-flow-constants-vector.json (mirrored to
 // ../testdata) must reproduce, byte-for-byte, the shared computeConstants port.
 // Reuses decodeNumber() (UseNumber) from flowcondition_test.go so numbers match

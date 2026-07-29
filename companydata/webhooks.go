@@ -58,8 +58,7 @@ func header(headers map[string][]string, name string) string {
 }
 
 // lookup is a case-insensitive header lookup that distinguishes "absent" from
-// "present with an empty value" (mirrors the Python reference's _header, which
-// returns None only when absent). Returns (value, true) on the first matching
+// "present with an empty value". Returns (value, true) on the first matching
 // header name, or ("", false) when the name is absent.
 func lookup(headers map[string][]string, name string) (string, bool) {
 	target := strings.ToLower(name)

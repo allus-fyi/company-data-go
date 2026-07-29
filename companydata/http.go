@@ -195,7 +195,7 @@ func (c *HTTPClient) GetRaw(ctx context.Context, path string) ([]byte, error) {
 
 // RawResponse is a 2xx response with its status, headers AND unparsed body.
 //
-// #590: the company-facing binary file endpoints have two 200 shapes (a JSON
+// The company-facing binary file endpoints have two 200 shapes (a JSON
 // wrapper for an encrypted answer, raw file bytes for a plaintext one) that are
 // told apart by Content-Type, and both carry an X-Allus-Content-Sha256 digest
 // header. Neither Get (which parses) nor GetRaw (which drops the headers) can
@@ -208,7 +208,7 @@ type RawResponse struct {
 
 // GetResponse GETs path → the whole 2xx response (status, headers and raw body),
 // with no parse. Auth/refresh/retry and error mapping are identical to Get. See
-// RawResponse for why this exists (#590).
+// RawResponse for why this exists.
 func (c *HTTPClient) GetResponse(ctx context.Context, path string) (*RawResponse, error) {
 	return c.doRequestRaw(ctx, http.MethodGet, path, nil, nil, "", false)
 }
@@ -277,7 +277,7 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, path string, params 
 // doRequestRaw is the shared auth + retry loop, sending body (with Content-Type
 // contentType when hasBody) and applying params to the URL. It returns the
 // UNPARSED 2xx response — doRequest parses its body; GetRaw returns the body
-// verbatim; GetResponse hands the whole thing over (#590 needs the headers).
+// verbatim; GetResponse hands the whole thing over (it needs the headers).
 func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, params url.Values, body []byte, contentType string, hasBody bool) (*RawResponse, error) {
 	wantsXML := c.config.Format == "xml"
 	accept := "application/json"
@@ -336,7 +336,7 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 
 		case status == 429:
 			errorKey, message, _ := extractError(respBody, c.config.Format)
-			// #481: a twofa.pending_cap 429 means the caller already holds the maximum
+			// A twofa.pending_cap 429 means the caller already holds the maximum
 			// concurrent 2FA challenges — a retry can never clear that, so surface it
 			// immediately as an ApiError instead of the blind Retry-After backoff every
 			// other 429 gets.
@@ -391,7 +391,7 @@ func parseBody(body []byte, wantsXML bool) (any, error) {
 // extractError pulls error_key + a message out of a non-2xx body (JSON or XML),
 // plus everything BESIDE those two as details.
 //
-// #590: details lets a body that carries actionable data (a 410 file_expired's
+// details lets a body that carries actionable data (a 410 file_expired's
 // content_sha256 + expired_at) reach the caller without a bespoke error type per
 // response. It stays nil when there is nothing left, so the common error carries
 // no allocation.

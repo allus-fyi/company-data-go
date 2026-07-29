@@ -51,7 +51,7 @@ import (
 //     types every value (so address parses to a map, photo becomes a lazy binary
 //     handle, etc.).
 //   - Binary — a value's *BinaryHandle.Bytes() GETs the slot file endpoint and
-//     returns the file bytes for either shape it may serve (#590): the API's
+//     returns the file bytes for either shape it may serve: the API's
 //     {"encrypted":true,"value":<wrapper>} envelope run through the same
 //     service-key decrypt, or — when the person's source field is not private —
 //     the raw file bytes the response already carries.
@@ -99,13 +99,13 @@ type Client struct {
 	// Recipient RSA public keys (by share_code), cached for per-person document
 	// encryption. A public key is immutable + not a secret (fetched live, never
 	// configured).
-	// #344 review pass 3: a per-key GENERATION counter, bumped by every invalidation.
+	// A per-key GENERATION counter, bumped by every invalidation.
 	//
 	// Locking the map alone is not enough. The fetch path is check (locked) → unlock → HTTP →
 	// store (locked), so an InvalidatePublicKey that lands between the unlock and the store is
 	// silently undone: the pre-rotation key is written back AFTER the delete, the key_rotated
 	// event has already been consumed, and with no TTL the process encrypts to the dead key for
-	// the rest of its life — the exact symptom this issue exists to fix.
+	// the rest of its life.
 	//
 	// The fetch snapshots the generation before releasing the mutex and stores only if it is
 	// still current; otherwise it discards its result and the next caller refetches. Invalidation
@@ -203,7 +203,7 @@ func (c *Client) binaryFetch(valueURL string) (BinaryFetchResult, error) {
 // binaryFetchCtx fetches a company-facing binary file endpoint and classifies its
 // response.
 //
-// #590 — the endpoint has TWO 200 shapes and which one arrives is not the
+// The endpoint has TWO 200 shapes and which one arrives is not the
 // company's to predict: a person whose source field is PRIVATE yields
 // application/json {"encrypted":true,"value":<wrapper>}, a person whose field is
 // not yields the file's own Content-Type and the bytes themselves. The decision is
@@ -504,7 +504,7 @@ func (c *Client) fetchChanges(limit int) ([]map[string]any, error) {
 // decrypted at delivery).
 // InvalidatePublicKey drops a person's cached RSA public key, by share code.
 //
-// #344: a public key is immutable, so caching one is safe — until the person rotates it. Persons
+// A public key is immutable, so caching one is safe — until the person rotates it. Persons
 // learn about a rotation from a silent push; a SERVICE receives no pushes at all, so without a
 // signal a long-lived worker could keep encrypting documents to the rotated-away key for the whole
 // process lifetime, with no recovery.
@@ -513,7 +513,7 @@ func (c *Client) fetchChanges(limit int) ([]map[string]any, error) {
 // the verifier is a package-level function with no client instance, so it cannot reach this cache.
 // On a key_rotated webhook, call c.InvalidatePublicKey(change.ShareCode).
 func (c *Client) InvalidatePublicKey(shareCode string) {
-	// #344 review pass 2: pubkeyCache is guarded by pubkeyMu everywhere else (recipientPublicKey
+	// pubkeyCache is guarded by pubkeyMu everywhere else (recipientPublicKey
 	// reads and writes it under the lock). This deletion is documented as something a WEBHOOK
 	// consumer calls from its own goroutine, so it genuinely races an in-flight encryption —
 	// unsynchronised, Go can kill the process with "fatal error: concurrent map read and map write".
@@ -524,10 +524,10 @@ func (c *Client) InvalidatePublicKey(shareCode string) {
 }
 
 func (c *Client) decryptChange(event map[string]any) (Change, error) {
-	// #344: the feed is a service's only rotation signal — drop the stale key before the caller
+	// The feed is a service's only rotation signal — drop the stale key before the caller
 	// can use it. Deliberately eventual: nothing rejects a document encrypted to a stale key, so
 	// there is a window between the rotation and this event being drained.
-	// #344: the pull feed names it `event`; a raw webhook body names it `action` (and on document
+	// The pull feed names it `event`; a raw webhook body names it `action` (and on document
 	// rows `action` carries signed|accepted|cancelled instead) — so match either key.
 	evType, _ := event["event"].(string)
 	act, _ := event["action"].(string)
@@ -858,7 +858,7 @@ func (c *Client) Document(ctx context.Context, documentID string) (Document, err
 	return documentFromAPI(docObj(body), c.decryptValue), nil
 }
 
-// DocumentFile downloads a document's file BYTES (#491 gap 2). Document returns
+// DocumentFile downloads a document's file BYTES. Document returns
 // metadata only and GenerateFlowDocument returns just {document_id, status} —
 // neither yields the bytes. GET /documents/{id}/file returns EITHER a broadcast
 // document's RAW plaintext bytes (not JSON), or a per-person document's JSON
@@ -885,12 +885,12 @@ func (c *Client) DocumentFile(ctx context.Context, documentID string) ([]byte, e
 	return raw, nil // broadcast / plaintext bytes
 }
 
-// FlowRunDocument downloads a generated flow contract's COMPANY copy (#491 gap
-// 2). GET /flow-runs/{runID}/document/file returns the company-party copy,
+// FlowRunDocument downloads a generated flow contract's COMPANY copy. GET
+// /flow-runs/{runID}/document/file returns the company-party copy,
 // encrypted to the SERVICE key — the same {"_enc":1,...} wrapper shape the
-// slot-file download uses, fetched + decrypted via the same BinaryHandle path as
-// the (now-fixed) DocumentFile used to: binaryFetchCtx classifies the response
-// and unwraps the API's {"encrypted":true,"value":<wrapper>} envelope, decrypt
+// slot-file download uses, fetched + decrypted via the same lazy-binary-handle
+// path: binaryFetchCtx classifies the response and unwraps the API's
+// {"encrypted":true,"value":<wrapper>} envelope, decrypt
 // runs the service-key decrypt to the {"file":"data:…;base64,…"} envelope, and
 // the data-URI is decoded to the PLAINTEXT file bytes. A 404 (no generated
 // document yet) propagates as the normal *ApiError.
@@ -1029,8 +1029,8 @@ func (c *Client) FlowRun(ctx context.Context, runID string) (FlowRun, error) {
 	return flowRunFromAPI(asMap(body)), nil
 }
 
-// FlowRunAnswers returns a completed run's DECRYPTED answers as {slug: plaintext}
-// (#491 gap 1). It decrypts the company's service-key answer copies of an
+// FlowRunAnswers returns a completed run's DECRYPTED answers as {slug: plaintext}.
+// It decrypts the company's service-key answer copies of an
 // already-fetched run — the public accessor for a finished run's answers, since
 // the private decryptRunAnswers it wraps is otherwise reached only inside
 // ProcessFlowRun, which returns an already-completed run untouched. (Go has no
@@ -1039,14 +1039,14 @@ func (c *Client) FlowRunAnswers(run FlowRun) (map[string]any, error) {
 	return c.decryptRunAnswers(run)
 }
 
-// Identity is this client's own service identity (#491 gap 3).
+// Identity is this client's own service identity.
 type Identity struct {
 	CompanyUserID string
 	ServiceID     string
 }
 
-// Identity returns this client's OWN identity from GET /api/company-data/whoami
-// (#491 gap 3). The COMPANY party of a TriggerFlowRun binding must bind to
+// Identity returns this client's OWN identity from GET /api/company-data/whoami.
+// The COMPANY party of a TriggerFlowRun binding must bind to
 // CompanyUserID (the person party's user_id comes from the connection), so
 // without this the company-side binding was unconstructible through the SDK.
 func (c *Client) Identity(ctx context.Context) (Identity, error) {
@@ -1137,7 +1137,7 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 	}
 	svcPub := c.servicePublicKey()
 
-	// #302: validate each freshly-typed answer against its field type from the pinned
+	// Validate each freshly-typed answer against its field type from the pinned
 	// definition, BEFORE encryption. Skip when the type can't be resolved.
 	for slug, val := range fill {
 		if ft := fieldTypeForSlug(run.Definition, slug); ft != "" {
@@ -1400,7 +1400,7 @@ func asMap(body any) map[string]any {
 }
 
 // flowPlain renders an answer value as the plaintext string sent to the API
-// (strings as-is, everything else JSON-encoded — mirrors the other SDKs).
+// (strings as-is, everything else JSON-encoded).
 func flowPlain(val any) string {
 	if s, ok := val.(string); ok {
 		return s
@@ -1464,7 +1464,7 @@ func computeNextNode(definition map[string]any, fromKey string, answers map[stri
 // fieldTypeForSlug resolves a field element's field_type from the pinned flow
 // definition by scanning every node's elements for a kind:"field" element with
 // the given slug. Returns "" when the slug is not a field element (or elements
-// are absent) — callers then SKIP validation rather than invent a type (#302).
+// are absent) — callers then SKIP validation rather than invent a type.
 func fieldTypeForSlug(definition map[string]any, slug string) string {
 	nodes, ok := definition["nodes"].([]any)
 	if !ok {

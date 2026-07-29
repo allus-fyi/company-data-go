@@ -407,7 +407,7 @@ func readDeadletterMeta(event map[string]any) (string, int) {
 }
 
 // sanitizeID makes a change id safe for a filename (the seq prefix guarantees
-// order). Mirrors the Python reference.
+// order).
 func sanitizeID(changeID string) string {
 	if changeID == "" {
 		return "noid"

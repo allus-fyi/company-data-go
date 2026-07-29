@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// TwoFactorChallenge is a login-approval challenge returned by TwoFactorClient.Challenge (#436, spec §3).
+// TwoFactorChallenge is a login-approval challenge returned by TwoFactorClient.Challenge (spec §3).
 type TwoFactorChallenge struct {
 	ChallengeID string
 	Status      string // always "pending" on creation
@@ -18,7 +18,7 @@ type TwoFactorChallenge struct {
 	MatchingDigits string
 }
 
-// TwoFactorResult is the outcome of TwoFactorClient.Result (#436, spec §3).
+// TwoFactorResult is the outcome of TwoFactorClient.Result (spec §3).
 type TwoFactorResult struct {
 	// Status is one of pending | approved | denied | expired | revoked | gone (already consumed / TTL passed).
 	Status      string
@@ -86,7 +86,7 @@ func (t *TwoFactorClient) Result(ctx context.Context, challengeID string) (TwoFa
 }
 
 // WaitForResult polls Result until the status is terminal (no longer "pending") and returns that
-// first terminal TwoFactorResult (#481; mirrors the OAuth PollResult precedent). Because the first
+// first terminal TwoFactorResult (mirrors the OAuth PollResult precedent). Because the first
 // terminal read burns the challenge, this returns as soon as the status leaves "pending" — it never
 // re-reads a consumed result. It returns an *ApiError if timeout elapses while still pending;
 // interval is the wait between polls. A non-positive timeout defaults to 600s, a non-positive

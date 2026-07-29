@@ -52,7 +52,7 @@ type Config struct {
 	ServicePrivateKey string `json:"service_private_key"` // path to the OpenSSL-encrypted PKCS#8 PEM
 	KeyPassphrase     string `json:"key_passphrase"`      // decrypts the service PEM in memory
 
-	// Customer role (#168): the acct_* client pair the connecting company uses.
+	// Customer role: the acct_* client pair the connecting company uses.
 	CustomerClientID     string `json:"customer_client_id,omitempty"`
 	CustomerClientSecret string `json:"customer_client_secret,omitempty"`
 
@@ -60,7 +60,7 @@ type Config struct {
 	AccountPrivateKey string `json:"account_private_key,omitempty"`
 	AccountPassphrase string `json:"account_passphrase,omitempty"`
 
-	// "Sign in with allme" idw role (#195). The idw_* app the RP embeds. OAuthPrivateKey +
+	// "Sign in with allme" idw role. The idw_* app the RP embeds. OAuthPrivateKey +
 	// OAuthKeyPassphrase are needed only to decrypt one_time claim values (config-only keys).
 	OAuthClientID      string `json:"oauth_client_id,omitempty"`
 	OAuthRedirectURI   string `json:"oauth_redirect_uri,omitempty"`
@@ -107,8 +107,8 @@ type WebhookHeaderAuth struct {
 // rawConfig is the on-disk JSON shape (it also captures the flat
 // "webhook_secret" shortcut, which Config folds into Webhooks). The webhook
 // alt-auth objects are captured as raw json.RawMessage so an absent vs.
-// present-but-malformed object can be told apart (the Python reference
-// distinguishes data.get("webhook_basic") is None from a bad shape).
+// present-but-malformed object can be told apart (an absent key must be
+// distinguished from a bad shape, not just checked for zero-value equality).
 type rawConfig struct {
 	APIURL               string            `json:"api_url"`
 	ClientID             string            `json:"client_id"`
@@ -157,7 +157,7 @@ func ConfigFromEnv() (*Config, error) {
 	return buildConfig(&rawConfig{}, "service")
 }
 
-// ConfigFromCustomerFile loads a CUSTOMER-role config (#168) — requires the acct_*
+// ConfigFromCustomerFile loads a CUSTOMER-role config — requires the acct_*
 // pair + account key, not the service PEM. Env vars override file values.
 func ConfigFromCustomerFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -179,7 +179,7 @@ func ConfigFromCustomerEnv() (*Config, error) {
 	return buildConfig(&rawConfig{}, "customer")
 }
 
-// ConfigFromIdwFile loads an IDW-role config (#195, "Sign in with allme") — requires the
+// ConfigFromIdwFile loads an IDW-role config ("Sign in with allme") — requires the
 // oauth_client_id + oauth_redirect_uri. Env vars override file values.
 func ConfigFromIdwFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -237,7 +237,7 @@ func buildConfig(raw *rawConfig, role string) (*Config, error) {
 	}
 
 	// Alternative webhook auth methods (file-config only — NO env overrides).
-	// Validate object shapes, mirroring the Python reference.
+	// Validate object shapes.
 	if raw.WebhookBearerToken != "" {
 		cfg.WebhookBearerToken = raw.WebhookBearerToken
 	}
@@ -377,8 +377,7 @@ func (c *Config) WebhookAuthMethod() string {
 }
 
 // isJSONNull reports whether a json.RawMessage is absent or the JSON literal
-// null — both treated as "not configured" (matching the Python reference, where
-// data.get("webhook_basic") is None covers an absent key and an explicit null).
+// null — both treated as "not configured".
 func isJSONNull(raw json.RawMessage) bool {
 	return len(raw) == 0 || string(raw) == "null"
 }

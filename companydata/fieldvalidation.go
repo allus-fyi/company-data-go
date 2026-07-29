@@ -1,10 +1,10 @@
 package companydata
 
-// Field-type value validation — issue #302. Pure + i18n-free. Data-driven: each type maps to a
+// Field-type value validation. Pure + i18n-free. Data-driven: each type maps to a
 // "kind"; structured types map each sub-field to its own sub-rule (§2b), reusing the same kinds.
 // Validate the PLAINTEXT before encryption, at input surfaces only (never on share/propagate).
-// Kept byte-aligned across web / allus / iOS / Android / the 6 SDKs by
-// docs/contract-field-validation-vector.json. Reference: frontend/src/fieldValidation.js. Spec:
+// Kept byte-aligned with every other implementation of the same contract by
+// docs/contract-field-validation-vector.json. Spec:
 // docs/superpowers/specs/2026-07-15-field-type-validation-design.html
 //
 // Contract: FieldValueValid(fieldType, value) -> bool. Empty value = valid (required is the
@@ -39,7 +39,7 @@ var (
 
 	fvGender = []string{"Male", "Female", "Non-binary", "Prefer not to say"}
 
-	// #303: country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter
+	// Country/nationality store an ISO 3166-1 alpha-2 code; address state = USPS 2-letter
 	// code. The lists come from the generated country data (do NOT inline them — they would rot).
 	fvCountrySet = fvToSet(CountryCodes)
 	fvUSStateSet = fvToSet(USStateCodes)
@@ -281,7 +281,7 @@ func FieldValueValid(fieldType, value string) bool {
 }
 
 // FieldValueError returns "" when valid, else the fieldType tag (callers may map it to an
-// i18n error key). Mirrors the reference fieldValueError.
+// i18n error key).
 func FieldValueError(fieldType, value string) string {
 	if FieldValueValid(fieldType, value) {
 		return ""
@@ -289,13 +289,13 @@ func FieldValueError(fieldType, value string) string {
 	return fieldType
 }
 
-// IsValidCountryCode reports whether code is an assigned ISO 3166-1 alpha-2 country code (#303).
+// IsValidCountryCode reports whether code is an assigned ISO 3166-1 alpha-2 country code.
 func IsValidCountryCode(code string) bool {
 	_, ok := fvCountrySet[code]
 	return ok
 }
 
-// DialCodeFor returns the ITU E.164 dial code (digits only, no "+") for a country code, or "" (#303).
+// DialCodeFor returns the ITU E.164 dial code (digits only, no "+") for a country code, or "".
 func DialCodeFor(code string) string {
 	return DialCodes[code]
 }

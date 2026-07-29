@@ -39,11 +39,9 @@ const (
 	drainBatchMax = 500 // the pump clamps to [1,500]; ask for a full batch per feed pull
 )
 
-// The "what just happened" trace (#578). Every entry is `<SDK method> — <what that call did in THIS
+// The "what just happened" trace. Every entry is `<SDK method> — <what that call did in THIS
 // scenario>`, appended AT the call site, in the order the calls were made; an entry wrapped in
-// parentheses is a step that is deliberately NOT an SDK call. The annotations are byte-identical in all
-// six SDK examples — only the method reference is written in the language's own idiom — so one scenario
-// teaches one thing whichever example a reader starts. Keep them in step when this file changes.
+// parentheses is a step that is deliberately NOT an SDK call. Keep them in step when this file changes.
 const (
 	callServiceBuild   = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
 	callConnections    = "Client.ConnectionsList — pages GET /api/company-data/connections: loads your request-field catalog first for value typing, then decrypts each person's values with the service key"
@@ -387,7 +385,7 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 // startWebhook starts the single accumulating webhook run. Persists the routing record webhookId → runId
 // (superseding any prior active webhook run) and returns {action:{type:"none"}} — there is NO long-poll
 // (it would wedge the single worker). Events arrive via POST /webhook and via a per-poll DrainBatch()
-// feed fallback; the frontend reads the growing list through GET /api/runs.
+// feed fallback; the growing list is exposed via GET /api/runs for polling.
 func (h *family) startWebhook(w http.ResponseWriter, id string) {
 	webhookID := toStr(h.rt.ReadConfigMeta(id)["webhook_id"])
 	if webhookID == "" {
@@ -576,9 +574,9 @@ func appendEvent(run map[string]any, ev map[string]any) {
 // ── Change projection ─────────────────────────────────────────────────────────
 
 // projectChange renders the leading columns of a Change PLUS a raw object holding the full public Change
-// fields, so the frontend's JSON.stringify(result) Raw view can show event-specific extras — nothing is
-// dropped. source labels a webhook delivery vs a pull-feed row (empty for the changes scenario, where
-// every row is a pull-feed drain).
+// fields, so a raw view of the event can still show its extras — nothing is dropped. source labels a
+// webhook delivery vs a pull-feed row (empty for the changes scenario, where every row is a pull-feed
+// drain).
 func projectChange(c companydata.Change, source string) map[string]any {
 	ev := map[string]any{
 		"event":        emptyToNil(c.Event),
@@ -624,7 +622,7 @@ func projectChange(c companydata.Change, source string) map[string]any {
 
 // stringifyValue renders a decrypted value for JSON. A binary value is a lazy *BinaryHandle — resolve its
 // bytes to a short descriptor rather than dumping raw bytes; scalars/arrays/maps pass through unchanged
-// (the frontend JSON-stringifies them); a *time.Time renders as an RFC3339 string.
+// since they are already valid JSON; a *time.Time renders as an RFC3339 string.
 func stringifyValue(v any) any {
 	switch t := v.(type) {
 	case nil, bool, string, int, int64, float64, []any, map[string]any:

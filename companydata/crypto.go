@@ -338,7 +338,7 @@ var envelopeDataURIKeys = []string{"full", "file"}
 // BinaryFetchResult is one response from a company-facing binary file endpoint,
 // in the shape a BinaryHandle needs.
 //
-// #590 — the route has TWO 200 shapes and the company cannot predict which it
+// The route has TWO 200 shapes and the company cannot predict which it
 // will get, because the answer depends on whether the person's source field is
 // private, which is theirs to change:
 //
@@ -373,7 +373,7 @@ type BinaryFetchResult struct {
 // that URL and return the FILE BYTES either way — the caller never has to know
 // which of the two response shapes arrived.
 //
-// #590 — THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT
+// THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT
 // THE COMPANY'S. Whether the person's source field is private decides it, they
 // can change it at any time, and nothing in the API announces it in advance:
 //
@@ -408,7 +408,7 @@ type BinaryHandle struct {
 	decrypt      func(any) (string, error)
 
 	// Plaintext file bytes + the response metadata, once a response has been
-	// fetched (#590). hasPlain distinguishes "fetched a zero-byte file" from
+	// fetched. hasPlain distinguishes "fetched a zero-byte file" from
 	// "not fetched yet" — a nil slice alone cannot.
 	plainBytes    []byte
 	hasPlain      bool
@@ -465,9 +465,9 @@ func (h *BinaryHandle) fetchOnce() error {
 	h.contentSha256 = res.ContentSha256
 
 	if !res.Encrypted {
-		// A plaintext answer needs no service key. Demanding decrypt up front (as
-		// this did before #590) would make a handle built without one fail on
-		// exactly the answers that do not need it.
+		// A plaintext answer needs no service key. Demanding decrypt up front
+		// would make a handle built without one fail on exactly the answers that
+		// do not need it.
 		h.plainBytes = res.Bytes
 		h.hasPlain = true
 		return nil
@@ -536,7 +536,7 @@ func ParseEnvelopeBytes(envelopeJSON string) ([]byte, error) {
 }
 
 // Bytes fetches (if needed), decrypts, and returns the decoded primary file
-// bytes — the same bytes for either #590 response shape, so a caller never has
+// bytes — the same bytes for either response shape, so a caller never has
 // to branch on which one the person's privacy setting produced.
 func (h *BinaryHandle) Bytes() ([]byte, error) {
 	if h.hasPlain {
@@ -603,7 +603,7 @@ func (h *BinaryHandle) Save(path string) (int, error) {
 }
 
 // HashMatches reports whether sha256(salt ‖ plaintext) equals expectedHash (hex).
-// #311 verified fields: consumers recompute this from the plaintext they just
+// Verified fields: consumers recompute this from the plaintext they just
 // decrypted and trust the verified flag ONLY on a match.
 func HashMatches(salt, expectedHash, plaintext string) bool {
 	if salt == "" || expectedHash == "" {

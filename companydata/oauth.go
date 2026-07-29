@@ -1,6 +1,6 @@
 package companydata
 
-// "Sign in with allme" — the RP-side OAuth client (#195).
+// "Sign in with allme" — the RP-side OAuth client.
 //
 // A third-party site embeds a *Sign in with allme* button, sends the person to the hosted consent
 // screen, and — once they approve — receives an authorization code at its redirect URI. This file
@@ -26,18 +26,18 @@ var nonClaimable = map[string]bool{"photo": true, "document": true, "legal_docum
 
 const maxClaims = 15
 
-// Claim is a claim the relying party asks for — a REQUEST FIELD (#498).
+// Claim is a claim the relying party asks for — a REQUEST FIELD.
 //
 // You describe what you need: a Name (the claim's identity on the wire), a field Type, an advisory
-// Suggest-ion, whether it is Required, and whether only a #311-Verified answer will do. You never
+// Suggest-ion, whether it is Required, and whether only a Verified answer will do. You never
 // name one of the person's fields — THEY decide which of theirs answers it.
 //
 // Name is MANDATORY and must be unique within one request: everything downstream is keyed by it (the
 // stored mapping, the consent outcome, and the Values/Attestations maps CompleteSignIn returns). Two
 // claims sharing a name are rejected rather than silently coalesced.
 //
-// Verified is accepted only where it can be honoured (#498 §3.1b): on the OIDC flow, and only for a
-// type #311 can attest (v1: email). Sending it on a one_time request is refused with
+// Verified is accepted only where it can be honoured (§3.1b): on the OIDC flow, and only for a
+// type that can be attested (v1: email). Sending it on a one_time request is refused with
 // invalid_request — that leg carries no source row id, so the server could neither enforce the
 // requirement nor attest it, and an unhonourable requirement is refused rather than quietly dropped.
 type Claim struct {
@@ -46,12 +46,12 @@ type Claim struct {
 	Type     string
 	Suggest  string
 	Required bool
-	// Verified: only a #311-verified answer satisfies this claim. OIDC flow + verifiable types only.
+	// Verified: only a verified answer satisfies this claim. OIDC flow + verifiable types only.
 	Verified bool
 	Label    string
 }
 
-// Attestation is proof that a delivered value is the #311-verified one (#498 §3.1a).
+// Attestation is proof that a delivered value is the verified one (§3.1a).
 //
 // Present only for a Verified claim under ENCRYPTED delivery. The server builds and seals it against
 // your app key — a client-supplied attestation is never accepted — so it attests the server's own
@@ -76,7 +76,7 @@ type Attestation struct {
 
 // SignInResult is the decrypted conclusion of CompleteSignIn.
 //
-// #498 §5: User["sub"] IS the person's SHARE CODE and is byte-identical to the id_token's sub;
+// §5: User["sub"] IS the person's SHARE CODE and is byte-identical to the id_token's sub;
 // "share_code" is retained beside it and now simply equals it. "display_name" is GONE — it is a
 // consented name claim now, or nothing: ask for Claim{Name: "name", Type: "text"} and read
 // Values["name"].
@@ -84,9 +84,9 @@ type SignInResult struct {
 	User      map[string]string
 	Mode      string
 	TwoFactor bool
-	// Values maps claim name → plaintext. Unchanged by #498.
+	// Values maps claim name → plaintext.
 	Values map[string]string
-	// Attestations maps claim name → Attestation, keyed by the SAME slug as Values (#498 §3.1a).
+	// Attestations maps claim name → Attestation, keyed by the SAME slug as Values (§3.1a).
 	// Additive: an integration that never reads it behaves exactly as before. ABSENT = not attested.
 	Attestations map[string]Attestation
 }
@@ -209,14 +209,14 @@ func cleanClaims(claims []Claim) ([]map[string]any, error) {
 		if c.Type == "" || nonClaimable[c.Type] {
 			continue
 		}
-		// #498 §2: Name is the claim's identity and it is mandatory. Refused HERE rather than left
+		// §2: Name is the claim's identity and it is mandatory. Refused HERE rather than left
 		// to the API, so the integration error surfaces at the call that made it.
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
-			return nil, newConfigError("every claim must carry a `Name` (#498)")
+			return nil, newConfigError("every claim must carry a `Name`")
 		}
 		if seen[name] {
-			return nil, newConfigError("duplicate claim name %q (#498)", name)
+			return nil, newConfigError("duplicate claim name %q", name)
 		}
 		seen[name] = true
 		entry := map[string]any{"name": name, "type": c.Type}
@@ -316,7 +316,7 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 	return res, nil
 }
 
-// decryptAttestations opens the app-key-sealed attestations and attests each value itself (#498 §3.1a).
+// decryptAttestations opens the app-key-sealed attestations and attests each value itself (§3.1a).
 //
 // A SECOND decrypt per verified claim: Values is byte-identical to before, but each attestation is
 // its own {"_enc":1,...} object. A passthrough accessor handing back an undecrypted blob would not be
@@ -391,7 +391,7 @@ func (c *OAuthClient) decryptValues(raw map[string]any) (map[string]string, erro
 }
 
 // PollResult polls /oauth2/result for a detached sign-in or enrollment (single-delivery). A detached
-// sign-in returns {code, state}; a detached 2fa_enroll returns {enrolled: true, state} (#481). It
+// sign-in returns {code, state}; a detached 2fa_enroll returns {enrolled: true, state}. It
 // returns on the first delivered shape (code OR enrolled) and never polls past it, so a one-shot
 // enrollment result is not consumed and lost.
 func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) (map[string]any, error) {
@@ -418,7 +418,7 @@ func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) 
 		switch resp.StatusCode {
 		case 200:
 			m := parseJSONObject(body)
-			// #481: return on the first delivered terminal shape — a sign-in `code` OR a
+			// Return on the first delivered terminal shape — a sign-in `code` OR a
 			// 2fa_enroll `enrolled` sentinel ({enrolled: true, state}). Both are one-shot;
 			// returning here (rather than looping) keeps a one-shot enrollment result from
 			// being consumed and lost to a timeout.

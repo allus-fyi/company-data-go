@@ -1,7 +1,7 @@
 package companydata
 
-// FlowConditionEvaluator parity — every case in the shared vector must pass.
-// The same vector pins the PHP reference + the python/ts/iOS/Android ports.
+// FlowConditionEvaluator parity — every case in the shared vector must pass, keeping
+// this port aligned with every other implementation of the same contract.
 // Numbers are decoded with UseNumber() to match the production HTTP layer.
 
 import (

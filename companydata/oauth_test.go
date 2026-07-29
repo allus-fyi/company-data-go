@@ -1,6 +1,6 @@
 package companydata
 
-// "Sign in with allme" RP OAuth client tests (#195). Ports test_oauth.py.
+// "Sign in with allme" RP OAuth client tests. Ports test_oauth.py.
 
 import (
 	"encoding/json"
@@ -107,7 +107,7 @@ func TestAuthorizeURLPKCEAndDetached(t *testing.T) {
 
 func TestAuthorizeURLClaimValidation(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
-	// #498: every claim carries a mandatory `name` — the identity everything downstream is keyed by.
+	// Every claim carries a mandatory `name` — the identity everything downstream is keyed by.
 	got, _ := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: []Claim{
 		{Name: "email", Type: "email", Suggest: "email_personal"},
 		{Name: "avatar", Type: "photo"},
@@ -128,7 +128,7 @@ func TestAuthorizeURLClaimValidation(t *testing.T) {
 	}
 }
 
-// #498 §2: a claim with no name, and two claims sharing one, are refused at the call that made them
+// §2: a claim with no name, and two claims sharing one, are refused at the call that made them
 // rather than left to fail at the API.
 func TestAuthorizeURLClaimNameRequired(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
@@ -145,7 +145,7 @@ func TestAuthorizeURLClaimNameRequired(t *testing.T) {
 	}
 }
 
-// #498 §3: `verified` travels on the wire, so an RP can demand a #311-attested answer.
+// §3: `verified` travels on the wire, so an RP can demand an attested answer.
 func TestAuthorizeURLClaimVerified(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
 	got, _ := c.AuthorizeURL("signin", &AuthorizeURLOptions{Claims: []Claim{
@@ -195,7 +195,7 @@ func TestExchangeAndUserinfo(t *testing.T) {
 		t.Fatalf("form = %v", d.posts[0].form)
 	}
 	info, err := c.Userinfo("AT")
-	// #498 §5: `sub` IS the share code (byte-identical to the id_token's), and `display_name` is gone.
+	// §5: `sub` IS the share code (byte-identical to the id_token's), and `display_name` is gone.
 	if err != nil || info["sub"] != "AB12CD" || info["sub"] != info["share_code"] {
 		t.Fatalf("userinfo: %v %v", info, err)
 	}
@@ -223,7 +223,7 @@ func TestCompleteSignInDecrypts(t *testing.T) {
 	if out.Mode != "one_time" || !out.TwoFactor || out.User["sub"] != "AB12CD" {
 		t.Fatalf("result = %+v", out)
 	}
-	// #498 §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
+	// §3.1a: no `values_attestation` on the wire → "not attested", never "wrong".
 	if len(out.Attestations) != 0 {
 		t.Fatalf("attestations = %v (expected none)", out.Attestations)
 	}
@@ -254,7 +254,7 @@ func TestPollResultExpired(t *testing.T) {
 	}
 }
 
-// ── #481: 2fa_enroll mode + detached enrollment poll delivery ──────────────
+// ── 2fa_enroll mode + detached enrollment poll delivery ────────────────────
 
 func TestAuthorizeURLAccepts2FAEnrollMode(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
@@ -270,7 +270,7 @@ func TestAuthorizeURLAccepts2FAEnrollMode(t *testing.T) {
 }
 
 func TestPollResultPendingThenEnrolled(t *testing.T) {
-	// #481: a detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResult must
+	// A detached 2fa_enroll delivers {enrolled: true, state}, NOT a code. PollResult must
 	// return on the `enrolled` sentinel — otherwise it consumes the one-shot result and times out.
 	d := &oauthFake{postQ: []fakeResponse{{status: 202}, {status: 200, body: `{"enrolled":true,"state":"EN1"}`}}}
 	c, _ := NewOAuthClient(idwConfig(t, nil), WithOAuthDoer(d), WithOAuthSleep(func(time.Duration) {}))

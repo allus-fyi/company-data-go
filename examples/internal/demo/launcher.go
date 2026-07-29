@@ -2,7 +2,7 @@ package demo
 
 // The one-command launcher shared by the whole example: `go run .` (from examples/).
 //
-// Steps (mirroring the PHP reference bin/start.php):
+// Steps:
 //  1. wipe .runtime/ (fresh state each boot)
 //  2. on a missing/unverified bundle: fetch the pinned frontend release (frontend.lock), VERIFY its
 //     sha256, unpack to .frontend/<tag>/ (a present, verified bundle is a cache hit — nothing refetched)
@@ -10,7 +10,7 @@ package demo
 //  4. refuse a busy port with a clear message
 //  5. serve port ${PORT:-8091} on ALL interfaces with a SINGLE serialising net/http server that hosts
 //     all three scenario families — so a phone on the same network can reach it — printing every URL
-//     it is reachable on (#553).
+//     it is reachable on.
 
 import (
 	"archive/tar"
@@ -79,7 +79,7 @@ func run(factories []FamilyFactory) error {
 	if port == "" {
 		port = "8091"
 	}
-	// An empty host binds ALL interfaces (dual-stack), so a phone on the same network can reach it (#553).
+	// An empty host binds ALL interfaces (dual-stack), so a phone on the same network can reach it.
 	addr := ":" + port
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -98,7 +98,7 @@ func run(factories []FamilyFactory) error {
 	return httpSrv.Serve(ln)
 }
 
-// printReachableURLs announces every URL the server is reachable on (#553).
+// printReachableURLs announces every URL the server is reachable on.
 //
 // The server binds all interfaces, so a phone on the same network can reach it — but only if the
 // person holding the phone knows which address to type. Print the loopback URL AND every

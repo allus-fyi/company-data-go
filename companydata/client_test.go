@@ -30,7 +30,7 @@ import (
 // returns the token.
 type routerDoer struct {
 	route func(path string, params map[string][]string) (int, string)
-	// respHeaders, when set, supplies a GET's response headers. #590: the binary
+	// respHeaders, when set, supplies a GET's response headers. The binary
 	// file route is classified on Content-Type and carries the digest header, so a
 	// test has to be able to say what came back — a scripted body alone can't.
 	respHeaders func(path string) http.Header
@@ -281,7 +281,7 @@ func TestBinaryHandleFetchesSlotAndDecrypts(t *testing.T) {
 	}
 }
 
-// #590 — the SAME slot URL serves raw file bytes when the person's source field
+// The SAME slot URL serves raw file bytes when the person's source field
 // is NOT private. The handle must return the file either way, without the caller
 // knowing which shape arrived, and must not try to decrypt bytes that were never
 // encrypted.
@@ -346,7 +346,7 @@ func TestBinaryHandleServesPlaintextBytes(t *testing.T) {
 	}
 }
 
-// #590 — a 410 file_expired surfaces the digest and the expiry date through
+// A 410 file_expired surfaces the digest and the expiry date through
 // ApiError.Details.
 func TestBinaryHandleExpiredAnswerCarriesDigest(t *testing.T) {
 	v := loadVector(t)

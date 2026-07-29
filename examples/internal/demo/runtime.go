@@ -4,7 +4,7 @@ package demo
 // three scenario families (identity, flow, company-data).
 //
 // The whole example runs as ONE net/http server and every request is serialised behind one mutex in
-// server.go, so — exactly like the PHP reference's single-worker `php -S` — there is NO cross-request
+// server.go, so this server behaves as a single-worker process — there is NO cross-request
 // concurrency to guard inside here: no locks, no tombstones, no burn-on-read. Everything lives under
 // runtimeDir (git-ignored, wiped at startup):
 //
@@ -367,7 +367,7 @@ func readJSONMap(path string) map[string]any {
 	return m
 }
 
-// ── the "what just happened" trace (#578) ────────────────────────────────────
+// ── the "what just happened" trace ───────────────────────────────────────────
 
 // AddCall appends a call name to a run's "what just happened" trace, preserving first-occurrence order
 // and skipping a repeat. ONE implementation for all three families (standards §1): several handlers can
@@ -379,7 +379,8 @@ func readJSONMap(path string) map[string]any {
 // A run that ends `failed` is still a run the panel reports, and the call the reader most needs to see is
 // the one that threw — a bad client secret, a 429, a decrypt failure. An append placed after the call is
 // skipped by the very exception the reader is trying to understand, so the panel would say only that the
-// client was constructed. This is the same under-reporting #578 exists to remove, one path further in;
+// client was constructed. This is the same under-reporting this rule exists to remove, one path
+// further in;
 // the rule is the invariant, not a per-scenario habit. A bulk call records one entry per attempt, so a
 // partial run shows exactly how far it got.
 func AddCall(existing any, name string) []any {

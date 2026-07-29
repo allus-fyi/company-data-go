@@ -20,8 +20,8 @@ import (
 // (sdks/testdata/decryption-vector.json): load the PBES2 service PEM with its
 // passphrase; decrypt the text wrapper to the known plaintext; decrypt the
 // binary wrapper to the JSON envelope whose hashes match (envelope-string sha256
-// and inner-bytes sha256). If this passes, the Go crypto is byte-identical to
-// the other five SDKs.
+// and inner-bytes sha256). If this passes, the Go crypto matches the shared
+// contract byte-for-byte.
 
 // vectorDoc is the structure of decryption-vector.json.
 type vectorDoc struct {

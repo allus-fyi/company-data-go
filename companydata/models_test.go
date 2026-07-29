@@ -142,7 +142,7 @@ func TestBinaryHandleLazyFetchAndDecrypt(t *testing.T) {
 	fetchCalls := 0
 	binaryFetch := func(url string) (BinaryFetchResult, error) {
 		fetchCalls++
-		// #590: the fetch callback classifies the response. Here it reports the
+		// The fetch callback classifies the response. Here it reports the
 		// ENCRYPTED shape — what the route serves when the person's source field is
 		// private — already unwrapped to the inner wrapper.
 		return BinaryFetchResult{Encrypted: true, Wrapper: v.Binary.Wrapper}, nil
@@ -253,7 +253,7 @@ func TestChangeIncludesShareCode(t *testing.T) {
 }
 
 func TestChangeIncludesCustomerType(t *testing.T) {
-	// B2B (#163): a change event carries customer_type; absent -> "".
+	// B2B: a change event carries customer_type; absent -> "".
 	body := map[string]any{"changes": []any{
 		map[string]any{"id": "chg-1", "event": "connection_created",
 			"person_user_id": "co-1", "customer_type": "company", "at": "2026-07-07T12:00:00Z"},
@@ -273,7 +273,7 @@ func TestChangeIncludesCustomerType(t *testing.T) {
 }
 
 func TestRequestFieldIncludesAudience(t *testing.T) {
-	// B2B (#163): a request row carries audience; absent -> "".
+	// B2B: a request row carries audience; absent -> "".
 	body := map[string]any{"request_fields": []any{
 		map[string]any{"slug": "billing", "label": "Billing", "type": "email", "audience": "company"},
 		map[string]any{"slug": "ref", "label": "Ref", "type": "text"},
@@ -288,7 +288,7 @@ func TestRequestFieldIncludesAudience(t *testing.T) {
 }
 
 func TestConnectionIncludesCustomerTypeAndShareCode(t *testing.T) {
-	// B2B (#163): a connection carries customer_type + share_code (both may be empty).
+	// B2B: a connection carries customer_type + share_code (both may be empty).
 	obj := map[string]any{"connection_id": "c-1", "user_id": "co-9",
 		"customer_type": "company", "share_code": "PARTNER", "values": map[string]any{}}
 	conn, err := connectionFromAPI(obj, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil, nil)
