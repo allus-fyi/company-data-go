@@ -62,7 +62,7 @@ const (
 	callPollEnroll         = "OAuthClient.PollResult — polls POST /oauth2/result until the phone delivers {enrolled: true} (one 2s-bounded call per browser poll)"
 	callCompleteSignin     = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; mode signin returns the identity only, no claim values"
 	callCompleteOneTime    = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts every claim value with the OAuth app private key"
-	callCompleteConnect    = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, then reads GET /api/oauth/userinfo; connect delivers no values here, the live ones come from the data client below"
+	callCompleteConnect    = "OAuthClient.CompleteSignIn — exchanges the code + PKCE verifier at POST /oauth2/token, reads GET /api/oauth/userinfo, and decrypts the consented claim values with the OAuth app private key; the connection's live values still come separately from the data client below"
 	callEnrolledCallback   = "(callback ?enrolled=true) — the redirect-leg enrollment outcome; there is nothing to exchange, so no further SDK call"
 	callServiceBuild       = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
 	callConnectionsLive    = "Client.ConnectionsList — pages GET /api/company-data/connections and decrypts each person's values with the service key; the run keeps the one whose share code just signed in"
@@ -85,6 +85,12 @@ var scenarios = map[int]string{
 var (
 	serviceScenarios = map[int]bool{4: true, 8: true} // also read live values via the data Client
 	oauthURLScenario = map[int]bool{1: true, 2: true, 3: true, 4: true, 8: true}
+	// claimValueScenarios are the scenarios whose CompleteSignIn response can carry claim values
+	// (userinfo "values" non-empty) and therefore need the OAuth app private key configured to
+	// decrypt them: mode one_time and mode connect, both delivered as app-key ciphertext through
+	// userinfo. Mode signin (scenarios 1, 2) never carries values; scenario 8 never calls this leg
+	// at all; scenarios 5/6 run the third-party OIDC stack instead of this SDK's decrypt path.
+	claimValueScenarios = map[int]bool{3: true, 4: true}
 )
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
@@ -155,8 +161,9 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 		cfg["oauth_client_secret"] = secret
 	}
 
-	// Scenario 3 (one_time): the OAuth app private key decrypts the claim values (config-only keys).
-	if n == 3 {
+	// Any scenario whose run can carry claim values (claimValueScenarios) needs the OAuth app
+	// private key to decrypt them (config-only keys).
+	if claimValueScenarios[n] {
 		if pem := toStr(in["oauthPrivateKeyPem"]); pem != "" {
 			path, err := h.rt.MaterializeConfigKey(pem)
 			if err != nil {
