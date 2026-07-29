@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/allus-fyi/company-data-go/companydata"
@@ -47,14 +48,15 @@ const (
 // scenario>`, appended AT the call site, in the order the calls were made. Keep them in step when
 // this file changes.
 const (
-	callServiceBuild = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
-	callIdentity     = "Client.Identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to"
-	callConnection   = "Client.Connection — reads the configured connection; the connected person's id on it is what the CUSTOMER party binds to"
-	callTrigger      = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version"
-	callFlowRun      = "Client.FlowRun — re-read on every poll to see whose turn the run is on"
-	callProcess      = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf"
-	callAnswers      = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key"
-	callDocument     = "Client.FlowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key"
+	callServiceBuild  = "companydata.FromConfig — builds the SERVICE-role data client from the saved config file: client credentials plus the service private key, decrypted with its passphrase"
+	callRequestFields = "Client.RequestFields — resolves the flow name + published version (the only handle the portal ever shows for it) to its flow id"
+	callIdentity      = "Client.Identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to"
+	callConnections   = "Client.ConnectionsList — resolves the person's own share code to the connection whose id the CUSTOMER party binds to"
+	callTrigger       = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version"
+	callFlowRun       = "Client.FlowRun — re-read on every poll to see whose turn the run is on"
+	callProcess       = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf"
+	callAnswers       = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key"
+	callDocument      = "Client.FlowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key"
 )
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
@@ -86,8 +88,10 @@ func (family) Owns(id string) bool { return id == scenarioID }
 // ── POST /api/scenarios/{id}/config ───────────────────────────────────────────
 
 // Config writes the browser's setup values to a canonical SDK config FILE (service role). The service
-// PEM is written to config/keys/ and referenced by path; the demo-only run parameters (published flow
-// id, connection id, fixture choice) go to the meta sidecar so the config file stays a pure SDK config.
+// PEM is written to config/keys/ and referenced by path; the demo-only run parameters (flow name +
+// published version, the person's share code, fixture choice) go to the meta sidecar so the config file
+// stays a pure SDK config. Neither the flow id nor the connection id is ever collected here — Start
+// resolves both via the SDK instead of taking either as a raw database id.
 func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	in := readBody(r)
 
@@ -115,9 +119,10 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
 	h.rt.WriteConfigMeta(id, map[string]any{
-		"flow_id":       toStr(in["flowId"]),
-		"connection_id": toStr(in["connectionId"]),
-		"fixture":       toStr(in["fixture"]),
+		"flow_name":    toStr(in["flowName"]),
+		"flow_version": toStr(in["flowVersion"]),
+		"share_code":   toStr(in["shareCode"]),
+		"fixture":      toStr(in["fixture"]),
 	})
 
 	writeJSON(w, 200, map[string]any{"ok": true, "configPath": configPath})
@@ -125,10 +130,12 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 // ── POST /api/scenarios/{id}/start ────────────────────────────────────────────
 
-// Start triggers the flow run. It builds the service Client from the persisted config file, constructs
-// the bindings via the intended SDK surface (company → Identity().CompanyUserID; customer →
-// Connection.PersonID), calls TriggerFlowRun, and stores the returned platform flow-run id in the demo
-// run file. Returns {runId, action:{"type":"none"}} — the drive happens on the GET /api/runs poll.
+// Start triggers the flow run. It builds the service Client from the persisted config file, resolves
+// the flow name + published version and the person's share code to the ids TriggerFlowRun needs (neither
+// is ever collected as a raw id), constructs the bindings via the intended SDK surface (company →
+// Identity().CompanyUserID; customer → Connection.PersonID), calls TriggerFlowRun, and stores the
+// returned platform flow-run id in the demo run file. Returns {runId, action:{"type":"none"}} — the
+// drive happens on the GET /api/runs poll.
 func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 	if !h.rt.HasConfig(id) {
 		// The run is built from the persisted config file, not the request body.
@@ -136,10 +143,18 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	meta := h.rt.ReadConfigMeta(id)
-	flowID := toStr(meta["flow_id"])
-	connectionID := toStr(meta["connection_id"])
-	if flowID == "" || connectionID == "" {
-		writeJSON(w, 409, map[string]any{"error": "not_configured", "message": "flow id and connection id are required"})
+	flowName := strings.TrimSpace(toStr(meta["flow_name"]))
+	flowVersionRaw := strings.TrimSpace(toStr(meta["flow_version"]))
+	shareCode := strings.TrimSpace(toStr(meta["share_code"]))
+	if flowName == "" || flowVersionRaw == "" || shareCode == "" {
+		writeJSON(w, 409, map[string]any{
+			"error": "not_configured", "message": "flow name, published version and share code are required",
+		})
+		return
+	}
+	flowVersion, convErr := strconv.Atoi(flowVersionRaw)
+	if convErr != nil || flowVersion < 0 {
+		writeFailure(w, 400, "start_failed", "published version \""+flowVersionRaw+"\" is not a number")
 		return
 	}
 
@@ -152,6 +167,30 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		writeFailure(w, 502, "start_failed", err)
 		return
 	}
+
+	// Resolve the flow name + published version to its flow id. The pair is not guaranteed unique
+	// (nothing enforces it), so this can return zero, one, or more than one candidate — only exactly
+	// one is safe to proceed on; anything else refuses rather than guess.
+	calls = append(calls, callRequestFields)
+	candidates, err := resolveFlowIDCandidates(ctx, client, flowName, flowVersion)
+	if err != nil {
+		writeFailure(w, 502, "start_failed", err)
+		return
+	}
+	if len(candidates) == 0 {
+		writeFailure(w, 404, "start_failed",
+			"no published flow named \""+flowName+"\" at version "+flowVersionRaw+
+				" — check the name and the \"Published vN\" the portal shows next to it")
+		return
+	}
+	if len(candidates) > 1 {
+		writeFailure(w, 409, "start_failed",
+			"more than one flow matches the name \""+flowName+"\" at version "+flowVersionRaw+
+				" — rename one of them in the portal (the flow builder's name field, next to "+
+				"\"Published vN\") so the pair is unique, then try again")
+		return
+	}
+	flowID := candidates[0]
 
 	// The COMPANY party binds to this service's own company_user_id.
 	calls = append(calls, callIdentity)
@@ -166,17 +205,24 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// The CUSTOMER party binds to the connected person's public personId (no public user_id).
-	calls = append(calls, callConnection)
-	connection, err := client.Connection(ctx, connectionID)
+	// Resolve the person's own share code to their connection — the CUSTOMER party binds to the
+	// connected person's public personId (no public user_id).
+	calls = append(calls, callConnections)
+	connection, err := resolveConnection(ctx, client, shareCode)
 	if err != nil {
 		writeFailure(w, 502, "start_failed", err)
 		return
 	}
+	if connection == nil {
+		writeFailure(w, 404, "connection_error",
+			"no connection found for share code \""+shareCode+"\" — is the person connected to this service?")
+		return
+	}
+	connectionID := connection.ID
 	personID := connection.PersonID
-	if personID == "" {
+	if connectionID == "" || personID == "" {
 		writeFailure(w, 502, "connection_error",
-			"connection "+connectionID+" has no personId (not found or not connected)")
+			"connection for share code \""+shareCode+"\" has no id/personId (not found or not connected)")
 		return
 	}
 
@@ -385,6 +431,71 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 	run["status"] = "completed"
 	run["completed"] = true
 	return run
+}
+
+// resolveFlowIDCandidates resolves a flow's name + published version to its CANDIDATE flow ids.
+// flow_id/flow_name/flow_version ride the additive Raw map on the flow-tagged rows RequestFields
+// returns — they are not typed fields of companydata.RequestField. Returns every DISTINCT flow id
+// whose tagged fields match both name and version, deduplicated, in first-seen order — nothing here
+// guarantees the pair is unique, so the caller decides what to do with zero, one, or more than one
+// candidate.
+func resolveFlowIDCandidates(ctx context.Context, client *companydata.Client, flowName string, flowVersion int) ([]string, error) {
+	fields, err := client.RequestFields(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range fields {
+		name, _ := f.Raw["flow_name"].(string)
+		if name != flowName {
+			continue
+		}
+		version, ok := asInt(f.Raw["flow_version"])
+		if !ok || version != flowVersion {
+			continue
+		}
+		flowID, _ := f.Raw["flow_id"].(string)
+		if flowID != "" && !seen[flowID] {
+			seen[flowID] = true
+			out = append(out, flowID)
+		}
+	}
+	return out, nil
+}
+
+// resolveConnection resolves a person's own share code to their Connection. ConnectionsList collects
+// the whole (auto-paged) service — a demo has too few connections for that to matter, but it is the
+// same call a real integrator would make to look a person up by the one identifier they can read off
+// their own app.
+func resolveConnection(ctx context.Context, client *companydata.Client, shareCode string) (*companydata.Connection, error) {
+	conns, err := client.ConnectionsList(ctx, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	wanted := strings.ToUpper(shareCode)
+	for i := range conns {
+		if strings.ToUpper(conns[i].ShareCode) == wanted {
+			return &conns[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// asInt coerces a decoded-JSON number (float64, int, or a numeric string) to an int; the ok result is
+// false for anything else, including a nil/absent value.
+func asInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case string:
+		i, err := strconv.Atoi(n)
+		return i, err == nil
+	default:
+		return 0, false
+	}
 }
 
 // ownCipherBySlug returns the company's own answer rows, keyed by slug and left as the

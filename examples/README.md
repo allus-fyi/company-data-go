@@ -120,11 +120,12 @@ A contract flow is a company-authored graph of steps. Two importable fixtures sh
 | `flow/fixtures/contract.zip` | `document` — a company step, then a signature leaf that generates a document. |
 
 In the portal, **import** the chosen fixture (service settings → Flows → Import) and **publish** it, then
-in the browser enter the data-client id/secret, the service PEM + passphrase, the **published flow id**,
-the target **connection id**, and pick the same **fixture** you imported. **Save**, then **Trigger the
-flow run**. The person's turn — and the contract fixture's signature — are completed on a **physical
-phone** with the allme app, signed in as the connected demo person; polling resumes automatically once
-they answer.
+in the browser enter the data-client id/secret, the service PEM + passphrase, the flow's **name** + the
+**published version** the portal shows next to it, the demo person's own **share code**, and pick the
+same **fixture** you imported. **Save**, then **Trigger the flow run** — the backend resolves the name
++ version and the share code to the flow id and connection id the SDK needs. The person's turn — and the
+contract fixture's signature — are completed on a **physical phone** with the allme app, signed in as
+the connected demo person; polling resumes automatically once they answer.
 
 ### Company-data (`companydata:*`)
 
@@ -166,7 +167,8 @@ header). Once started, events arrive two ways, both appended to the same accumul
 
 | Step | SDK call the handler makes |
 |---|---|
-| Trigger the run | `Client.Identity` (company binding) → `Client.Connection` (customer personId) → `Client.TriggerFlowRun(flowID, connectionID, bindings)` |
+| Resolve the flow | `Client.RequestFields`, matched by the configured flow name + published version |
+| Trigger the run | `Client.Identity` (company binding) → `Client.ConnectionsList` (customer personId, matched by share code) → `Client.TriggerFlowRun(flowID, connectionID, bindings)` |
 | Each poll (drive/resume) | `Client.FlowRun(runID)`; on the company's turn `Client.ProcessFlowRun(runID, fillNode, nil)` (one step; a bad email raises `*ValidationError`) |
 | On completion | `Client.FlowRunAnswers(run)`; for a `document` flow `Client.FlowRunDocument(runID)` |
 
