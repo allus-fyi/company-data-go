@@ -364,9 +364,10 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 	if err != nil {
 		return failRun(run, err)
 	}
+	ciphers := ownCipherBySlug(flowRun)
 	answersOut := make([]any, 0, len(answers))
 	for slug, value := range answers {
-		answersOut = append(answersOut, map[string]any{"slug": slug, "value": value})
+		answersOut = append(answersOut, map[string]any{"slug": slug, "value": value, "cipher": ciphers[slug]})
 	}
 	run["answers"] = answersOut
 
@@ -384,6 +385,25 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 	run["status"] = "completed"
 	run["completed"] = true
 	return run
+}
+
+// ownCipherBySlug returns the company's own answer rows, keyed by slug and left as the
+// still-encrypted wrapper the API returned — the evidence the "Decrypted answers" panel pairs
+// against each cleartext value, so a reader can see the decrypt actually ran on real ciphertext
+// rather than take it on faith.
+func ownCipherBySlug(flowRun companydata.FlowRun) map[string]any {
+	serviceUID := flowRun.ServiceUserID()
+	out := make(map[string]any, len(flowRun.Answers))
+	for _, row := range flowRun.Answers {
+		slug, ok := row["slug"].(string)
+		if !ok {
+			continue
+		}
+		if forUser, _ := row["for_user_id"].(string); forUser == serviceUID {
+			out[slug] = row["value"]
+		}
+	}
+	return out
 }
 
 // result renders the GET /api/runs/{runId} response: the SHARED run envelope (outer
