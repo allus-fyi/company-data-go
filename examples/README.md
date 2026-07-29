@@ -3,7 +3,7 @@
 One runnable website that demonstrates **every scenario** of the allme platform through the
 `github.com/allus-fyi/company-data-go` **Go SDK**, across all three scenario families:
 
-- **Identity** — Sign in with allme, OIDC login, and 2FA by allme (scenarios 1–8).
+- **Identity** — Sign in with allme, OIDC login, and 2FA by allme (scenarios 1–5, 7–8).
 - **Flow** — run a contract flow end-to-end (`flow:run`).
 - **Company-data** — read connected people's live values, your request-field catalog, the crash-safe
   changes feed, inbound webhooks, and company documents / contracts (`companydata:*`).
@@ -12,7 +12,7 @@ One runnable website that demonstrates **every scenario** of the allme platform 
 backend that serves it and implements the [demo-backend contract](https://github.com/allme-sdk/example-test-suite)
 (`CONTRACT.md`, **contractVersion 3**). Everything the handlers do goes through the SDK's **intended
 top-level surface** (`companydata.OAuthClient`, `companydata.Client`, `companydata.TwoFactorClient`) —
-never internals, never raw platform HTTP. The OIDC scenarios (5/6) deliberately use the standard
+never internals, never raw platform HTTP. The OIDC scenario (5) deliberately uses the standard
 third-party `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2` stack — that is the point of the OIDC
 demonstration (#314).
 
@@ -159,7 +159,6 @@ header). Once started, events arrive two ways, both appended to the same accumul
 | 3 | One-time claims | `OAuthClient.AuthorizeURL("one_time", claims)` → `OAuthClient.CompleteSignIn` (decrypts via the config's `oauth_private_key`) |
 | 4 | Connect (stay-connected) | `OAuthClient.AuthorizeURL("connect")` → `OAuthClient.CompleteSignIn`, then live values via `Client.ConnectionsList` (matched by share code) |
 | 5 | OIDC login | `oidc.NewProvider` (discovery) → `oauth2.Config.AuthCodeURL` (PKCE) → `oauth2.Config.Exchange` → `IDTokenVerifier.Verify` |
-| 6 | OIDC — continue on phone | same OIDC stack as 5; completion arrives on the redirect leg |
 | 7 | 2FA at consent — **guide** | none — a checklist card with no `/start`; links to scenarios 1 & 5 |
 | 8 | Standalone service-2FA + enrollment | `Client.TwoFactor().Challenge` → `TwoFactorClient.WaitForResult`; enrollment via `OAuthClient.AuthorizeURL("2fa_enroll", …)` |
 

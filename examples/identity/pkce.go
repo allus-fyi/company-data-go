@@ -2,7 +2,7 @@ package identity
 
 // PKCE (RFC 7636) verifier + S256 challenge. Pure local crypto — no network, no platform HTTP.
 // The SDK takes the code_challenge into OAuthClient.AuthorizeURL and the code_verifier into
-// OAuthClient.CompleteSignIn; the demo generates the pair. The OIDC scenarios (5/6) reuse the same
+// OAuthClient.CompleteSignIn; the demo generates the pair. The OIDC scenario (5) reuses the same
 // pair, passing code_verifier to the oauth2 token exchange.
 
 import (

@@ -1,9 +1,9 @@
 package identity
 
-// The identity scenario family: Sign in with allme, OIDC login, and 2FA by allme (scenario ids 1–8; 7 is
-// a guide card with no /start). Every handler goes through the SDK's intended top-level surface
+// The identity scenario family: Sign in with allme, OIDC login, and 2FA by allme (scenario ids 1–5, 7–8;
+// 7 is a guide card with no /start). Every handler goes through the SDK's intended top-level surface
 // (companydata.OAuthClient, companydata.Client, companydata.TwoFactorClient) — never internals, never raw
-// platform HTTP — except the OIDC scenarios (5/6), which deliberately use the standard third-party
+// platform HTTP — except the OIDC scenario (5), which deliberately uses the standard third-party
 // go-oidc + x/oauth2 stack to prove real OIDC interop (see oidc.go).
 //
 // Settings flow: the browser POSTs a scenario's setup values to POST /api/scenarios/{id}/config, which
@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ const (
 // scenarios maps id → "runnable" | "guide". Scenario 7 is the guide card (no /start).
 var scenarios = map[int]string{
 	1: "runnable", 2: "runnable", 3: "runnable", 4: "runnable",
-	5: "runnable", 6: "runnable", 7: "guide", 8: "runnable",
+	5: "runnable", 7: "guide", 8: "runnable",
 }
 
 // scenario ids by role.
@@ -89,7 +90,7 @@ var (
 	// (userinfo "values" non-empty) and therefore need the OAuth app private key configured to
 	// decrypt them: mode one_time and mode connect, both delivered as app-key ciphertext through
 	// userinfo. Mode signin (scenarios 1, 2) never carries values; scenario 8 never calls this leg
-	// at all; scenarios 5/6 run the third-party OIDC stack instead of this SDK's decrypt path.
+	// at all; scenario 5 runs the third-party OIDC stack instead of this SDK's decrypt path.
 	claimValueScenarios = map[int]bool{3: true, 4: true}
 )
 
@@ -110,10 +111,15 @@ type family struct{ rt *demo.Runtime }
 // New binds the identity family to the shared runtime.
 func New(rt *demo.Runtime) demo.Family { return &family{rt: rt} }
 
-// Scenarios lists identity scenarios 1–8 with numeric ids (7 is the guide card).
+// Scenarios lists identity scenarios 1–5, 7–8 with numeric ids (7 is the guide card).
 func (family) Scenarios() []demo.Scenario {
+	ids := make([]int, 0, len(scenarios))
+	for id := range scenarios {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
 	list := make([]demo.Scenario, 0, len(scenarios))
-	for id := 1; id <= len(scenarios); id++ {
+	for _, id := range ids {
 		list = append(list, demo.Scenario{ID: id, Kind: scenarios[id]})
 	}
 	return list
@@ -289,7 +295,7 @@ func (h *family) Start(w http.ResponseWriter, r *http.Request, id string) {
 		h.rt.WriteRun(runID, run)
 		writeJSON(w, 200, map[string]any{"runId": runID, "action": map[string]any{"type": "detached", "url": url}})
 
-	case 5, 6: // OIDC login | OIDC — continue on your phone
+	case 5: // OIDC login
 		verifier, challenge := generatePKCE()
 		nonce := newRunID()
 		run["verifier"] = verifier
@@ -416,7 +422,7 @@ func (h *family) Callback(w http.ResponseWriter, r *http.Request) {
 		run["result"] = map[string]any{"enrolled": true}
 		appendCall(run, callEnrolledCallback)
 	} else if code := q.Get("code"); code != "" {
-		if n == 5 || n == 6 {
+		if n == 5 {
 			run = h.completeOidc(run, code)
 		} else {
 			run = h.completeSignin(run, code)
@@ -566,7 +572,7 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 	return run
 }
 
-// completeOidc completes an OIDC sign-in (scenarios 5/6) via the third-party OIDC stack — id_token verified.
+// completeOidc completes an OIDC sign-in (scenario 5) via the third-party OIDC stack — id_token verified.
 func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 	id := toStr(run["scenario"])
 	ctx, cancel := oidcContext(context.Background(), oidcNetworkTimeout)

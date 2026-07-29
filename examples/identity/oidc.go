@@ -1,9 +1,9 @@
 package identity
 
-// OIDC login (scenarios 5 & 6, the OIDC compliance demo) via the STANDARD Go OIDC stack:
+// OIDC login (scenario 5, the OIDC compliance demo) via the STANDARD Go OIDC stack:
 // github.com/coreos/go-oidc/v3/oidc (discovery + id_token verification) over golang.org/x/oauth2
 // (auth-code + PKCE + token exchange). This is deliberately NOT the allme SDK — the point of the OIDC
-// scenarios is to prove a real, third-party OIDC client interoperates with the platform.
+// scenario is to prove a real, third-party OIDC client interoperates with the platform.
 //
 // The library is configured for:
 //   - issuer override — discovery runs off the config file's api_url, so a non-prod issuer works;
