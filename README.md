@@ -708,6 +708,15 @@ rate-limited: the connections iterator paces itself and backs off on a surfaced
 `*RateLimitError`. Use connections for the initial full sync + occasional
 reconciliation, not as a poll target — that's what the changes feed is for.
 
+Your `client_credentials` token requests (`/oauth2/token`) are on their own rate-limit bucket,
+separate from person logins — but it is keyed by **source IP, not by your `client_id`**, so it is
+shared with every other `client_credentials` caller reaching the API from the same address (another
+service on your network, a second client on the same host). Caching the token, as described under
+**How it's wired** below, is what keeps that shared window from being spent needlessly — by you or
+anyone else behind the same IP. Every rate-limit refusal — this 429, and the platform's 503 when its
+own limiter store is unreadable — now carries a populated `.ErrorKey`, readable off the same
+`*RateLimitError`/`*ApiError`.
+
 ---
 
 ## Errors
