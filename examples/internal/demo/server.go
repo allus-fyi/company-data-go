@@ -138,6 +138,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/clear" && method == http.MethodPost:
 		s.rt.ClearAll()
 		WriteJSON(w, 200, map[string]any{"ok": true})
+	case path == "/api/state" && method == http.MethodPost:
+		// The setup snapshot, stored verbatim; the bytes are never inspected here.
+		blob, err := io.ReadAll(r.Body)
+		if err != nil {
+			WriteFailure(w, 500, "server_error", err)
+			return
+		}
+		if err := s.rt.WriteState(blob); err != nil {
+			WriteFailure(w, 500, "server_error", err)
+			return
+		}
+		WriteJSON(w, 200, map[string]any{"ok": true})
+	case path == "/api/state" && method == http.MethodGet:
+		// Handed back exactly as stored; no snapshot file at all → 404 not_found. A file that is
+		// present but unreadable is a fault, and answers as one rather than as "nothing saved".
+		blob, err := s.rt.ReadState()
+		switch {
+		case err != nil:
+			WriteFailure(w, 500, "server_error", err)
+		case blob == nil:
+			WriteJSON(w, 404, map[string]any{"error": "not_found"})
+		default:
+			WriteRawJSON(w, 200, blob)
+		}
 	case reConfig.MatchString(path) && method == http.MethodPost:
 		s.dispatchScenario(w, r, reConfig, func(f Family, id string) { f.Config(w, r, id) })
 	case reStart.MatchString(path) && method == http.MethodPost:
@@ -292,6 +316,15 @@ func WriteFailure(w http.ResponseWriter, status int, token string, reason any) {
 		shown = "no reason was reported"
 	}
 	WriteJSON(w, status, map[string]any{"error": token + " — " + shown, "message": text})
+}
+
+// WriteRawJSON writes a JSON document that is already encoded, byte for byte — the stored setup
+// snapshot. The bytes are passed through as they are because decoding and re-encoding them here would
+// rewrite content this server is not allowed to interpret.
+func WriteRawJSON(w http.ResponseWriter, status int, blob []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(blob)
 }
 
 // WriteText writes a plain-text response (the webhook receiver's acknowledgements).

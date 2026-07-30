@@ -59,6 +59,15 @@ passphrases, and webhook signing secrets. It is a local developer example, not a
 hardened service: run it only on a network you trust, and only with sandbox
 credentials.
 
+**Moving a whole setup to that phone — Save all / Restore all.** Typing every
+scenario's setup again on the second device is the tedious part, so the sidebar
+carries two buttons above **Clear all**: **Save all** stores this browser's whole
+setup on the backend, and **Restore all** loads it into another browser pointed at
+the same backend. The backend keeps it as an opaque blob and never runs anything
+off it; it lives with the rest of `.runtime/`, so a restart or **Clear all** drops
+it. After restoring, press **Save** in each scenario you want to run — that is what
+writes its config file here, with this device's own redirect URI.
+
 **`localhost` and `127.0.0.1` are different origins.** Whichever address you open the
 example on is the one the backend registers as the redirect URI — it never substitutes
 a default — so open the example on the address you registered and stay on it for the

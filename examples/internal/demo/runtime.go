@@ -29,6 +29,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,6 +57,7 @@ type Runtime struct {
 	configKeysDir string
 	cacheDir      string
 	routePath     string
+	statePath     string
 }
 
 // NewRuntime builds a Runtime whose state lives under baseDir/.runtime.
@@ -68,6 +70,9 @@ func NewRuntime(baseDir string) *Runtime {
 	// the startup wipe removes it and the "writes only under .runtime/" invariant holds.
 	rt.cacheDir = filepath.Join(rt.runtimeDir, "cache")
 	rt.routePath = filepath.Join(rt.runtimeDir, "webhook-route.json")
+	// The setup snapshot POSTed to /api/state, held verbatim as OPAQUE cold storage: never parsed
+	// here, never used to run anything.
+	rt.statePath = filepath.Join(rt.runtimeDir, "state.json")
 	return rt
 }
 
@@ -272,6 +277,37 @@ func (rt *Runtime) reconcileRoute() {
 // WipeCache removes the SDK pump's buffer / dead-letter directory (recreated on next EnsureDirs).
 func (rt *Runtime) WipeCache() { os.RemoveAll(rt.cacheDir) }
 
+// ── the setup snapshot (POST/GET /api/state) ────────────────────────────────
+
+// WriteState stores the setup snapshot the request carried, VERBATIM. The bytes are OPAQUE here — never
+// parsed, never inspected, never used to run anything — so nothing in this store constrains what they
+// may contain, and an empty body is a snapshot like any other. It carries no TTL (it is setup, not a
+// run); it is removed by a global clear or the startup wipe.
+func (rt *Runtime) WriteState(blob []byte) error {
+	if err := rt.EnsureDirs(); err != nil {
+		return err
+	}
+	return atomicWrite(rt.statePath, blob, 0o600)
+}
+
+// ReadState returns the stored snapshot's bytes, or (nil, nil) when NO snapshot file exists — the
+// file's presence is the whole of the answer, since judging the content would be the inspection this
+// store does not do. A file that exists but cannot be read returns its error, because that is a fault
+// rather than an absence, and the caller answers with the failure envelope instead of "nothing saved".
+func (rt *Runtime) ReadState() ([]byte, error) {
+	raw, err := os.ReadFile(rt.statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// ClearState drops the saved setup snapshot.
+func (rt *Runtime) ClearState() { os.Remove(rt.statePath) }
+
 // ── clear ─────────────────────────────────────────────────────────────────
 
 // ClearScenario deletes a scenario's run files AND its config + meta files, then garbage-collects any
@@ -296,7 +332,9 @@ func (rt *Runtime) ClearScenario(scenarioID string) {
 	rt.reconcileRoute()
 }
 
-// ClearAll wipes all run files, the entire config tree (configs, metas, keys), the route + pump cache.
+// ClearAll wipes all run files, the entire config tree (configs, metas, keys), the route + pump cache,
+// and the saved setup snapshot. The snapshot goes too because it can hold the same credentials the
+// config tree does — a clear that left it behind would leave those sitting on disk.
 func (rt *Runtime) ClearAll() {
 	entries, _ := os.ReadDir(rt.runsDir)
 	for _, e := range entries {
@@ -305,6 +343,7 @@ func (rt *Runtime) ClearAll() {
 	os.RemoveAll(rt.configDir)
 	os.RemoveAll(rt.cacheDir)
 	rt.ClearRoute()
+	rt.ClearState()
 	rt.EnsureDirs()
 }
 
