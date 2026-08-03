@@ -30,7 +30,17 @@ Deeper reference pages live in [`docs/`](docs/):
 
 ## TL;DR — fetch new updates
 
+`go get` adds to an existing module:
+
 ```bash
+go get github.com/allus-fyi/company-data-go@latest
+```
+
+Starting from scratch instead of an existing module?
+
+```bash
+mkdir my-integration && cd my-integration
+go mod init my-integration
 go get github.com/allus-fyi/company-data-go@latest
 ```
 
@@ -75,7 +85,17 @@ documented below.
 
 Requires **Go ≥ 1.26**.
 
+`go get` adds to an existing module:
+
 ```bash
+go get github.com/allus-fyi/company-data-go@latest
+```
+
+Starting from scratch instead of an existing module?
+
+```bash
+mkdir my-integration && cd my-integration
+go mod init my-integration
 go get github.com/allus-fyi/company-data-go@latest
 ```
 
