@@ -541,6 +541,9 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 		"mode":       res.Mode,
 		"two_factor": res.TwoFactor,
 		"values":     res.Values,
+		// The raw app-key ciphertext each decrypted value above came from — pairs with
+		// "values" by claim name so the panel can show a decrypt actually ran on real bytes.
+		"values_cipher": res.ValuesCipher,
 	}
 
 	if asInt(id) == 4 {

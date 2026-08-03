@@ -86,6 +86,12 @@ type SignInResult struct {
 	TwoFactor bool
 	// Values maps claim name → plaintext.
 	Values map[string]string
+	// ValuesCipher maps claim name → the RAW app-key ciphertext wrapper Values was decrypted
+	// from — an ADDITIVE sibling of Values, keyed the same way, exactly as delivered by
+	// userinfo. Lets a caller demonstrate that a plaintext value really came from encrypted
+	// delivery. Empty for a mode/claim carrying no ciphertext (signin mode, or plaintext
+	// delivery) — that absence is the honest answer, never a placeholder.
+	ValuesCipher map[string]any
 	// Attestations maps claim name → Attestation, keyed by the SAME slug as Values (§3.1a).
 	// Additive: an integration that never reads it behaves exactly as before. ABSENT = not attested.
 	Attestations map[string]Attestation
@@ -297,6 +303,7 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 		Mode:         mode,
 		TwoFactor:    asBool(info["two_factor"]),
 		Values:       map[string]string{},
+		ValuesCipher: map[string]any{},
 		Attestations: map[string]Attestation{},
 	}
 	if raw, ok := info["values"].(map[string]any); ok && len(raw) > 0 {
@@ -305,6 +312,7 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 			return nil, err
 		}
 		res.Values = vals
+		res.ValuesCipher = raw
 		if rawAttest, ok := info["values_attestation"].(map[string]any); ok && len(rawAttest) > 0 {
 			att, err := c.decryptAttestations(rawAttest, vals)
 			if err != nil {
