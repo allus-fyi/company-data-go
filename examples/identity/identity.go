@@ -74,6 +74,7 @@ const (
 	callOIDCAuthURL        = "(oidc) oauth2.Config.AuthCodeURL — the authorization URL (scope openid profile email, PKCE S256, nonce, state = this run id)"
 	callOIDCToken          = "(oidc) oauth2.Config.Exchange — exchanges the code at the discovered token endpoint (client_secret_post + PKCE verifier)"
 	callOIDCVerify         = "(oidc) IDTokenVerifier.Verify — verifies the id_token against the JWKS: signature, issuer, audience and nonce; the claims shown are that verified token's"
+	callOIDCUserinfo       = "OAuthClient.ResolveUserinfo — reads GET /api/oauth/userinfo with the OIDC access token and decrypts every claim value and attestation with the OAuth app private key, for values that never reach the id_token regardless of delivery mode"
 )
 
 // scenarios maps id → "runnable" | "guide". Scenario 7 is the guide card (no /start).
@@ -86,12 +87,9 @@ var scenarios = map[int]string{
 var (
 	serviceScenarios = map[int]bool{4: true, 8: true} // also read live values via the data Client
 	oauthURLScenario = map[int]bool{1: true, 2: true, 3: true, 4: true, 8: true}
-	// claimValueScenarios are the scenarios whose CompleteSignIn response can carry claim values
-	// (userinfo "values" non-empty) and therefore need the OAuth app private key configured to
-	// decrypt them: mode one_time and mode connect, both delivered as app-key ciphertext through
-	// userinfo. Mode signin (scenarios 1, 2) never carries values; scenario 8 never calls this leg
-	// at all; scenario 5 runs the third-party OIDC stack instead of this SDK's decrypt path.
-	claimValueScenarios = map[int]bool{3: true, 4: true}
+	// claimValueScenarios persist the OAuth app private key + passphrase, for completeOidc and
+	// OAuthClient.CompleteSignIn to decrypt userinfo values with.
+	claimValueScenarios = map[int]bool{3: true, 4: true, 5: true}
 )
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
@@ -427,6 +425,15 @@ func (h *family) Callback(w http.ResponseWriter, r *http.Request) {
 		} else {
 			run = h.completeSignin(run, code)
 		}
+	} else if oauthErr := q.Get("error"); oauthErr != "" {
+		// The authorize step can redirect here with an OAuth error instead of a code. Name it
+		// rather than falling through to the generic "missing code" message below.
+		run["status"] = "failed"
+		if desc := q.Get("error_description"); desc != "" {
+			run["error"] = oauthErr + ": " + desc
+		} else {
+			run["error"] = oauthErr
+		}
 	} else {
 		run["status"] = "failed"
 		run["error"] = "callback missing code / enrolled"
@@ -575,7 +582,9 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 	return run
 }
 
-// completeOidc completes an OIDC sign-in (scenario 5) via the third-party OIDC stack — id_token verified.
+// completeOidc completes an OIDC sign-in (scenario 5) via the third-party OIDC stack — id_token
+// verified. Additionally resolves userinfo through OAuthClient.ResolveUserinfo with the access
+// token the stack already obtained.
 func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 	id := toStr(run["scenario"])
 	ctx, cancel := oidcContext(context.Background(), oidcNetworkTimeout)
@@ -586,12 +595,55 @@ func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 		return failRun(run, err)
 	}
 	appendCall(run, callOIDCToken, callOIDCVerify)
-	claims, err := setup.exchangeAndVerify(ctx, code, toStr(run["verifier"]), toStr(run["nonce"]))
+	claims, accessToken, err := setup.exchangeAndVerify(ctx, code, toStr(run["verifier"]), toStr(run["nonce"]))
 	if err != nil {
 		return failRun(run, err)
 	}
+	result := map[string]any{
+		"claims": claims, "values": map[string]any{}, "values_cipher": map[string]any{},
+		"attestations": map[string]any{}, "values_gap": nil,
+	}
+
+	if accessToken != "" {
+		appendCall(run, callIDWBuild)
+		oauth, err := h.oauthClientFor(id, 0)
+		if err != nil {
+			return failRun(run, err)
+		}
+		appendCall(run, callOIDCUserinfo)
+		resolved, err := oauth.ResolveUserinfo(accessToken, "")
+		if err != nil {
+			if errors.Is(err, companydata.ErrConfig) {
+				result["values_gap"] = "userinfo carried claim value(s) that could not be decrypted: " + err.Error()
+			} else {
+				return failRun(run, err)
+			}
+		} else {
+			values := map[string]any{}
+			for slug, v := range resolved.Values {
+				values[slug] = v
+			}
+			attestations := map[string]any{}
+			for slug, a := range resolved.Attestations {
+				attestations[slug] = map[string]any{"verified": a.Verified, "hash": a.Hash, "salt": a.Salt, "verifiedAt": a.VerifiedAt}
+				// A `verified: false` attestation is a MISMATCH between the delivered value and
+				// what was verified — the value must be rejected, never shown as an answer.
+				if !a.Verified {
+					delete(values, slug)
+				}
+			}
+			cipher := map[string]any{}
+			for slug, v := range resolved.ValuesCipher {
+				cipher[slug] = v
+			}
+			result["values"] = values
+			result["values_cipher"] = cipher
+			result["attestations"] = attestations
+		}
+	}
+
 	run["status"] = "done"
-	run["result"] = map[string]any{"claims": claims}
+	run["result"] = result
 	return run
 }
 

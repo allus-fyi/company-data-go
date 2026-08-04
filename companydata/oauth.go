@@ -287,13 +287,26 @@ func (c *OAuthClient) CompleteSignIn(code, codeVerifier string) (*SignInResult, 
 	if accessToken == "" {
 		return nil, newAuthError("token exchange returned no access_token")
 	}
+	fallbackMode, _ := token["mode"].(string)
+	return c.ResolveUserinfo(accessToken, fallbackMode)
+}
+
+// ResolveUserinfo reads + decrypts userinfo for an access token ALREADY held — the second half of
+// CompleteSignIn, split out so a caller that obtained its access token through its own separate
+// exchange can still resolve and decrypt the claim values. Config-only key handling still holds —
+// the caller passes no key/passphrase, only the token it already has; the private key is read from
+// Config exactly as CompleteSignIn does.
+//
+// Re-exchanging the code here would be wrong (a second exchange either mints a second grant or fails
+// outright), so this method never does the exchange — only the read + decrypt.
+func (c *OAuthClient) ResolveUserinfo(accessToken, fallbackMode string) (*SignInResult, error) {
 	info, err := c.Userinfo(accessToken)
 	if err != nil {
 		return nil, err
 	}
 	mode, _ := info["mode"].(string)
 	if mode == "" {
-		mode, _ = token["mode"].(string)
+		mode = fallbackMode
 	}
 	res := &SignInResult{
 		User: map[string]string{

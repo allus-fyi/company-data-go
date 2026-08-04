@@ -848,6 +848,16 @@ The sign-in result carries `values`, `values_cipher` **and** `attestations`.
   **an entry present with `verified` false is a MISMATCH and you must reject the value.** The timestamp
   attests the value as verified *at that moment*, not verified today.
 
+**`ResolveUserinfo(accessToken, fallbackMode)`** is the second half of `CompleteSignIn` — the `Userinfo`
+read + decrypt + attest, without the token exchange — for a caller whose exchange already ran through a
+different client (a standards-only third-party OIDC library, say, that verified the id_token itself but
+cannot read a claim value the id_token never carries). Config-only key handling applies exactly as it does
+to `CompleteSignIn`: you pass no key or passphrase, only the access token you already hold. Returns the
+identical shape (`Values`, `ValuesCipher`, `Attestations`) and carries the same mismatch-rejection duty on
+the caller. `CompleteSignIn` is implemented on top of this method. `fallbackMode` is a required string
+(Go has no default parameters) used only when `Userinfo` itself omits `mode` — pass the mode your own
+token response carried, or `""` if you have none.
+
 
 ## 2FA by allme (#436, #481)
 

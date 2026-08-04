@@ -59,28 +59,29 @@ func (s *oidcSetup) authCodeURL(state, nonce, challenge string) string {
 }
 
 // exchangeAndVerify exchanges the code (with the PKCE verifier), then verifies the id_token and its
-// nonce, returning the verified claims.
-func (s *oidcSetup) exchangeAndVerify(ctx context.Context, code, verifier, nonce string) (map[string]any, error) {
+// nonce, returning the verified claims plus the access token (used to additionally read userinfo for
+// claim values the id_token cannot carry — see identity.go's completeOidc).
+func (s *oidcSetup) exchangeAndVerify(ctx context.Context, code, verifier, nonce string) (map[string]any, string, error) {
 	token, err := s.oauth2Config.Exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", verifier))
 	if err != nil {
-		return nil, fmt.Errorf("oidc token exchange failed: %w", err)
+		return nil, "", fmt.Errorf("oidc token exchange failed: %w", err)
 	}
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		return nil, fmt.Errorf("oidc token response carried no id_token")
+		return nil, "", fmt.Errorf("oidc token response carried no id_token")
 	}
 	idToken, err := s.provider.Verifier(&oidc.Config{ClientID: s.clientID}).Verify(ctx, rawIDToken)
 	if err != nil {
-		return nil, fmt.Errorf("oidc id_token verification failed: %w", err)
+		return nil, "", fmt.Errorf("oidc id_token verification failed: %w", err)
 	}
 	if idToken.Nonce != nonce {
-		return nil, fmt.Errorf("oidc id_token nonce mismatch")
+		return nil, "", fmt.Errorf("oidc id_token nonce mismatch")
 	}
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
-		return nil, fmt.Errorf("oidc claim decode failed: %w", err)
+		return nil, "", fmt.Errorf("oidc claim decode failed: %w", err)
 	}
-	return claims, nil
+	return claims, token.AccessToken, nil
 }
 
 // oidcContext bounds the OIDC discovery / token network calls so the single worker is never pinned.
