@@ -50,6 +50,8 @@ const (
 	callRequestFields  = "Client.RequestFields — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client"
 	callProcessChanges = "Client.ProcessChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store"
 	callCreateDocument = "Client.CreateDocument — %s"
+	callListDocuments  = "Client.ListDocuments — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created"
+	callDeleteDocument = "Client.DeleteDocument — DELETE /api/company-data/documents/%s"
 	callWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback"
 	callVerifyWebhook  = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401"
 	callParseWebhook   = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key"
@@ -393,6 +395,46 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 		})
 	}
 	return map[string]any{"docs": docs}, nil
+}
+
+// ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ─────────────
+
+// Cleanup deletes every document the documents scenario has created on this service, so a reused
+// account can reset between runs — companydata:documents is additive (CreateDocument mints a new
+// document each run; nothing deletes a prior run's). Not part of the Family interface: opted into
+// via the demo.Cleaner interface, the same way identity's Enroll is opted into via demo.Enroller.
+func (h *family) Cleanup(w http.ResponseWriter, r *http.Request, id string) {
+	if id != scenDocuments {
+		writeJSON(w, 404, map[string]any{"error": "not_found"})
+		return
+	}
+	if !h.rt.HasConfig(id) {
+		writeJSON(w, 409, map[string]any{"error": "not_configured"})
+		return
+	}
+	h.dataRun(w, id, h.doCleanupDocuments)
+}
+
+func (h *family) doCleanupDocuments(client *companydata.Client, calls *[]string) (map[string]any, error) {
+	deleted := 0
+	for {
+		*calls = append(*calls, callListDocuments)
+		page, err := client.ListDocuments(context.Background(), companydata.ListDocumentsOptions{Limit: 100, Offset: 0})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, doc := range page {
+			*calls = append(*calls, fmt.Sprintf(callDeleteDocument, doc.ID))
+			if err := client.DeleteDocument(context.Background(), doc.ID); err != nil {
+				return nil, err
+			}
+			deleted++
+		}
+	}
+	return map[string]any{"deleted": deleted}, nil
 }
 
 // ── companydata:webhook — the accumulating run + public receiver ──────────────

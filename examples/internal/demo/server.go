@@ -64,6 +64,12 @@ type Enroller interface {
 	Enroll(w http.ResponseWriter, r *http.Request, id string)
 }
 
+// Cleaner is implemented by the family serving POST /api/scenarios/{id}/cleanup (company-data's
+// companydata:documents cleanup — deletes every document the scenario has created on the service).
+type Cleaner interface {
+	Cleanup(w http.ResponseWriter, r *http.Request, id string)
+}
+
 // Webhooker is implemented by the family serving the public POST /webhook (company-data's receiver).
 type Webhooker interface {
 	Webhook(w http.ResponseWriter, r *http.Request)
@@ -73,11 +79,12 @@ type Webhooker interface {
 type FamilyFactory func(rt *Runtime) Family
 
 var (
-	reConfig = regexp.MustCompile(`^/api/scenarios/([^/]+)/config$`)
-	reStart  = regexp.MustCompile(`^/api/scenarios/([^/]+)/start$`)
-	reEnroll = regexp.MustCompile(`^/api/scenarios/([^/]+)/enroll$`)
-	reClear  = regexp.MustCompile(`^/api/scenarios/([^/]+)/clear$`)
-	reRun    = regexp.MustCompile(`^/api/runs/([0-9a-f]{32})$`)
+	reConfig  = regexp.MustCompile(`^/api/scenarios/([^/]+)/config$`)
+	reStart   = regexp.MustCompile(`^/api/scenarios/([^/]+)/start$`)
+	reEnroll  = regexp.MustCompile(`^/api/scenarios/([^/]+)/enroll$`)
+	reCleanup = regexp.MustCompile(`^/api/scenarios/([^/]+)/cleanup$`)
+	reClear   = regexp.MustCompile(`^/api/scenarios/([^/]+)/clear$`)
+	reRun     = regexp.MustCompile(`^/api/runs/([0-9a-f]{32})$`)
 )
 
 // Server implements the demo-backend contract for all families.
@@ -175,6 +182,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		en.Enroll(w, r, id)
+	case reCleanup.MatchString(path) && method == http.MethodPost:
+		id := reCleanup.FindStringSubmatch(path)[1]
+		f := s.owner(id)
+		cl, ok := f.(Cleaner)
+		if f == nil || !ok {
+			WriteJSON(w, 404, map[string]any{"error": "not_found"})
+			return
+		}
+		cl.Cleanup(w, r, id)
 	case reClear.MatchString(path) && method == http.MethodPost:
 		s.dispatchScenario(w, r, reClear, func(f Family, id string) { f.Clear(w, r, id) })
 	case reRun.MatchString(path) && method == http.MethodGet:
