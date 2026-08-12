@@ -259,6 +259,10 @@ type Change struct {
 	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
 	RequestID           string // set on connection_request_accepted | connection_request_rejected
 	PublicKeySHA256     string // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
+	ConnectionID        string // set on message_received — the connection to reply/ack on
+	MessageID           string // set on message_received — the ack boundary (upToMessageID)
+	PersonPublicKey     string // set on message_received — base64 SPKI to encrypt the reply to
+	MessageBody         string // set on message_received — the DECRYPTED message text
 	Verified            bool   // true iff a field_updated value is verified (hash matches the decrypted plaintext)
 	At                  *time.Time
 	Raw                 map[string]any
@@ -315,6 +319,26 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		publicKeySHA256 = asString(obj["public_key_sha256"])
 	}
 
+	// message_received carries the connection to answer on, the ack boundary, the
+	// person's public key for the reply, and the message ciphertext itself; its
+	// created_at stays in Raw.
+	var connectionID, messageID, personPublicKey, messageBody string
+	if event == "message_received" {
+		connectionID = asString(obj["connection_id"])
+		messageID = asString(obj["message_id"])
+		personPublicKey = asString(obj["person_public_key"])
+		// The message ciphertext is carried under body, never value: on every other event
+		// value means field ciphertext, which a message body is not. It is encrypted for
+		// the SERVICE key, so the ordinary decrypt opens it.
+		if cipher, ok := obj["body"]; ok && cipher != nil {
+			plain, err := decryptValue(cipher)
+			if err != nil {
+				return Change{}, err
+			}
+			messageBody = plain
+		}
+	}
+
 	return Change{
 		ID:                  asString(obj["id"]),
 		Event:               event,
@@ -335,6 +359,10 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		CancelEffectiveDate: cancelEffectiveDate,
 		RequestID:           requestID,
 		PublicKeySHA256:     publicKeySHA256,
+		ConnectionID:        connectionID,
+		MessageID:           messageID,
+		PersonPublicKey:     personPublicKey,
+		MessageBody:         messageBody,
 		Verified:            verifiedFrom(obj, value),
 		At:                  parseISO(asString(obj["at"])),
 		Raw:                 obj,

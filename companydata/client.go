@@ -67,6 +67,7 @@ const (
 	epLogs          = baseEndpoint + "/logs"
 	epDocuments     = baseEndpoint + "/documents"
 	epConnectReqs   = baseEndpoint + "/connect-requests"
+	epBroadcast     = baseEndpoint + "/broadcast" // POST — one plaintext message to every connection
 	epFlows         = baseEndpoint + "/flows"     // POST /api/company-data/flows/{flowId}/runs
 	epFlowRuns      = baseEndpoint + "/flow-runs" // list / get / answers / generate
 	epKeys          = "/api/keys"
@@ -971,6 +972,153 @@ func (c *Client) SendConnectRequest(ctx context.Context, shareCode string) (stri
 		}
 	}
 	return "", NewApiError(0, "company_connections.request_failed", "no request_id in response")
+}
+
+// ── messaging (company ↔ person) ─────────────────────────────────────────────
+
+// SendMessageOptions carries the optional inputs of SendMessage.
+//
+// PersonPublicKey is the base64 SPKI carried on the message_received event — pass it
+// to answer without a second key lookup. Without it the key is resolved from the
+// connection's share_code (or an explicit ShareCode). Config-only key handling is
+// unchanged: a recipient PUBLIC key is neither a secret nor a configured key.
+type SendMessageOptions struct {
+	PersonPublicKey string
+	ShareCode       string
+}
+
+// SendMessage sends a 1-on-1 message to the connected person and returns the new
+// message_id.
+//
+// POST /api/company-data/connections/{connectionId}/messages. The message is
+// end-to-end encrypted before it leaves the process: one copy for the PERSON (body)
+// and one for the SERVICE (sender_body), so the person reads it in their app and this
+// service can re-read its own outbound text. The platform stores ciphertext only. The
+// route answers 201 with the created message carrying message_id — the acknowledgement
+// boundary MarkMessagesRead takes.
+//
+// Refusals arrive as *ApiError with the platform error_key:
+// messages.messaging_not_entitled / messages.messaging_suspended /
+// messages.not_connected (403), messages.encryption_required (400),
+// messages.rate_limited (429).
+func (c *Client) SendMessage(ctx context.Context, connectionID, text string, opts SendMessageOptions) (string, error) {
+	cid := strings.TrimSpace(connectionID)
+	if cid == "" {
+		return "", newConfigError("connectionID is required")
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", newConfigError("text is required")
+	}
+
+	var personKey *rsa.PublicKey
+	var err error
+	if opts.PersonPublicKey != "" {
+		personKey, err = LoadPublicKey(opts.PersonPublicKey)
+	} else {
+		shareCode := opts.ShareCode
+		if shareCode == "" {
+			shareCode, err = c.resolveShareCode(ctx, cid, "")
+			if err != nil {
+				return "", err
+			}
+		}
+		personKey, err = c.recipientPublicKey(ctx, shareCode)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	personCopy, err := EncryptForPublicKey(text, personKey)
+	if err != nil {
+		return "", err
+	}
+	serviceCopy, err := EncryptForPublicKey(text, c.servicePublicKey())
+	if err != nil {
+		return "", err
+	}
+	// Both copies travel as JSON STRINGS — the message columns are text and the API
+	// tells ciphertext from plaintext by looking for the wrapper marker.
+	personJSON, err := json.Marshal(personCopy)
+	if err != nil {
+		return "", newConfigError("could not marshal the recipient copy: %v", err)
+	}
+	serviceJSON, err := json.Marshal(serviceCopy)
+	if err != nil {
+		return "", newConfigError("could not marshal the service copy: %v", err)
+	}
+
+	body, err := c.http.Post(ctx, epConnections+"/"+cid+"/messages", map[string]any{
+		"body":        string(personJSON),
+		"sender_body": string(serviceJSON),
+	})
+	if err != nil {
+		return "", err
+	}
+	if mid := messageIDOf(body); mid != "" {
+		return mid, nil
+	}
+	return "", NewApiError(0, "messages.send_failed", "no message_id in response")
+}
+
+// BroadcastMessage sends one PLAINTEXT message to every person connected to this
+// service and returns the API response.
+//
+// POST /api/company-data/broadcast. A broadcast is deliberately not encrypted — one
+// body cannot be single-key-encrypted to every connection — so it is the one message
+// the platform can read, exactly as a broadcast document is. It seeds each recipient's
+// ordinary 1-on-1 thread, and a reply comes back end-to-end encrypted as a
+// message_received event.
+//
+// Refusals arrive as *ApiError: messages.broadcast_audience_too_large (422, over the
+// connection cap), messages.broadcast_suspended / messages.messaging_suspended /
+// messages.messaging_not_entitled (403).
+func (c *Client) BroadcastMessage(ctx context.Context, text string) (any, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, newConfigError("text is required")
+	}
+	return c.http.Post(ctx, epBroadcast, map[string]any{"body": text})
+}
+
+// MarkMessagesRead acknowledges the inbound messages this service has handled, up to
+// a boundary.
+//
+// POST /api/company-data/connections/{connectionId}/messages/read with
+// {up_to_message_id}. Only the person's messages on THIS connection at or before that
+// message are marked read; one that arrived while the service was working stays
+// unread, so nothing is swept unhandled. Idempotent — a repeat is a no-op.
+//
+// Sending a reply does NOT acknowledge anything; a service that never acks lets its
+// unread grow. The boundary must be a message the PERSON sent on this connection:
+// anything else is refused with *ApiError company_data.ack_boundary_invalid (400).
+func (c *Client) MarkMessagesRead(ctx context.Context, connectionID, upToMessageID string) error {
+	cid := strings.TrimSpace(connectionID)
+	if cid == "" {
+		return newConfigError("connectionID is required")
+	}
+	boundary := strings.TrimSpace(upToMessageID)
+	if boundary == "" {
+		return newConfigError("upToMessageID is required")
+	}
+	_, err := c.http.Post(ctx, epConnections+"/"+cid+"/messages/read", map[string]any{
+		"up_to_message_id": boundary,
+	})
+	return err
+}
+
+// messageIDOf pulls the new message's id out of a send response — at the top level or
+// nested under "message", and under either "message_id" or "id".
+func messageIDOf(body any) string {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if inner, ok := m["message"].(map[string]any); ok {
+		m = inner
+	}
+	if mid := asString(m["message_id"]); mid != "" {
+		return mid
+	}
+	return asString(m["id"])
 }
 
 // ── contract-flow runs (company side — the company is a bound party) ─────────

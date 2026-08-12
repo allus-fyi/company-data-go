@@ -107,6 +107,10 @@ type Change struct {
     Value    any        // present on field_updated only (decrypted, same typing as Value.Value)
     Live     bool
     HasLive  bool       // distinguishes "live absent" from "live == false"
+    ConnectionID    string // message_received only — the connection to reply/ack on
+    MessageID       string // message_received only — the ack boundary
+    PersonPublicKey string // message_received only — base64 SPKI for the reply
+    MessageBody     string // message_received only — the DECRYPTED text
     At       *time.Time // the change time (no separate UpdatedAt on a change)
     Raw      map[string]any
 }
@@ -120,6 +124,14 @@ type Change struct {
 | `field_updated` | `Slug` + decrypted `Value` + `Live` (binary → a lazy `*BinaryHandle`) |
 | `field_deleted` | `Slug` (no value). A binary slot whose file expired may add `content_sha256` + `expired` in `Raw` |
 | `consent_accepted` / `consent_declined` | `Slug` |
+| `message_received` | `ConnectionID`, `MessageID`, `PersonPublicKey` + `MessageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
+
+The event's ciphertext is carried under `body`. It is never `value`: on every other
+event `value` means field ciphertext, and a message body is not one.
+
+**Answering one.** `SendMessage` answers **201** with the created message carrying
+`message_id`, which is what it returns — hand that id, or the inbound event's `MessageID`,
+to `MarkMessagesRead` as the acknowledgement boundary.
 
 ## LogEntry — ops log
 
