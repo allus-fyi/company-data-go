@@ -2,6 +2,7 @@ package companydata
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,9 +14,9 @@ import (
 // source field) into typed Go values, decrypting ciphertext via
 // the injected crypto closures.
 //
-//	RequestField { Slug, Label, Type, OneTime, Mandatory }    // YOUR request config
+//	RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //	Connection   { ID, PersonID, DisplayName, ConnectedAt, Values map[slug]Value }
-//	Value        { Value, Live, UpdatedAt }
+//	Value        { Value, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
 //	Change       { ID, Event, PersonID, ShareCode, Slug, Value, Live, At } // ID = stable dedup key
 //	LogEntry     { Type, Message, Metadata, At }
 //
@@ -23,7 +24,8 @@ import (
 //   - email/phone/url/text                → string
 //   - address/bank/creditcard             → map[string]any (the decrypted plaintext is a JSON object string → parsed)
 //   - date/date_of_birth                  → time.Time
-//   - photo/document/legal_document       → a lazy *BinaryHandle
+//   - photo/document/legal_document and the ID-document subtypes
+//     passport/photo_id/drivers_license   → a lazy *BinaryHandle
 //
 // Every model carries Raw — the underlying (hardened) API object — for debugging
 // or an edge case the SDK didn't model. It still never contains the person's
@@ -36,8 +38,12 @@ import (
 // Field-type groupings.
 var (
 	structuredTypes = map[string]bool{"address": true, "bank": true, "creditcard": true}
-	binaryTypes     = map[string]bool{"photo": true, "document": true, "legal_document": true}
-	dateTypes       = map[string]bool{"date": true, "date_of_birth": true}
+	// binaryTypes: the ID-document subtypes are children of legal_document and share its envelope.
+	binaryTypes = map[string]bool{
+		"photo": true, "document": true, "legal_document": true,
+		"passport": true, "photo_id": true, "drivers_license": true,
+	}
+	dateTypes = map[string]bool{"date": true, "date_of_birth": true}
 )
 
 // decryptValueFn decrypts a ciphertext wrapper (map / struct / JSON string) →
@@ -65,7 +71,15 @@ type RequestField struct {
 	// Audience: which customer TYPE this row applies to — "person" | "company" |
 	// "both" (B2B). Empty on an older API.
 	Audience string
-	Raw      map[string]any
+	// Verified: this row DEMANDS a verified answer — only a value the person verified
+	// satisfies it, and an unverified candidate is refused at the accepting act rather
+	// than downgraded.
+	Verified bool
+	// VerifiedMaxAgeDays: the oldest verification the demand accepts, in days; nil = no
+	// age limit. Enforced at the accepting act only — a standing live link is not
+	// re-enforced afterwards, so apply your own policy from each Value's VerifiedAt.
+	VerifiedMaxAgeDays *int
+	Raw                map[string]any
 }
 
 func requestFieldFromAPI(obj map[string]any) RequestField {
@@ -76,8 +90,10 @@ func requestFieldFromAPI(obj map[string]any) RequestField {
 		OneTime: coerceBool(obj["one_time"]),
 		Mandatory: coerceBool(obj["mandatory_provide"]) ||
 			coerceBool(obj["mandatory_connected"]),
-		Audience: asString(obj["audience"]),
-		Raw:      obj,
+		Audience:           asString(obj["audience"]),
+		Verified:           coerceBool(obj["verified"]),
+		VerifiedMaxAgeDays: coerceInt(obj["verified_max_age_days"]),
+		Raw:                obj,
 	}
 }
 
@@ -107,8 +123,15 @@ type Value struct {
 	Value     any
 	Live      bool
 	UpdatedAt *time.Time
-	Verified  bool // true iff the value carries verified metadata AND the hash matches
-	Raw       map[string]any
+	// Verified: true iff the hash recomputes over the plaintext AND the verification has not lapsed.
+	Verified bool
+	// VerifiedAt: when the person's answering field was verified; nil when the value carries no
+	// verification. A stamp, not a promise about today — read it with Verified.
+	VerifiedAt *time.Time
+	// VerifiedExpiresAt: when that verification lapses (a document-backed verification dies with the
+	// document); nil = it does not lapse. Past → Verified reads false.
+	VerifiedExpiresAt *time.Time
+	Raw               map[string]any
 }
 
 func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Value, error) {
@@ -117,11 +140,13 @@ func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValu
 		return Value{}, err
 	}
 	return Value{
-		Value:     typed,
-		Live:      coerceBool(obj["live"]),
-		UpdatedAt: parseISO(firstString(obj["updatedAt"], obj["updated_at"])),
-		Verified:  verifiedFrom(obj, typed),
-		Raw:       obj,
+		Value:             typed,
+		Live:              coerceBool(obj["live"]),
+		UpdatedAt:         parseISO(firstString(obj["updatedAt"], obj["updated_at"])),
+		Verified:          verifiedFrom(obj, typed),
+		VerifiedAt:        parseISO(asString(obj["verified_at"])),
+		VerifiedExpiresAt: parseISO(asString(obj["verified_expires_at"])),
+		Raw:               obj,
 	}, nil
 }
 
@@ -249,21 +274,23 @@ type Change struct {
 	Value               any
 	Live                bool
 	HasLive             bool
-	DocumentID          string // set on document_status_changed
-	Status              string // set on document_status_changed
-	Action              string // set on document_status_changed for a contract: signed | accepted | cancelled
-	Note                string // set on document_status_changed: the person's optional cancellation note
-	Method              string // set on a signature: biometric | twofa | email | custodian
-	ContentSHA256       string // set on a signature: SHA-256 of the signed content
-	SignedAt            string // set on a signature: ISO timestamp the signature was recorded
-	CancelEffectiveDate string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
-	RequestID           string // set on connection_request_accepted | connection_request_rejected
-	PublicKeySHA256     string // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
-	ConnectionID        string // set on message_received — the connection to reply/ack on
-	MessageID           string // set on message_received — the ack boundary (upToMessageID)
-	PersonPublicKey     string // set on message_received — base64 SPKI to encrypt the reply to
-	MessageBody         string // set on message_received — the DECRYPTED message text
-	Verified            bool   // true iff a field_updated value is verified (hash matches the decrypted plaintext)
+	DocumentID          string     // set on document_status_changed
+	Status              string     // set on document_status_changed
+	Action              string     // set on document_status_changed for a contract: signed | accepted | cancelled
+	Note                string     // set on document_status_changed: the person's optional cancellation note
+	Method              string     // set on a signature: biometric | twofa | email | custodian
+	ContentSHA256       string     // set on a signature: SHA-256 of the signed content
+	SignedAt            string     // set on a signature: ISO timestamp the signature was recorded
+	CancelEffectiveDate string     // set on a cancelled document_status_changed: ISO date the cancellation takes effect
+	RequestID           string     // set on connection_request_accepted | connection_request_rejected
+	PublicKeySHA256     string     // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
+	ConnectionID        string     // set on message_received — the connection to reply/ack on
+	MessageID           string     // set on message_received — the ack boundary (upToMessageID)
+	PersonPublicKey     string     // set on message_received — base64 SPKI to encrypt the reply to
+	MessageBody         string     // set on message_received — the DECRYPTED message text
+	Verified            bool       // true iff a field_updated value's hash matches AND the verification has not lapsed
+	VerifiedAt          *time.Time // when the answering field was verified; nil when the value carries no verification
+	VerifiedExpiresAt   *time.Time // when that verification lapses; nil = it does not. Past → Verified reads false
 	At                  *time.Time
 	Raw                 map[string]any
 }
@@ -364,6 +391,8 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		PersonPublicKey:     personPublicKey,
 		MessageBody:         messageBody,
 		Verified:            verifiedFrom(obj, value),
+		VerifiedAt:          parseISO(asString(obj["verified_at"])),
+		VerifiedExpiresAt:   parseISO(asString(obj["verified_expires_at"])),
 		At:                  parseISO(asString(obj["at"])),
 		Raw:                 obj,
 	}, nil
@@ -747,7 +776,11 @@ func extractList(body any, key string) []any {
 	}
 }
 
-// verifiedFrom recomputes the verified flag from the just-decrypted plaintext (email string only).
+// verifiedFrom recomputes the verified flag from the just-decrypted plaintext (text values only).
+//
+// Two conditions, both required: the hash recomputes over the exact plaintext, AND the verification
+// has not lapsed (verified_expires_at absent or still in the future). A document-backed verification
+// lapses when the document itself expires, so a stale binding reads false here without any lookup.
 func verifiedFrom(obj map[string]any, plaintext any) bool {
 	pt, ok := plaintext.(string)
 	if !ok {
@@ -758,5 +791,36 @@ func verifiedFrom(obj map[string]any, plaintext any) bool {
 	if vhash == "" || vsalt == "" {
 		return false
 	}
+	if expiryPassed(asString(obj["verified_expires_at"])) {
+		return false
+	}
 	return HashMatches(vsalt, vhash, pt)
+}
+
+// expiryPassed reports whether a verification expiry stamp has already passed.
+//
+// Absent → false: a verification with no expiry never lapses. Present but unparseable → true: an
+// expiry that cannot be evaluated cannot be used to claim the value is still verified today.
+func expiryPassed(value string) bool {
+	if value == "" {
+		return false
+	}
+	when := parseISO(value)
+	if when == nil {
+		return true
+	}
+	return !when.After(time.Now())
+}
+
+// coerceInt coerces a JSON number or an XML numeric string into an *int, or nil when absent.
+func coerceInt(value any) *int {
+	s := strings.TrimSpace(asString(value))
+	if s == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil
+	}
+	return &n
 }

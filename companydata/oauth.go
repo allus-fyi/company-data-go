@@ -22,7 +22,12 @@ import (
 // DefaultAuthorizeURL is the hosted consent surface. Native apps claim this https link; web is the fallback.
 const DefaultAuthorizeURL = "https://web.allme.fyi/auth"
 
-var nonClaimable = map[string]bool{"photo": true, "document": true, "legal_document": true}
+// nonClaimable: binary field types can't be requested as claims — the ID-document subtypes are
+// binary too, so no ID document ever reaches this surface.
+var nonClaimable = map[string]bool{
+	"photo": true, "document": true, "legal_document": true,
+	"passport": true, "photo_id": true, "drivers_license": true,
+}
 
 const maxClaims = 15
 
@@ -49,6 +54,11 @@ type Claim struct {
 	// Verified: only a verified answer satisfies this claim. OIDC flow + verifiable types only.
 	Verified bool
 	Label    string
+	// VerifiedMaxAgeDays narrows Verified to a verification no older than this many days; nil = no
+	// age limit. The app's registered configuration is a FLOOR and a request may only TIGHTEN it:
+	// the effective limit is the minimum of the two stated ages, and an omitted age tightens
+	// nothing — which is why nil sends nothing at all rather than an explicit null.
+	VerifiedMaxAgeDays *int
 }
 
 // Attestation is proof that a delivered value is the verified one (§3.1a).
@@ -63,15 +73,20 @@ type Claim struct {
 // be treated as unverified.
 //
 // VerifiedAt carries the snapshot caveat: it attests the value as verified AT THAT MOMENT, not
-// verified today. A field loses its verification whenever the person re-saves it.
+// verified today. A field loses its verification whenever the person re-saves it. VerifiedExpiresAt
+// is when that verification lapses on its own (a document-backed verification dies with the
+// document); an EXPIRED attestation is unverified, so Verified already reads false once it has passed.
 type Attestation struct {
-	// Verified is recomputed here: sha256(salt ‖ plaintext) == hash, constant-time.
+	// Verified is recomputed here: sha256(salt ‖ plaintext) == hash, constant-time, AND not expired.
+	// false = MISMATCH or lapsed → reject.
 	Verified bool
 	// Hash is lowercase hex.
 	Hash string
 	// Salt is lowercase hex.
 	Salt       string
 	VerifiedAt string
+	// VerifiedExpiresAt is when the verification lapses; empty when it does not.
+	VerifiedExpiresAt string
 }
 
 // SignInResult is the decrypted conclusion of CompleteSignIn.
@@ -235,6 +250,14 @@ func cleanClaims(claims []Claim) ([]map[string]any, error) {
 		if c.Verified {
 			entry["verified"] = true
 		}
+		if c.VerifiedMaxAgeDays != nil {
+			// Refused HERE for the same reason a nameless claim is: the API rejects the whole
+			// request over it, and the integration error belongs at the call that made it.
+			if *c.VerifiedMaxAgeDays < 1 {
+				return nil, newConfigError("claim %q: VerifiedMaxAgeDays must be at least 1", name)
+			}
+			entry["verified_max_age_days"] = *c.VerifiedMaxAgeDays
+		}
 		if c.Label != "" {
 			entry["label"] = c.Label
 		}
@@ -366,9 +389,10 @@ func (c *OAuthClient) decryptAttestations(raw map[string]any, values map[string]
 			continue
 		}
 		var parsed struct {
-			Hash       string `json:"hash"`
-			Salt       string `json:"salt"`
-			VerifiedAt string `json:"verified_at"`
+			Hash              string `json:"hash"`
+			Salt              string `json:"salt"`
+			VerifiedAt        string `json:"verified_at"`
+			VerifiedExpiresAt string `json:"verified_expires_at"`
 		}
 		if err := json.Unmarshal([]byte(opened), &parsed); err != nil {
 			continue
@@ -378,11 +402,15 @@ func (c *OAuthClient) decryptAttestations(raw map[string]any, values map[string]
 		}
 		out[slug] = Attestation{
 			// Recomputed here, constant-time, over the plaintext just decrypted — never trusted
-			// from the server. false = the delivered value is NOT the verified one; reject it.
-			Verified:   HashMatches(parsed.Salt, parsed.Hash, plaintext),
-			Hash:       parsed.Hash,
-			Salt:       parsed.Salt,
-			VerifiedAt: parsed.VerifiedAt,
+			// from the server. false = the delivered value is NOT the verified one; reject it. An
+			// attestation whose expiry has passed attests nothing today, so it reads false as
+			// well: an expired attestation is unverified, not "not attested".
+			Verified: HashMatches(parsed.Salt, parsed.Hash, plaintext) &&
+				!expiryPassed(parsed.VerifiedExpiresAt),
+			Hash:              parsed.Hash,
+			Salt:              parsed.Salt,
+			VerifiedAt:        parsed.VerifiedAt,
+			VerifiedExpiresAt: parsed.VerifiedExpiresAt,
 		}
 	}
 	return out, nil

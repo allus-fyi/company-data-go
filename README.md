@@ -243,9 +243,9 @@ Everything you read is one of these. Names are Go-idiomatic; shapes match the
 other five SDKs.
 
 ```go
-type RequestField struct { Slug, Label, Type string; OneTime, Mandatory bool; Raw map[string]any }
+type RequestField struct { Slug, Label, Type string; OneTime, Mandatory, Verified bool; VerifiedMaxAgeDays *int; Raw map[string]any }
 type Connection   struct { ID, PersonID, DisplayName string; ConnectedAt *time.Time; Values map[string]Value; Raw map[string]any }
-type Value        struct { Value any; Live bool; UpdatedAt *time.Time; Raw map[string]any }
+type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; Raw map[string]any }
 type Change       struct { ID, Event, PersonID, ShareCode, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
 type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Raw map[string]any }
 ```
@@ -261,7 +261,7 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   | `country` / `nationality` | `string` — an ISO 3166-1 alpha-2 code (e.g. `"US"`, `"NL"`); not a display name |
   | `address` / `bank` / `creditcard` | `map[string]any` (parsed JSON object) |
   | `date` / `date_of_birth` | `time.Time` |
-  | `photo` / `document` / `legal_document` | `*BinaryHandle` (lazy) |
+  | `photo` / `document` / `legal_document` / `passport` / `photo_id` / `drivers_license` | `*BinaryHandle` (lazy) — the last three are ID-document subtypes of `legal_document` |
 
   ```go
   email := conn.Values["work_email"].Value.(string)
@@ -280,6 +280,12 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 - `Value.Live` = the person chose "keep connected" (auto-updates) vs a one-time
   snapshot. `Value.UpdatedAt` = when this answer last changed (`*time.Time`, nil
   if absent). Both ride on the `Value` (per-answer), not the definition.
+- `Value.Verified` is true only when the verification hash recomputes over the
+  decrypted plaintext **and** the verification has not lapsed; absent metadata
+  reads false, which means "not attested", not "wrong". `Value.VerifiedAt` is
+  when the answering field was verified and `Value.VerifiedExpiresAt` when that
+  verification lapses (nil = it does not — a document-backed verification dies
+  with the document). `Change` carries the same three on `field_updated`.
 - **The person's source field is never present** — no source slug, no
   `field_id`, not even via `Raw` (the hardened API doesn't return it).
 - `Raw` on any object → the underlying (hardened) API map, for debugging or an
@@ -902,6 +908,11 @@ will do"). A nameless or duplicate claim raises a config error at the call rathe
 `verified` is accepted only on the OIDC flow and only for a type allme can verify (today `email`); elsewhere
 it is refused with `invalid_request` rather than quietly dropped.
 
+`VerifiedMaxAgeDays` narrows a `verified` claim to a RECENT verification, and the merge is **tighten-only**: the app's
+registered configuration is a FLOOR, a request may only tighten it, and the effective limit is the minimum
+of the two stated ages. An omitted age tightens nothing — omitting it sends nothing at all, never an
+explicit null — and a value below 1 raises a config error at the call.
+
 The sign-in result carries `values`, `values_cipher` **and** `attestations`.
 * `sub` **is** the person's share code and equals `share_code` — byte-identical to the id_token's `sub`.
   `display_name` is gone: ask for a `name` claim and read the value under that key.
@@ -911,10 +922,12 @@ The sign-in result carries `values`, `values_cipher` **and** `attestations`.
   carries no ciphertext (`signin`, or `plaintext` delivery) — that emptiness is the honest answer.
 * `attestations` is an additive sibling map keyed by the same claim name, present only for a `verified`
   claim under encrypted delivery. Each entry carries a `verified` boolean **the SDK computes itself**, in
-  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt.
+  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt/verifiedExpiresAt.
   **A slug ABSENT from the map is "not attested", never "wrong"** (treat that value as unverified);
-  **an entry present with `verified` false is a MISMATCH and you must reject the value.** The timestamp
-  attests the value as verified *at that moment*, not verified today.
+  **an entry present with `verified` false is a MISMATCH and you must reject the value.** `VerifiedAt`
+  attests the value as verified *at that moment*, not verified today; `VerifiedExpiresAt` is when that
+  verification lapses on its own (empty = it does not), and an **expired attestation is unverified** —
+  the computed `Verified` already reads false once it has passed.
 
 **`ResolveUserinfo(accessToken, fallbackMode)`** is the second half of `CompleteSignIn` — the `Userinfo`
 read + decrypt + attest, without the token exchange — for a caller whose exchange already ran through a

@@ -14,6 +14,8 @@ type RequestField struct {
     Type      string
     OneTime   bool   // the person answered "share once" (a frozen snapshot)
     Mandatory bool   // mandatory to provide OR mandatory to stay connected (folds the API's two flags)
+    Verified  bool   // this row DEMANDS a verified answer (mutually exclusive with OneTime)
+    VerifiedMaxAgeDays *int // oldest verification accepted, in days; nil = no age limit
     Raw       map[string]any
 }
 ```
@@ -45,6 +47,9 @@ type Value struct {
     Value     any        // the TYPED plaintext (see the type table)
     Live      bool       // "keep connected" (auto-updates) vs a one-time snapshot
     UpdatedAt *time.Time // when this answer last changed (nil if absent)
+    Verified  bool       // the hash recomputes over the plaintext AND the verification has not lapsed
+    VerifiedAt        *time.Time // when the answering field was verified
+    VerifiedExpiresAt *time.Time // when that verification lapses; nil = it does not
     Raw       map[string]any
 }
 ```
@@ -57,7 +62,7 @@ assertion:
 | `email` / `phone` / `url` / `text` | `string` |
 | `address` / `bank` / `creditcard` | `map[string]any` (parsed JSON object) |
 | `date` / `date_of_birth` | `time.Time` (midnight UTC; falls back to the raw string if unparseable) |
-| `photo` / `document` / `legal_document` | `*BinaryHandle` |
+| `photo` / `document` / `legal_document` / `passport` / `photo_id` / `drivers_license` | `*BinaryHandle` — the last three are ID-document subtypes of `legal_document` and share its envelope |
 | unanswered | `nil`, or an empty `*BinaryHandle` for binary types |
 
 ```go
@@ -111,6 +116,9 @@ type Change struct {
     MessageID       string // message_received only — the ack boundary
     PersonPublicKey string // message_received only — base64 SPKI for the reply
     MessageBody     string // message_received only — the DECRYPTED text
+    Verified bool       // field_updated only; hash recomputes AND the verification has not lapsed
+    VerifiedAt        *time.Time // when the answering field was verified
+    VerifiedExpiresAt *time.Time // when that verification lapses; nil = it does not
     At       *time.Time // the change time (no separate UpdatedAt on a change)
     Raw      map[string]any
 }
