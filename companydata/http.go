@@ -22,6 +22,10 @@ import (
 //     {api_url}/oauth2/token and caches the bearer token + its expiry. Refresh is
 //     automatic and transparent; a 401 mid-flight triggers exactly one
 //     refresh-and-retry, then surfaces as *AuthError.
+//   - Region — the configured api_url is the global front door and the token is
+//     minted at the client's home region, whose base the token response returns
+//     as api_url. Every call other than the token request and the region list is
+//     sent to that home base. See rebaseTo.
 //   - Format — sets Accept per Config.Format (application/json or
 //     application/xml) and parses the body accordingly (the XML inverse mirrors
 //     the platform serializer).
@@ -42,6 +46,12 @@ const (
 	defaultMaxRetries429 = 3
 	defaultBackoff       = 1 * time.Second
 	maxBackoff           = 60 * time.Second
+	// regionBaseMember is the response member (token success body and 421 refusal
+	// body alike) naming the home-region base.
+	regionBaseMember = "api_url"
+	// rebaseErrorKey is the front door's refusal of a data route: rebase to the
+	// named base and replay.
+	rebaseErrorKey = "region.rebase_required"
 )
 
 // Doer is the minimal HTTP interface HTTPClient needs (so a fake can be injected
@@ -54,14 +64,18 @@ type Doer interface {
 type HTTPClient struct {
 	config        *Config
 	doer          Doer
-	apiURL        string
 	maxRetries429 int
 
 	// Injectable for tests; default to time.Sleep / time.Now.
 	sleep func(time.Duration)
 	now   func() time.Time
 
-	mu          sync.Mutex
+	mu sync.Mutex
+	// apiURL is the base every request goes to, including the token request.
+	// Starts at the configured value; every rebase moves it. Guarded by mu.
+	// Clients do not validate a server-returned base against anything — they
+	// store it and use it.
+	apiURL      string
 	token       string
 	tokenExpiry time.Time
 }
@@ -105,13 +119,19 @@ func (c *HTTPClient) tokenValid() bool {
 }
 
 // fetchToken POSTs the client credentials to /oauth2/token and caches the result.
+//
+// Goes to the CURRENT base, exactly like every other call — once a token response
+// has named a home base, subsequent token requests go there too, the same as the
+// data calls they sit beside. The configured value is only the starting point,
+// for the first call of a process and the fallback when nothing has been stored
+// yet.
 func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", c.config.ClientID)
 	form.Set("client_secret", c.config.ClientSecret)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL+"/oauth2/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+"/oauth2/token", strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", &AuthError{msg: "could not build token request: " + err.Error(), err: err}
 	}
@@ -134,6 +154,7 @@ func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 	var parsed struct {
 		AccessToken string  `json:"access_token"`
 		ExpiresIn   float64 `json:"expires_in"`
+		APIURL      string  `json:"api_url"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", newAuthError("token response was not valid JSON")
@@ -155,7 +176,38 @@ func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 	c.tokenExpiry = c.now().Add(ttl)
 	tok := c.token
 	c.mu.Unlock()
+
+	// The token is minted at the client's home region and only validates there, so the
+	// base the response names is where every company-data call must go from here on.
+	c.rebaseTo(parsed.APIURL)
 	return tok, nil
+}
+
+// ── region ────────────────────────────────────────────────────────────────
+
+// base returns the API base every non-auth request is sent to.
+func (c *HTTPClient) base() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.apiURL
+}
+
+// rebaseTo points subsequent requests — including the next token request — at
+// candidate.
+//
+// It reports true only when the base actually MOVED. A candidate that is empty
+// or equal to the current base is not stored and reports false. Nothing here
+// validates the candidate against a fetched region list: the SDK stores the base
+// the server names and uses it, exactly as every first-party client does.
+func (c *HTTPClient) rebaseTo(candidate string) bool {
+	base := strings.TrimRight(strings.TrimSpace(candidate), "/")
+	if base == "" || base == c.base() {
+		return false
+	}
+	c.mu.Lock()
+	c.apiURL = base
+	c.mu.Unlock()
+	return true
 }
 
 // bearer returns a valid token, fetching/refreshing when needed.
@@ -287,11 +339,13 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 
 	retries429 := 0
 	refreshed401 := false
+	rebased421 := false
 	for {
 		token, err := c.bearer(ctx, false)
 		if err != nil {
 			return nil, err
 		}
+		// Resolved per attempt: a 421 rebase moves the base under the next one.
 		reqURL := c.url(path)
 		if len(params) > 0 {
 			reqURL += "?" + params.Encode()
@@ -334,6 +388,19 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 			errorKey, message, _ := extractError(respBody, c.config.Format)
 			return nil, newAuthError("unauthorized after token refresh%s%s", bracket(errorKey), colon(message))
 
+		case status == 421:
+			// The front door serves no data route: it names the caller's home base and
+			// expects the call there. Rebase once and replay; a second 421 surfaces.
+			errorKey, message, details := extractError(respBody, c.config.Format)
+			if !rebased421 && errorKey == rebaseErrorKey {
+				candidate, _ := details[regionBaseMember].(string)
+				if c.rebaseTo(candidate) {
+					rebased421 = true
+					continue
+				}
+			}
+			return nil, NewApiErrorWithDetails(status, errorKey, message, details)
+
 		case status == 429:
 			errorKey, message, _ := extractError(respBody, c.config.Format)
 			// A twofa.pending_cap 429 means the caller already holds the maximum
@@ -362,10 +429,11 @@ func (c *HTTPClient) url(path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
 	}
+	base := c.base()
 	if strings.HasPrefix(path, "/") {
-		return c.apiURL + path
+		return base + path
 	}
-	return c.apiURL + "/" + path
+	return base + "/" + path
 }
 
 // parseBody parses a 2xx response body as JSON or XML.

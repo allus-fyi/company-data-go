@@ -55,6 +55,11 @@ if errors.As(err, &rl) {
   the same as an empty map in Go — no nil check needed. Numbers inside it are
   `json.Number` (the decoder preserves the wire form), so type-assert to
   `json.Number` or `string`, not to `float64`.
+- **A 421 `region.rebase_required` never reaches you when the platform is
+  reachable**: it is the global front door telling the SDK to send the call to the
+  caller's home region, which the SDK does automatically (README, **How it's
+  wired** → Regions). It surfaces as `*ApiError` only when the base the refusal
+  names is absent or empty — in which case no base was stored and no retry was made.
 - **`ConfigError` is fail-fast** — a bad passphrase, an unreadable PEM, a missing
   required field, or an invalid `format` all surface here at construction
   (`FromConfig` / `New`), before any network call. A bad service-key passphrase

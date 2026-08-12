@@ -29,6 +29,8 @@ returns a `*ConfigError` (`errors.Is(err, ErrConfig)`) — fail fast.
 ```go
 type Config struct {
     APIURL            string            // required — API base, e.g. https://api.allme.fyi
+                                        // (the global front door; the SDK rebases its data
+                                        //  calls to the home region the token response names)
     ClientID          string            // required — client_credentials id (one service)
     ClientSecret      string            // required
     ServicePrivateKey string            // required — path to the OpenSSL-encrypted PKCS#8 PEM
