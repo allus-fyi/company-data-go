@@ -198,7 +198,7 @@ func (c *HTTPClient) base() string {
 // It reports true only when the base actually MOVED. A candidate that is empty
 // or equal to the current base is not stored and reports false. Nothing here
 // validates the candidate against a fetched region list: the SDK stores the base
-// the server names and uses it, exactly as every first-party client does.
+// the server names and uses it.
 func (c *HTTPClient) rebaseTo(candidate string) bool {
 	base := strings.TrimRight(strings.TrimSpace(candidate), "/")
 	if base == "" || base == c.base() {
@@ -425,15 +425,39 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 	}
 }
 
+// url resolves path against the CURRENT base. An already-absolute path (the lazy binary
+// handle's server-supplied value_url) is reduced to its path+query and rebuilt against the
+// current base too — so a value_url minted before a rebase, or replayed on a 421 retry after
+// one, still lands at the base every other request now uses.
 func (c *HTTPClient) url(path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
-		return path
+		path = pathAndQuery(path)
 	}
 	base := c.base()
 	if strings.HasPrefix(path, "/") {
 		return base + path
 	}
 	return base + "/" + path
+}
+
+// pathAndQuery returns the path + query + fragment portion of an absolute URL, dropping its
+// scheme and host.
+func pathAndQuery(absoluteURL string) string {
+	u, err := url.Parse(absoluteURL)
+	if err != nil {
+		return absoluteURL
+	}
+	result := u.Path
+	if result == "" {
+		result = "/"
+	}
+	if u.RawQuery != "" {
+		result += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		result += "#" + u.Fragment
+	}
+	return result
 }
 
 // parseBody parses a 2xx response body as JSON or XML.
