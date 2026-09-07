@@ -27,6 +27,12 @@ var (
 	fvCardRE   = regexp.MustCompile(`^\d{12,19}$`)
 	fvDateRE   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+	// Numeric grammars accept ASCII digits only.
+	fvIntegerRE = regexp.MustCompile(`^-?[0-9]+$`)
+	fvDecimalRE = regexp.MustCompile(`^-?[0-9]{1,8}(\.[0-9]{1,2})?$`)
+	// Float accepts decimal or scientific notation.
+	fvFloatRE = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
 	fvPostalRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$`)
 	fvExpiryRE  = regexp.MustCompile(`^(0[1-9]|1[0-2])/\d{2}(\d{2})?$`)
 	fvCvcRE     = regexp.MustCompile(`^\d{3,4}$`)
@@ -123,6 +129,9 @@ var fvRules = map[string]fvRule{
 	"legal_document": {kind: "object"},
 	"number":         {kind: "number"},
 	"boolean":        {kind: "boolean"},
+	"integer":        {kind: "integer"},
+	"decimal":        {kind: "decimal"},
+	"float":          {kind: "float"},
 	"country":        {kind: "countryCode"},
 	"nationality":    {kind: "countryCode"},
 	// text + unknown => no rule => accept anything
@@ -195,6 +204,12 @@ func fvApplyKind(kind, value string) bool {
 		}
 		f, err := strconv.ParseFloat(t, 64)
 		return err == nil && !math.IsInf(f, 0) && !math.IsNaN(f)
+	case "integer":
+		return fvIntegerRE.MatchString(strings.TrimSpace(value))
+	case "decimal":
+		return fvDecimalRE.MatchString(strings.TrimSpace(value))
+	case "float":
+		return fvFloatRE.MatchString(strings.TrimSpace(value))
 	case "boolean":
 		return value == "true" || value == "false"
 	case "countryCode":
