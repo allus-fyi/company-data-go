@@ -87,6 +87,15 @@ type Attestation struct {
 	VerifiedAt string
 	// VerifiedExpiresAt is when the verification lapses; empty when it does not.
 	VerifiedExpiresAt string
+	// VerifiedMethod is HOW allme bound the value — email_code | sms_code | sumsub_id |
+	// sumsub_address. VerifiedProvider is WHO established the proof — allme | sumsub.
+	// VerificationID is the id to quote back to allme in a dispute.
+	//
+	// All three are read from the OPENED seal and arrive together or not at all: a seal built
+	// before the proof log existed carries none of them and every one reads "".
+	VerifiedMethod   string
+	VerifiedProvider string
+	VerificationID   string
 }
 
 // SignInResult is the decrypted conclusion of CompleteSignIn.
@@ -393,6 +402,9 @@ func (c *OAuthClient) decryptAttestations(raw map[string]any, values map[string]
 			Salt              string `json:"salt"`
 			VerifiedAt        string `json:"verified_at"`
 			VerifiedExpiresAt string `json:"verified_expires_at"`
+			VerifiedMethod    string `json:"verified_method"`
+			VerifiedProvider  string `json:"verified_provider"`
+			VerificationID    string `json:"verification_id"`
 		}
 		if err := json.Unmarshal([]byte(opened), &parsed); err != nil {
 			continue
@@ -411,6 +423,10 @@ func (c *OAuthClient) decryptAttestations(raw map[string]any, values map[string]
 			Salt:              parsed.Salt,
 			VerifiedAt:        parsed.VerifiedAt,
 			VerifiedExpiresAt: parsed.VerifiedExpiresAt,
+			// Additive INSIDE the seal, and parse-permissive: absent members decode to "".
+			VerifiedMethod:   parsed.VerifiedMethod,
+			VerifiedProvider: parsed.VerifiedProvider,
+			VerificationID:   parsed.VerificationID,
 		}
 	}
 	return out, nil

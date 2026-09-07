@@ -16,7 +16,8 @@ import (
 //
 //	RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //	Connection   { ID, PersonID, DisplayName, ConnectedAt, Values map[slug]Value }
-//	Value        { Value, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt }
+//	Value        { Value, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
+//	               VerifiedMethod, VerifiedProvider, VerificationID }
 //	Change       { ID, Event, PersonID, ShareCode, Slug, Value, Live, At } // ID = stable dedup key
 //	LogEntry     { Type, Message, Metadata, At }
 //
@@ -131,7 +132,17 @@ type Value struct {
 	// VerifiedExpiresAt: when that verification lapses (a document-backed verification dies with the
 	// document); nil = it does not lapse. Past → Verified reads false.
 	VerifiedExpiresAt *time.Time
-	Raw               map[string]any
+	// VerifiedMethod: HOW allme bound this value — email_code | sms_code | sumsub_id |
+	// sumsub_address. VerifiedProvider: WHO established the proof — allme | sumsub.
+	// VerificationID: the id to quote back to allme in a dispute.
+	//
+	// All three arrive together or not at all: a value bound before the proof log existed
+	// carries the four verification keys and none of these, so all three read "". They are
+	// readable whatever Verified says — that boolean stays the only trust decision.
+	VerifiedMethod   string
+	VerifiedProvider string
+	VerificationID   string
+	Raw              map[string]any
 }
 
 func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Value, error) {
@@ -146,6 +157,9 @@ func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValu
 		Verified:          verifiedFrom(obj, typed),
 		VerifiedAt:        parseISO(asString(obj["verified_at"])),
 		VerifiedExpiresAt: parseISO(asString(obj["verified_expires_at"])),
+		VerifiedMethod:    asString(obj["verified_method"]),
+		VerifiedProvider:  asString(obj["verified_provider"]),
+		VerificationID:    asString(obj["verification_id"]),
 		Raw:               obj,
 	}, nil
 }
@@ -291,8 +305,13 @@ type Change struct {
 	Verified            bool       // true iff a field_updated value's hash matches AND the verification has not lapsed
 	VerifiedAt          *time.Time // when the answering field was verified; nil when the value carries no verification
 	VerifiedExpiresAt   *time.Time // when that verification lapses; nil = it does not. Past → Verified reads false
-	At                  *time.Time
-	Raw                 map[string]any
+	// The proof metadata beside the binding: HOW it was bound, by WHOM, and the id to quote back
+	// in a dispute. All three or none; readable whatever Verified says.
+	VerifiedMethod   string
+	VerifiedProvider string
+	VerificationID   string
+	At               *time.Time
+	Raw              map[string]any
 }
 
 func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
@@ -393,6 +412,9 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		Verified:            verifiedFrom(obj, value),
 		VerifiedAt:          parseISO(asString(obj["verified_at"])),
 		VerifiedExpiresAt:   parseISO(asString(obj["verified_expires_at"])),
+		VerifiedMethod:      asString(obj["verified_method"]),
+		VerifiedProvider:    asString(obj["verified_provider"]),
+		VerificationID:      asString(obj["verification_id"]),
 		At:                  parseISO(asString(obj["at"])),
 		Raw:                 obj,
 	}, nil

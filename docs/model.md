@@ -50,6 +50,9 @@ type Value struct {
     Verified  bool       // the hash recomputes over the plaintext AND the verification has not lapsed
     VerifiedAt        *time.Time // when the answering field was verified
     VerifiedExpiresAt *time.Time // when that verification lapses; nil = it does not
+    VerifiedMethod    string     // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+    VerifiedProvider  string     // WHO established the proof: allme|sumsub
+    VerificationID    string     // the proof id to quote back to allme in a dispute
     Raw       map[string]any
 }
 ```
@@ -119,6 +122,9 @@ type Change struct {
     Verified bool       // field_updated only; hash recomputes AND the verification has not lapsed
     VerifiedAt        *time.Time // when the answering field was verified
     VerifiedExpiresAt *time.Time // when that verification lapses; nil = it does not
+    VerifiedMethod    string     // HOW allme bound it: email_code|sms_code|sumsub_id|sumsub_address
+    VerifiedProvider  string     // WHO established the proof: allme|sumsub
+    VerificationID    string     // the proof id to quote back to allme in a dispute
     At       *time.Time // the change time (no separate UpdatedAt on a change)
     Raw      map[string]any
 }

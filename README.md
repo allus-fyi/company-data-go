@@ -245,7 +245,7 @@ other five SDKs.
 ```go
 type RequestField struct { Slug, Label, Type string; OneTime, Mandatory, Verified bool; VerifiedMaxAgeDays *int; Raw map[string]any }
 type Connection   struct { ID, PersonID, DisplayName string; ConnectedAt *time.Time; Values map[string]Value; Raw map[string]any }
-type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; Raw map[string]any }
+type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; VerifiedMethod, VerifiedProvider, VerificationID string; Raw map[string]any }
 type Change       struct { ID, Event, PersonID, ShareCode, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
 type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Raw map[string]any }
 ```
@@ -286,6 +286,14 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   when the answering field was verified and `Value.VerifiedExpiresAt` when that
   verification lapses (nil = it does not — a document-backed verification dies
   with the document). `Change` carries the same three on `field_updated`.
+- `Value.VerifiedMethod` / `Value.VerifiedProvider` / `Value.VerificationID` are
+  the **proof metadata**: HOW allme bound the value (`email_code` | `sms_code` |
+  `sumsub_id` | `sumsub_address`), WHO established the proof (`allme` | `sumsub`),
+  and the id to quote back to allme in a dispute. All three arrive **together or
+  not at all** — a value bound before the proof log existed carries the four
+  verification keys and none of these, so all three read `""`. They are readable
+  whatever `Verified` says; that boolean stays the only trust decision. `Change`
+  carries the same three on `field_updated`.
 - **The person's source field is never present** — no source slug, no
   `field_id`, not even via `Raw` (the hardened API doesn't return it).
 - `Raw` on any object → the underlying (hardened) API map, for debugging or an
@@ -933,7 +941,10 @@ The sign-in result carries `values`, `values_cipher` **and** `attestations`.
   carries no ciphertext (`signin`, or `plaintext` delivery) — that emptiness is the honest answer.
 * `attestations` is an additive sibling map keyed by the same claim name, present only for a `verified`
   claim under encrypted delivery. Each entry carries a `verified` boolean **the SDK computes itself**, in
-  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt/verifiedExpiresAt.
+  constant time, over the plaintext it just decrypted — plus the raw hash/salt/verifiedAt/verifiedExpiresAt,
+  and the proof metadata `VerifiedMethod`/`VerifiedProvider`/`VerificationID` read from the opened seal
+  (HOW the value was bound, by WHOM, and the id to quote back to allme in a dispute — all three together
+  or not at all; a seal built before the proof log existed carries none of them and every one reads `""`).
   **A slug ABSENT from the map is "not attested", never "wrong"** (treat that value as unverified);
   **an entry present with `verified` false is a MISMATCH and you must reject the value.** `VerifiedAt`
   attests the value as verified *at that moment*, not verified today; `VerifiedExpiresAt` is when that
