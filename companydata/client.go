@@ -903,7 +903,12 @@ func (c *Client) FlowRunDocument(ctx context.Context, runID string) ([]byte, err
 }
 
 // UpdateDocumentStatus sets a document's lifecycle status
-// (offering|ready_to_sign|active|active_but_ending|ended) → the updated Document.
+// (offering|ready_to_sign|active|active_but_ending|ended) → the updated Document. `waiting` is
+// read-only — stamped by a contract-flow run on an unsigned run-participant copy, never a value
+// to write. Returns an error carrying error_key "documents.run_managed" (409) when the document
+// is a contract-flow run-participant document and its current status is waiting, ready_to_sign
+// or offering — that status moves only through flow generation, the run's own advance,
+// sign/accept, or a run cancel/decline.
 func (c *Client) UpdateDocumentStatus(ctx context.Context, documentID, status string) (Document, error) {
 	body, err := c.http.Put(ctx, epDocuments+"/"+documentID, map[string]any{"status": status})
 	if err != nil {

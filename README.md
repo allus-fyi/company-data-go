@@ -447,6 +447,13 @@ pdf, err = client.FlowRunDocument(ctx, runID)
 
 // Advance the lifecycle status.
 // offering | ready_to_sign | active | active_but_ending | ended
+// A contract-flow-generated document can also read "waiting" — a run-participant
+// copy whose signer has not been reached yet in the run's ordered signing plan.
+// It is read-only: UpdateDocumentStatus returns an error with error_key
+// "documents.run_managed" (409) on a run-participant document while it is
+// waiting/ready_to_sign/offering — that status moves only through flow
+// generation, the run's own advance, sign/accept, or a run cancel/decline.
+// Such a document's RunSignatures carries the run's ordered signature summary.
 doc, err = client.UpdateDocumentStatus(ctx, doc.ID, "active")
 
 // Update metadata / name / description (any one of the three is required).

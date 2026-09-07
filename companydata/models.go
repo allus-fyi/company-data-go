@@ -464,7 +464,50 @@ type FlowRun struct {
 	Answers       []map[string]any
 	CreatedAt     *time.Time
 	UpdatedAt     *time.Time
-	Raw           map[string]any
+	// Participants is every party the run binds, the owning company included (flows.html
+	// §5a/§9 item 12). ConnectionID above names only the PRIMARY counterparty, so a
+	// multi-actor run's other counterparties are reachable only here.
+	Participants []FlowRunParticipant
+	Raw          map[string]any
+}
+
+// FlowRunParticipant is one participant's row on a run's participants[] (flows.html §5a/§9 item
+// 12) — the durable participant set, additively carrying its place in the leaf PDF rule's
+// ordered signing plan. One account may hold TWO of these (two owner parties, or one customer
+// bound to two party keys) — never collapse this to a single row by user id.
+type FlowRunParticipant struct {
+	PartyKey           string
+	PersonUserID       string
+	ConnectionID       string
+	DocumentID         string
+	DocumentStatus     string
+	RequiresSignature  bool
+	RequiresAcceptance bool
+	// Position is the 1-based place in the signing plan; nil for a party the plan does not name.
+	Position *int
+	// Action is "signed" | "accepted" | "" — empty until this participant's document has acted.
+	Action  string
+	ActedAt string
+}
+
+func flowRunParticipantFromAPI(obj map[string]any) FlowRunParticipant {
+	var position *int
+	if n, ok := obj["position"].(float64); ok {
+		v := int(n)
+		position = &v
+	}
+	return FlowRunParticipant{
+		PartyKey:           asString(obj["party_key"]),
+		PersonUserID:       asString(obj["person_user_id"]),
+		ConnectionID:       asString(obj["connection_id"]),
+		DocumentID:         asString(obj["document_id"]),
+		DocumentStatus:     asString(obj["document_status"]),
+		RequiresSignature:  coerceBool(obj["requires_signature"]),
+		RequiresAcceptance: coerceBool(obj["requires_acceptance"]),
+		Position:           position,
+		Action:             asString(obj["action"]),
+		ActedAt:            asString(obj["acted_at"]),
+	}
 }
 
 // CompanyPartyKey is the party key the company is bound to (Bindings[key] == CompanyUserID).
@@ -513,6 +556,14 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 	if outputMode == "" {
 		outputMode = asString(def["output_mode"])
 	}
+	var participants []FlowRunParticipant
+	if lst, ok := obj["participants"].([]any); ok {
+		for _, p := range lst {
+			if m, ok := p.(map[string]any); ok {
+				participants = append(participants, flowRunParticipantFromAPI(m))
+			}
+		}
+	}
 	return FlowRun{
 		ID:            asString(obj["id"]),
 		FlowID:        asString(obj["flow_id"]),
@@ -530,6 +581,7 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 		Answers:       answers,
 		CreatedAt:     parseISO(asString(obj["created_at"])),
 		UpdatedAt:     parseISO(asString(obj["updated_at"])),
+		Participants:  participants,
 		Raw:           obj,
 	}
 }
@@ -599,6 +651,11 @@ type Document struct {
 	RequiresAcceptance bool
 	Signatures         []map[string]any // contract sign/accept audit trail (company-side reads only)
 
+	// RunSignatures is present only on a contract-flow run-participant document: the run's
+	// ordered signature summary, one entry per participant owing an act — each
+	// {party_key, document_id, position, status, action, acted_at}. Nil on any other document.
+	RunSignatures []map[string]any
+
 	decryptValue decryptValueFn // injected; nil for a plaintext-only document
 	Raw          map[string]any
 }
@@ -646,6 +703,14 @@ func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
 			}
 		}
 	}
+	var runSignatures []map[string]any
+	if arr, ok := obj["run_signatures"].([]any); ok {
+		for _, s := range arr {
+			if sm, ok := s.(map[string]any); ok {
+				runSignatures = append(runSignatures, sm)
+			}
+		}
+	}
 	return Document{
 		ID:                 asString(obj["id"]),
 		Kind:               asString(obj["kind"]),
@@ -661,6 +726,7 @@ func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
 		RequiresSignature:  coerceBool(obj["requires_signature"]),
 		RequiresAcceptance: coerceBool(obj["requires_acceptance"]),
 		Signatures:         signatures,
+		RunSignatures:      runSignatures,
 		decryptValue:       decryptValue,
 		Raw:                obj,
 	}
