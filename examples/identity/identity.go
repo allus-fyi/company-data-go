@@ -696,13 +696,25 @@ func (h *family) oidcSetupFor(ctx context.Context, id string) (*oidcSetup, error
 		toStr(cfg["oauth_client_secret"]), redirectURI)
 }
 
-// redirectURI is the registered redirect URI: http://{host}/callback, host = the origin the browser
-// actually used. Never falls back to a hardcoded host — 127.0.0.1 and localhost are DIFFERENT
-// origins for redirect matching and for browser storage alike, so a substituted default drops the
-// developer on an origin whose localStorage never held the setup and whose URI the OAuth app never
-// registered. Callers refuse an empty r.Host before reaching here.
+// requestScheme is the scheme THIS request reached us on. There is no TLS termination in-process, so
+// a TLS proxy in front of the example is the only source: the first comma-separated value of
+// X-Forwarded-Proto, lowercased. Anything but "https" there — including an absent header — means
+// "http".
+func requestScheme(r *http.Request) string {
+	first := strings.ToLower(strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-Proto"), ",", 2)[0]))
+	if first == "https" {
+		return "https"
+	}
+	return "http"
+}
+
+// redirectURI is the registered redirect URI: {scheme}://{host}/callback, host = the origin the
+// browser actually used and scheme = what it reached us on. Never falls back to a hardcoded host —
+// 127.0.0.1 and localhost are DIFFERENT origins for redirect matching and for browser storage alike,
+// so a substituted default drops the developer on an origin whose localStorage never held the setup
+// and whose URI the OAuth app never registered. Callers refuse an empty r.Host before reaching here.
 func (h *family) redirectURI(r *http.Request) string {
-	return "http://" + strings.TrimSpace(r.Host) + "/callback"
+	return requestScheme(r) + "://" + strings.TrimSpace(r.Host) + "/callback"
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────
