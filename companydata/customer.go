@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -111,7 +112,16 @@ type CustomerClient struct {
 	// requestTypeCache maps "companyCode/serviceCode" → {request_field_id: field_type},
 	// resolved from the connect-screen lookup for typed-answer validation.
 	requestTypeCache map[string]map[string]string
-	pump             *Pump
+	// The field-type registry, fetched beside the request-field lookup and held for the life
+	// of the client. A type it does not carry triggers ONE refetch; a type a refetch still
+	// does not resolve is remembered in unresolvedTypes and never asked for again. Both live
+	// under otherMu, beside the caches they are read with.
+	fieldTypes      *FieldTypeRegistry
+	unresolvedTypes map[string]bool
+	// The last registry load's failure, held so a caller is told the registry could not be
+	// read instead of being handed an empty one. Cleared by the first load that succeeds.
+	fieldTypesErr error
+	pump          *Pump
 }
 
 // NewCustomer builds a CustomerClient. The transport authenticates as the acct_*
@@ -129,6 +139,7 @@ func NewCustomer(config *Config, opts ...customerOption) (*CustomerClient, error
 		serviceKeyCache:  map[string]*rsa.PublicKey{},
 		serviceKeyGen:    map[string]uint64{},
 		requestTypeCache: map[string]map[string]string{},
+		unresolvedTypes:  map[string]bool{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -433,7 +444,10 @@ func (c *CustomerClient) decryptChange(event map[string]any) (Change, error) {
 			c.InvalidateServiceKey(company, service)
 		}
 	}
-	return changeFromAPI(event, func(string) string { return "" }, c.decryptAccount, nil)
+	// The customer rail keys on no request slug — this client resolves a row's type from the
+	// connect-screen lookup, not from a slug on the event — so the slug leg answers empty and the
+	// registry is the one this client holds.
+	return changeFromAPI(event, func(string) (string, error) { return "", nil }, c.FieldTypes, c.decryptAccount, nil)
 }
 
 // ProcessChanges drains the customer change feed through handler, crash-safely.
@@ -481,12 +495,12 @@ func (c *CustomerClient) VerifyWebhook(rawBody []byte, headers any) bool {
 
 // ParseWebhook parses a webhook body → a typed Change.
 func (c *CustomerClient) ParseWebhook(rawBody []byte, headers any) (Change, error) {
-	return ParseWebhook(rawBody, headers, c.config, func(string) string { return "" }, c.decryptAccount, nil, c.accountKey)
+	return ParseWebhook(rawBody, headers, c.config, func(string) (string, error) { return "", nil }, c.FieldTypes, c.decryptAccount, nil, c.accountKey)
 }
 
 // HandleWebhook verifies + parses a webhook in one call → Change.
 func (c *CustomerClient) HandleWebhook(rawBody []byte, headers any) (Change, error) {
-	return HandleWebhook(rawBody, headers, c.config, func(string) string { return "" }, c.decryptAccount, nil, c.accountKey)
+	return HandleWebhook(rawBody, headers, c.config, func(string) (string, error) { return "", nil }, c.FieldTypes, c.decryptAccount, nil, c.accountKey)
 }
 
 // ── internals ──────────────────────────────────────────────────────────────────
@@ -501,13 +515,13 @@ func (c *CustomerClient) decryptAccount(wrapper any) (string, error) {
 // requestFieldTypes resolves {request_field_id: field_type} for a service from the
 // connect-screen lookup, cached per company/service. Best-effort — a lookup failure
 // yields an empty map so typed-answer validation is simply skipped.
-func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[string]string {
+func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) (map[string]string, error) {
 	key := companyCode + "/" + serviceCode
 	c.otherMu.Lock()
 	m, ok := c.requestTypeCache[key]
 	c.otherMu.Unlock()
 	if ok {
-		return m
+		return m, nil
 	}
 	out := map[string]string{}
 	body, err := c.http.Get(context.Background(), epCustomerConnections+"/lookup/"+companyCode+"/"+serviceCode, nil)
@@ -525,10 +539,111 @@ func (c *CustomerClient) requestFieldTypes(companyCode, serviceCode string) map[
 			}
 		}
 	}
+	types := make([]string, 0, len(out))
+	for _, ft := range out {
+		types = append(types, ft)
+	}
+	// Cached only once the registry carries the types the lookup named: a cache published ahead
+	// of a failed heal is never retried, and every answer it types is then validated against a
+	// registry that does not know the type.
+	if err := c.ensureTypesKnown(types); err != nil {
+		return nil, err
+	}
 	c.otherMu.Lock()
 	c.requestTypeCache[key] = out
 	c.otherMu.Unlock()
-	return out
+	return out, nil
+}
+
+// FieldTypes returns the field-type registry — what every TYPE in a request catalog means.
+//
+// Fetched from GET /api/contact-field-types beside the connect-screen lookup this client
+// resolves a request row's type from, and held in memory for the life of the client. It is what
+// validates a typed answer before it is encrypted.
+//
+// A fetch that FAILS is reported as that failure and memoised as nothing — an empty registry
+// says every type is unknown, and "unknown accepts anything" is a verdict about the deployment,
+// never a stand-in for a fetch that did not happen.
+func (c *CustomerClient) FieldTypes() (*FieldTypeRegistry, error) {
+	c.otherMu.Lock()
+	held := c.fieldTypes
+	c.otherMu.Unlock()
+	if held != nil {
+		return held, nil
+	}
+	registry, err := c.loadFieldTypes()
+	if err != nil {
+		return nil, err
+	}
+	c.otherMu.Lock()
+	c.fieldTypes = registry
+	c.otherMu.Unlock()
+	return registry, nil
+}
+
+// loadFieldTypes performs ONE fetch of the registry rows, with no caching of its own. Both the
+// transport failure and a body that is not the served array are reported rather than swallowed.
+func (c *CustomerClient) loadFieldTypes() (*FieldTypeRegistry, error) {
+	// The registry route answers JSON to every caller — it is not one of the customer routes
+	// that honour the configured Format — so its body is read as JSON whatever this client
+	// speaks elsewhere.
+	resp, err := c.http.GetResponse(context.Background(), epFieldTypes)
+	if err != nil {
+		c.otherMu.Lock()
+		c.fieldTypesErr = err
+		c.otherMu.Unlock()
+		return nil, err
+	}
+	var rows []FieldTypeRow
+	if trimmed := strings.TrimSpace(string(resp.Body)); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
+			wrapped := NewApiError(resp.Status, "", "field-type registry was not valid JSON: "+err.Error())
+			c.otherMu.Lock()
+			c.fieldTypesErr = wrapped
+			c.otherMu.Unlock()
+			return nil, wrapped
+		}
+	}
+	c.otherMu.Lock()
+	c.fieldTypesErr = nil
+	c.otherMu.Unlock()
+	return NewFieldTypeRegistry(rows), nil
+}
+
+// ensureTypesKnown performs ONE bounded refetch when the held registry does not carry a type in
+// use.
+//
+// The refetch replaces the held registry only once it has ARRIVED, so a refetch that fails
+// leaves the rows already loaded standing rather than none at all.
+func (c *CustomerClient) ensureTypesKnown(types []string) error {
+	registry, err := c.FieldTypes()
+	if err != nil {
+		return err
+	}
+	var missing []string
+	c.otherMu.Lock()
+	for _, t := range types {
+		if t != "" && !registry.Knows(t) && !c.unresolvedTypes[t] {
+			missing = append(missing, t)
+		}
+	}
+	c.otherMu.Unlock()
+	if len(missing) == 0 {
+		return nil
+	}
+	registry, err = c.loadFieldTypes()
+	if err != nil {
+		return err
+	}
+	c.otherMu.Lock()
+	c.fieldTypes = registry
+	for _, t := range missing {
+		if !registry.Knows(t) {
+			c.unresolvedTypes[t] = true
+		}
+	}
+	c.otherMu.Unlock()
+	return nil
 }
 
 func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, serviceCode string) ([]map[string]any, error) {
@@ -541,10 +656,17 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 	}
 	// Validate each typed answer against its request row's field type, BEFORE
 	// encryption. Skip an answer whose type can't be resolved (do not invent one).
-	types := c.requestFieldTypes(companyCode, serviceCode)
+	types, err := c.requestFieldTypes(companyCode, serviceCode)
+	if err != nil {
+		return nil, err
+	}
+	registry, err := c.FieldTypes()
+	if err != nil {
+		return nil, err
+	}
 	for _, a := range answers {
 		if ft := types[a.RequestFieldID]; ft != "" {
-			if !FieldValueValid(ft, a.Value) {
+			if !registry.IsFieldValueValid(ft, a.Value) {
 				return nil, newValidationError(a.RequestFieldID, ft)
 			}
 		}

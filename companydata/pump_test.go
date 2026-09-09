@@ -91,7 +91,7 @@ func vectorDecryptChange(t *testing.T) (decryptChangeFn, *rsa.PrivateKey) {
 		t.Fatalf("LoadPrivateKey: %v", err)
 	}
 	dc := func(event map[string]any) (Change, error) {
-		return changeFromAPI(event, func(string) string { return "text" }, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
+		return changeFromAPI(event, func(string) (string, error) { return "text", nil }, testFieldTypesSource, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
 	}
 	return dc, priv
 }
@@ -566,7 +566,7 @@ func TestPoisonDecryptDeadLettersWithoutWedging(t *testing.T) {
 			decryptCalls++
 			return Change{}, &DecryptError{msg: "corrupt ciphertext for chg-0002"}
 		}
-		return changeFromAPI(event, func(string) string { return "text" }, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
+		return changeFromAPI(event, func(string) (string, error) { return "text", nil }, testFieldTypesSource, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
 	}
 	events := makeEvents(v.Text.Wrapper, 1, 1)
 	events = append(events, makePoisonEvent("chg-0002"))
@@ -616,7 +616,7 @@ func TestPoisonDecryptWithHaltReraises(t *testing.T) {
 		if event["id"] == "chg-0001" {
 			return Change{}, &DecryptError{msg: "undecryptable"}
 		}
-		return changeFromAPI(event, func(string) string { return "text" }, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
+		return changeFromAPI(event, func(string) (string, error) { return "text", nil }, testFieldTypesSource, func(w any) (string, error) { return Decrypt(w, priv) }, nil)
 	}
 	src := &fakeSource{queue: []map[string]any{makePoisonEvent("chg-0001")}}
 	pump := newTestPump(t, cfg, src.fetch, dc)

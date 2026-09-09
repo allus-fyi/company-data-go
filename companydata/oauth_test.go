@@ -108,11 +108,11 @@ func TestAuthorizeURLPKCEAndDetached(t *testing.T) {
 func TestAuthorizeURLClaimValidation(t *testing.T) {
 	c, _ := NewOAuthClient(idwConfig(t, nil))
 	// Every claim carries a mandatory `name` — the identity everything downstream is keyed by.
+	// The TYPE is passed through as written: which types are claimable is registry data the
+	// server owns, and a type it does not accept comes back as invalid_request.
 	got, _ := c.AuthorizeURL("one_time", &AuthorizeURLOptions{Claims: []Claim{
 		{Name: "email", Type: "email", Suggest: "email_personal"},
-		{Name: "avatar", Type: "photo"},
 		{Name: "phone", Type: "phone", Required: true},
-		{Name: "nothing", Type: ""},
 	}})
 	u, _ := url.Parse(got)
 	var parsed []map[string]any
@@ -212,7 +212,7 @@ func TestCompleteSignInDecrypts(t *testing.T) {
 	wrapperJSON, _ := json.Marshal(vec.Text.Wrapper)
 	d := &oauthFake{
 		postQ: []fakeResponse{{status: 200, body: `{"access_token":"AT","mode":"one_time"}`}},
-		getQ: []fakeResponse{{status: 200, body: `{"sub":"AB12CD","share_code":"AB12CD","mode":"one_time","two_factor":true,"values":{"email_personal":` + string(wrapperJSON) + `}}`}},
+		getQ:  []fakeResponse{{status: 200, body: `{"sub":"AB12CD","share_code":"AB12CD","mode":"one_time","two_factor":true,"values":{"email_personal":` + string(wrapperJSON) + `}}`}},
 	}
 	cfg := idwConfig(t, map[string]string{"oauth_private_key": pem, "oauth_key_passphrase": vec.Passphrase})
 	c, _ := NewOAuthClient(cfg, WithOAuthDoer(d))

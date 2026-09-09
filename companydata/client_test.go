@@ -77,7 +77,16 @@ func clientConfig(t *testing.T, v *vectorDoc) *Config {
 
 func newTestClient(t *testing.T, cfg *Config, route func(string, map[string][]string) (int, string)) (*Client, *routerDoer) {
 	t.Helper()
-	d := &routerDoer{route: route}
+	// The registry route is served for every test client, the way a deployment serves it: the
+	// client fetches it beside the request-field catalog, and a fake that did not answer it would
+	// be testing an environment no deployment has.
+	inner := route
+	d := &routerDoer{route: func(path string, params map[string][]string) (int, string) {
+		if strings.HasSuffix(path, "/api/contact-field-types") {
+			return 200, testFieldTypesBody()
+		}
+		return inner(path, params)
+	}}
 	http := NewHTTPClient(cfg, WithDoer(d))
 	c, err := New(cfg, WithHTTPClient(http), WithLogger(log.New(io.Discard, "", 0)), withClientSleep(func(_ time.Duration) {}))
 	if err != nil {
@@ -113,7 +122,7 @@ func TestRequestFieldsParsedAndCached(t *testing.T) {
 	}
 	// Cached: a second call (and internal type lookups) does NOT re-fetch.
 	_, _ = c.RequestFields(context.Background())
-	_ = c.typeForSlug("work_email")
+	_, _ = c.typeForSlug("work_email")
 	if calls != 1 {
 		t.Fatalf("request-fields fetched %d times, want 1", calls)
 	}
@@ -1106,13 +1115,13 @@ func TestSendConnectRequestBlankFails(t *testing.T) {
 }
 
 func TestChangeParsesConnectRequestOutcomeEvents(t *testing.T) {
-	noType := func(string) string { return "" }
+	noType := func(string) (string, error) { return "", nil }
 	echo := func(v any) (string, error) { return "", nil }
 
 	accepted, err := changeFromAPI(map[string]any{
 		"id": "c1", "event": "connection_request_accepted", "request_id": "req-9",
 		"person_user_id": "person-1", "share_code": "P1CODE", "at": "2026-06-23T10:00:00Z",
-	}, noType, echo, nil)
+	}, noType, testFieldTypesSource, echo, nil)
 	if err != nil {
 		t.Fatalf("changeFromAPI accepted: %v", err)
 	}
@@ -1129,7 +1138,7 @@ func TestChangeParsesConnectRequestOutcomeEvents(t *testing.T) {
 	rejected, err := changeFromAPI(map[string]any{
 		"id": "c2", "event": "connection_request_rejected", "request_id": "req-8",
 		"person_user_id": "person-2",
-	}, noType, echo, nil)
+	}, noType, testFieldTypesSource, echo, nil)
 	if err != nil {
 		t.Fatalf("changeFromAPI rejected: %v", err)
 	}
@@ -1139,7 +1148,7 @@ func TestChangeParsesConnectRequestOutcomeEvents(t *testing.T) {
 
 	created, err := changeFromAPI(map[string]any{
 		"id": "c3", "event": "connection_created", "person_user_id": "person-3",
-	}, noType, echo, nil)
+	}, noType, testFieldTypesSource, echo, nil)
 	if err != nil {
 		t.Fatalf("changeFromAPI created: %v", err)
 	}

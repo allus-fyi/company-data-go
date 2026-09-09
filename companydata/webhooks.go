@@ -184,7 +184,7 @@ func constantTimeEqual(a, b string) bool {
 //
 // This is the package-level helper; callers usually use the Client methods,
 // which supply the decrypt/type closures + the cached account key from config.
-func ParseWebhook(rawBody []byte, headers any, config *Config, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, accountKey *rsa.PrivateKey) (Change, error) {
+func ParseWebhook(rawBody []byte, headers any, config *Config, typeForSlug typeForSlugFn, fieldTypes fieldTypesFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, accountKey *rsa.PrivateKey) (Change, error) {
 	payload, err := decodeWebhookPayload(rawBody, config, accountKey)
 	if err != nil {
 		return Change{}, err
@@ -193,17 +193,17 @@ func ParseWebhook(rawBody []byte, headers any, config *Config, typeForSlug typeF
 	if !ok {
 		return Change{}, newWebhookError("webhook payload is not a JSON/XML object")
 	}
-	return changeFromAPI(m, typeForSlug, decryptValue, binaryFetch)
+	return changeFromAPI(m, typeForSlug, fieldTypes, decryptValue, binaryFetch)
 }
 
 // HandleWebhook verifies + parses a webhook in one call. Returns a
 // *WebhookError on a bad/unknown signature; otherwise the typed Change. The
 // typical one-liner inside a webhook route.
-func HandleWebhook(rawBody []byte, headers any, config *Config, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, accountKey *rsa.PrivateKey) (Change, error) {
+func HandleWebhook(rawBody []byte, headers any, config *Config, typeForSlug typeForSlugFn, fieldTypes fieldTypesFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, accountKey *rsa.PrivateKey) (Change, error) {
 	if !VerifyWebhook(rawBody, headers, config) {
 		return Change{}, newWebhookError("webhook signature verification failed")
 	}
-	return ParseWebhook(rawBody, headers, config, typeForSlug, decryptValue, binaryFetch, accountKey)
+	return ParseWebhook(rawBody, headers, config, typeForSlug, fieldTypes, decryptValue, binaryFetch, accountKey)
 }
 
 // ── payload decoding (JSON / XML / encrypt_payload envelope) ────────────────

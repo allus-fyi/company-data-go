@@ -57,16 +57,32 @@ type Value struct {
 }
 ```
 
-`Value.Value` is typed by the request field's type — use a type switch /
-assertion:
+### `value` types — from the type's RESOLVED definition
 
-| Field type | Go type |
-|------------|---------|
-| `email` / `phone` / `url` / `text` | `string` |
-| `address` / `bank` / `creditcard` | `map[string]any` (parsed JSON object) |
-| `date` / `date_of_birth` | `time.Time` (midnight UTC; falls back to the raw string if unparseable) |
-| `photo` / `document` / `legal_document` / `passport` / `photo_id` / `drivers_license` | `*BinaryHandle` — the last three are ID-document subtypes of `legal_document` and share its envelope |
-| unanswered | `nil`, or an empty `*BinaryHandle` for binary types |
+A contact-field TYPE is a ROW in the served field-type registry (`GET /api/contact-field-types`),
+which the client fetches beside the request-field catalog and holds for its life. A value's shape
+follows the type's resolved storage LANE and PRIMITIVE, so a type added as a row types itself with
+no SDK release.
+
+`Value.Value` is typed from that definition — use a type switch / assertion:
+
+| The type's resolved… | Go type |
+|----------------------|---------|
+| storage lane `photo` / `document` | `*BinaryHandle` (lazy) |
+| primitive `composite` | `map[string]any` (parsed JSON object) |
+| primitive `date` | `time.Time` (midnight UTC; falls back to the raw string if unparseable) |
+| primitive `multilist` | `[]any` of the chosen option strings |
+| anything else, and a type the registry does not carry | `string` |
+| unanswered | `nil`, or an empty `*BinaryHandle` for a binary lane |
+For the seeded types that is, unchanged: `email`/`phone`/`url`/`text` and the three numeric types →
+a string; `country`/`nationality` → an ISO 3166-1 alpha-2 code string; `address`/`bank`/`creditcard`
+→ the parsed object; `date`/`date_of_birth` → the date type; `photo`, `document`,
+`legal_document`, `passport`, `photo_id` and `drivers_license` → the lazy binary handle. A request
+row of a PARENT type MAY be answered by a field of any DESCENDANT, but that matching happens in
+the API: the answer still arrives keyed by YOUR slug and shaped by the SLOT's own type, because
+the person's source field — and therefore its type — is never exposed. A binary slot's
+slot → source → file resolution is likewise the API's.
+
 
 ```go
 v := conn.Values["work_email"]

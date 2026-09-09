@@ -36,23 +36,22 @@ import (
 // callable (a closure over the loaded service private key) and, for binaries, a
 // binaryFetch callable — never a key/secret argument.
 
-// Field-type groupings.
-var (
-	structuredTypes = map[string]bool{"address": true, "bank": true, "creditcard": true}
-	// binaryTypes: the ID-document subtypes are children of legal_document and share its envelope.
-	binaryTypes = map[string]bool{
-		"photo": true, "document": true, "legal_document": true,
-		"passport": true, "photo_id": true, "drivers_license": true,
-	}
-	dateTypes = map[string]bool{"date": true, "date_of_birth": true}
-)
-
 // decryptValueFn decrypts a ciphertext wrapper (map / struct / JSON string) →
 // plaintext string. Closes over the service private key.
 type decryptValueFn func(any) (string, error)
 
 // typeForSlugFn resolves a request slug to its field type (e.g. "email", "photo").
-type typeForSlugFn func(string) string
+//
+// It reports an error because resolving a slug can require a catalog and a registry refetch, and
+// a refetch that failed must not read as a slug this deployment does not have: an empty type
+// accepts anything, which is a verdict about the deployment, never a stand-in for a fetch that
+// did not happen.
+type typeForSlugFn func(string) (string, error)
+
+// fieldTypesFn hands back the served registry at the moment a value is typed, rather than an
+// instance captured before. Resolving a slug is what heals the registry, so a factory holding the
+// instance would type the very value that triggered the heal against rows without its type.
+type fieldTypesFn func() (*FieldTypeRegistry, error)
 
 // binaryFetchFn fetches a slot file endpoint and classifies its response —
 // an encrypted wrapper or the raw file bytes, decided on Content-Type.
@@ -145,8 +144,8 @@ type Value struct {
 	Raw              map[string]any
 }
 
-func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Value, error) {
-	typed, err := typedValue(obj, fieldType, decryptValue, binaryFetch)
+func valueFromAPI(obj map[string]any, fieldType string, fieldTypes *FieldTypeRegistry, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Value, error) {
+	typed, err := typedValue(obj, fieldType, fieldTypes, decryptValue, binaryFetch)
 	if err != nil {
 		return Value{}, err
 	}
@@ -165,12 +164,16 @@ func valueFromAPI(obj map[string]any, fieldType string, decryptValue decryptValu
 }
 
 // typedValue decrypts + coerces one value entry to its typed Go form.
-func typedValue(obj map[string]any, fieldType string, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (any, error) {
+//
+// The shape comes from the type's RESOLVED definition in the served registry — its storage lane
+// and its primitive — so a type added to the registry types itself from the day it is a row.
+func typedValue(obj map[string]any, fieldType string, fieldTypes *FieldTypeRegistry, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (any, error) {
 	ftype := strings.ToLower(fieldType)
+	definition := fieldTypes.Resolve(ftype)
 
 	// Binary → a lazy handle over the slot value_url (no eager fetch/decrypt).
 	_, hasValueURL := obj["value_url"]
-	if binaryTypes[ftype] || hasValueURL {
+	if fieldTypes.IsBinary(ftype) || hasValueURL {
 		valueURL := asString(obj["value_url"])
 		if valueURL == "" {
 			// Binary type but no url (e.g. unanswered) → an empty handle.
@@ -189,7 +192,12 @@ func typedValue(obj map[string]any, fieldType string, decryptValue decryptValueF
 		return nil, err
 	}
 
-	if structuredTypes[ftype] {
+	primitive := ""
+	if definition.Input != nil {
+		primitive = *definition.Input
+	}
+
+	if primitive == "composite" {
 		var parsed map[string]any
 		dec := json.NewDecoder(strings.NewReader(plaintext))
 		dec.UseNumber()
@@ -199,14 +207,24 @@ func typedValue(obj map[string]any, fieldType string, decryptValue decryptValueF
 		return parsed, nil
 	}
 
-	if dateTypes[ftype] {
+	if primitive == "multilist" {
+		var parsed []any
+		dec := json.NewDecoder(strings.NewReader(plaintext))
+		dec.UseNumber()
+		if err := dec.Decode(&parsed); err != nil {
+			return nil, &DecryptError{msg: "structured value for type " + ftype + " is not valid JSON array"}
+		}
+		return parsed, nil
+	}
+
+	if primitive == "date" {
 		if d, ok := parseDate(plaintext); ok {
 			return d, nil
 		}
 		return plaintext, nil // fall back to the string if unparseable
 	}
 
-	// text/email/phone/url and anything unknown → the plaintext string.
+	// Every other primitive, and a type the registry does not carry, is the plaintext string.
 	return plaintext, nil
 }
 
@@ -233,7 +251,7 @@ type Connection struct {
 // list) object. The list row carries identity (display_name/connected_at) AND
 // the values map; connectionDetail returns {connection_id, user_id, values} and
 // no identity, so identity may be supplied separately (or be the same object).
-func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, identity map[string]any) (Connection, error) {
+func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fieldTypesFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn, identity map[string]any) (Connection, error) {
 	if identity == nil {
 		identity = map[string]any{}
 	}
@@ -249,7 +267,17 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptVal
 			if !ok {
 				continue
 			}
-			v, err := valueFromAPI(m, typeForSlug(slug), decryptValue, binaryFetch)
+			ftype, err := typeForSlug(slug)
+			if err != nil {
+				return Connection{}, err
+			}
+			// The registry is read after the slug, never before: the slug's resolution is what
+			// heals it, and this value is the one that triggered that heal.
+			registry, err := fieldTypes()
+			if err != nil {
+				return Connection{}, err
+			}
+			v, err := valueFromAPI(m, ftype, registry, decryptValue, binaryFetch)
 			if err != nil {
 				return Connection{}, err
 			}
@@ -314,7 +342,7 @@ type Change struct {
 	Raw              map[string]any
 }
 
-func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
+func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fieldTypesFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Change, error) {
 	slug := asString(obj["slug"])
 	event := asString(obj["event"])
 
@@ -329,7 +357,17 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 		_, hasVal := obj["value"]
 		_, hasURL := obj["value_url"]
 		if hasVal || hasURL {
-			v, err := typedValue(obj, typeForSlug(slug), decryptValue, binaryFetch)
+			ftype, err := typeForSlug(slug)
+			if err != nil {
+				return Change{}, err
+			}
+			// The registry is read after the slug, never before: the slug's resolution is what
+			// heals it, and this value is the one that triggered that heal.
+			registry, err := fieldTypes()
+			if err != nil {
+				return Change{}, err
+			}
+			v, err := typedValue(obj, ftype, registry, decryptValue, binaryFetch)
 			if err != nil {
 				return Change{}, err
 			}
@@ -421,7 +459,7 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, decryptValue d
 }
 
 // changesFromAPI parses the /changes response → a list of typed Change events.
-func changesFromAPI(body any, typeForSlug typeForSlugFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) ([]Change, error) {
+func changesFromAPI(body any, typeForSlug typeForSlugFn, fieldTypes fieldTypesFn, decryptValue decryptValueFn, binaryFetch binaryFetchFn) ([]Change, error) {
 	items := extractList(body, "changes")
 	out := make([]Change, 0, len(items))
 	for _, o := range items {
@@ -429,7 +467,7 @@ func changesFromAPI(body any, typeForSlug typeForSlugFn, decryptValue decryptVal
 		if !ok {
 			continue
 		}
-		c, err := changeFromAPI(m, typeForSlug, decryptValue, binaryFetch)
+		c, err := changeFromAPI(m, typeForSlug, fieldTypes, decryptValue, binaryFetch)
 		if err != nil {
 			return nil, err
 		}

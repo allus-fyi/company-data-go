@@ -104,10 +104,10 @@ func TestConnectionDetailTypedSlugKeyed(t *testing.T) {
 			"logo":            map[string]any{"value_url": "https://api.allme.fyi/api/company-data/connections/csc-1/slots/sf-9/file", "live": true},
 		},
 	}
-	typeForSlug := func(slug string) string {
-		return map[string]string{"work_email": "email", "billing_address": "address", "logo": "photo"}[slug]
+	typeForSlug := func(slug string) (string, error) {
+		return map[string]string{"work_email": "email", "billing_address": "address", "logo": "photo"}[slug], nil
 	}
-	conn, err := connectionFromAPI(obj, typeForSlug, decryptValue, nil, obj)
+	conn, err := connectionFromAPI(obj, typeForSlug, testFieldTypesSource, decryptValue, nil, obj)
 	if err != nil {
 		t.Fatalf("connectionFromAPI: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestBinaryHandleLazyFetchAndDecrypt(t *testing.T) {
 			"logo": map[string]any{"value_url": "https://api.allme.fyi/.../slots/sf-9/file", "live": true},
 		},
 	}
-	conn, err := connectionFromAPI(obj, func(string) string { return "photo" }, decryptValue, binaryFetch, obj)
+	conn, err := connectionFromAPI(obj, func(string) (string, error) { return "photo", nil }, testFieldTypesSource, decryptValue, binaryFetch, obj)
 	if err != nil {
 		t.Fatalf("connectionFromAPI: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestConnectionHasNoPersonSourceField(t *testing.T) {
 		"connection_id": "csc-1", "user_id": "person-1",
 		"values": map[string]any{"work_email": map[string]any{"value": v.Text.Wrapper, "live": true}},
 	}
-	conn, err := connectionFromAPI(obj, func(string) string { return "email" }, decryptValue, nil, obj)
+	conn, err := connectionFromAPI(obj, func(string) (string, error) { return "email", nil }, testFieldTypesSource, decryptValue, nil, obj)
 	if err != nil {
 		t.Fatalf("connectionFromAPI: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestChangeFieldUpdatedTypedAndIDPopulated(t *testing.T) {
 		"id": "chg-1", "event": "field_updated", "person_user_id": "person-1",
 		"slug": "work_email", "at": "2026-06-17T12:00:00Z", "live": true, "value": v.Text.Wrapper,
 	}
-	change, err := changeFromAPI(obj, func(string) string { return "email" }, decryptValue, nil)
+	change, err := changeFromAPI(obj, func(string) (string, error) { return "email", nil }, testFieldTypesSource, decryptValue, nil)
 	if err != nil {
 		t.Fatalf("changeFromAPI: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestChangeFieldUpdatedTypedAndIDPopulated(t *testing.T) {
 
 func TestChangeConsentEventHasSlugNoValue(t *testing.T) {
 	obj := map[string]any{"id": "chg-9", "event": "consent_accepted", "person_user_id": "p", "slug": "work_email"}
-	change, err := changeFromAPI(obj, func(string) string { return "email" }, func(any) (string, error) { return "", nil }, nil)
+	change, err := changeFromAPI(obj, func(string) (string, error) { return "email", nil }, testFieldTypesSource, func(any) (string, error) { return "", nil }, nil)
 	if err != nil {
 		t.Fatalf("changeFromAPI: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestChangeIncludesShareCode(t *testing.T) {
 		map[string]any{"id": "chg-2", "event": "connection_created",
 			"person_user_id": "person-2", "at": "2026-06-17T12:00:00Z"}, // no share_code -> ""
 	}}
-	changes, err := changesFromAPI(body, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil)
+	changes, err := changesFromAPI(body, func(string) (string, error) { return "", nil }, testFieldTypesSource, func(any) (string, error) { return "", nil }, nil)
 	if err != nil {
 		t.Fatalf("changesFromAPI: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestChangeIncludesCustomerType(t *testing.T) {
 		map[string]any{"id": "chg-2", "event": "connection_created",
 			"person_user_id": "person-2", "at": "2026-07-07T12:00:00Z"},
 	}}
-	changes, err := changesFromAPI(body, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil)
+	changes, err := changesFromAPI(body, func(string) (string, error) { return "", nil }, testFieldTypesSource, func(any) (string, error) { return "", nil }, nil)
 	if err != nil {
 		t.Fatalf("changesFromAPI: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestConnectionIncludesCustomerTypeAndShareCode(t *testing.T) {
 	// B2B: a connection carries customer_type + share_code (both may be empty).
 	obj := map[string]any{"connection_id": "c-1", "user_id": "co-9",
 		"customer_type": "company", "share_code": "PARTNER", "values": map[string]any{}}
-	conn, err := connectionFromAPI(obj, func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil, nil)
+	conn, err := connectionFromAPI(obj, func(string) (string, error) { return "", nil }, testFieldTypesSource, func(any) (string, error) { return "", nil }, nil, nil)
 	if err != nil {
 		t.Fatalf("connectionFromAPI: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestConnectionIncludesCustomerTypeAndShareCode(t *testing.T) {
 		t.Fatalf("conn CustomerType/ShareCode = %q/%q, want company/PARTNER", conn.CustomerType, conn.ShareCode)
 	}
 	bare, _ := connectionFromAPI(map[string]any{"connection_id": "c-2", "user_id": "p-1", "values": map[string]any{}},
-		func(string) string { return "" }, func(any) (string, error) { return "", nil }, nil, nil)
+		func(string) (string, error) { return "", nil }, testFieldTypesSource, func(any) (string, error) { return "", nil }, nil, nil)
 	if bare.CustomerType != "" || bare.ShareCode != "" {
 		t.Fatalf("bare CustomerType/ShareCode = %q/%q, want empty", bare.CustomerType, bare.ShareCode)
 	}
@@ -330,7 +330,7 @@ func TestChangeDocumentStatusChangedParses(t *testing.T) {
 			"document_id": "doc-9", "status": "ended", "at": "2026-06-22T10:00:00Z",
 		},
 	}}
-	changes, err := changesFromAPI(body, func(string) string { return "" }, decryptValue, nil)
+	changes, err := changesFromAPI(body, func(string) (string, error) { return "", nil }, testFieldTypesSource, decryptValue, nil)
 	if err != nil {
 		t.Fatalf("changesFromAPI: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
 			"at": "2026-06-22T11:00:00Z",
 		},
 	}}
-	changes, err := changesFromAPI(body, func(string) string { return "" }, decryptValue, nil)
+	changes, err := changesFromAPI(body, func(string) (string, error) { return "", nil }, testFieldTypesSource, decryptValue, nil)
 	if err != nil {
 		t.Fatalf("changesFromAPI: %v", err)
 	}

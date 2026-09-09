@@ -22,13 +22,6 @@ import (
 // DefaultAuthorizeURL is the hosted consent surface. Native apps claim this https link; web is the fallback.
 const DefaultAuthorizeURL = "https://web.allme.fyi/auth"
 
-// nonClaimable: binary field types can't be requested as claims — the ID-document subtypes are
-// binary too, so no ID document ever reaches this surface.
-var nonClaimable = map[string]bool{
-	"photo": true, "document": true, "legal_document": true,
-	"passport": true, "photo_id": true, "drivers_license": true,
-}
-
 const maxClaims = 15
 
 // Claim is a claim the relying party asks for — a REQUEST FIELD.
@@ -188,6 +181,12 @@ type AuthorizeURLOptions struct {
 }
 
 // AuthorizeURL builds the consent-screen URL — the "Sign in with allme" button target.
+//
+// Claims are validated for what this client can answer for itself — a name, no duplicate
+// name, at most 15 — and are otherwise sent as written. WHICH TYPES ARE CLAIMABLE IS THE
+// SERVER'S ANSWER: this URL is built before any token exists and an identity app reads no
+// registry, so a claim of a type the server does not accept comes back as invalid_request
+// rather than being dropped here.
 func (c *OAuthClient) AuthorizeURL(mode string, opts *AuthorizeURLOptions) (string, error) {
 	if mode != "signin" && mode != "one_time" && mode != "connect" && mode != "2fa_enroll" {
 		return "", newConfigError("invalid mode %q (expected signin | one_time | connect | 2fa_enroll)", mode)
@@ -236,11 +235,10 @@ func cleanClaims(claims []Claim) ([]map[string]any, error) {
 	out := []map[string]any{}
 	seen := map[string]bool{}
 	for _, c := range claims {
-		if c.Type == "" || nonClaimable[c.Type] {
-			continue
-		}
-		// §2: Name is the claim's identity and it is mandatory. Refused HERE rather than left
-		// to the API, so the integration error surfaces at the call that made it.
+		// Name is the claim's identity and it is mandatory. Refused HERE rather than left to
+		// the API, so the integration error surfaces at the call that made it. The TYPE is not
+		// filtered: what a claim may be typed as is registry data the server owns, and this
+		// client holds none of it.
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
 			return nil, newConfigError("every claim must carry a `Name`")

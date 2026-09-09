@@ -48,8 +48,12 @@ import (
 //     decrypt closure over it is handed to every model factory and the pump
 //     (config-only key handling — the key never appears in a method signature).
 //   - Slug catalog — RequestFields is fetched once and cached; its slug→type map
-//     types every value (so address parses to a map, photo becomes a lazy binary
-//     handle, etc.).
+//     names the TYPE of every value.
+//   - Field-type registry — FieldTypes is fetched beside the catalog and held for the
+//     life of the client; it is what a type MEANS, so a value's shape follows the
+//     type's resolved primitive and storage lane (a composite parses to a map, a
+//     photo/document lane becomes a lazy binary handle) rather than a list of type
+//     names. A type the held registry does not carry triggers one bounded refetch.
 //   - Binary — a value's *BinaryHandle.Bytes() GETs the slot file endpoint and
 //     returns the file bytes for either shape it may serve: the API's
 //     {"encrypted":true,"value":<wrapper>} envelope run through the same
@@ -64,6 +68,7 @@ const (
 	epConnections   = baseEndpoint + "/connections"
 	epChanges       = baseEndpoint + "/changes"
 	epRequestFields = baseEndpoint + "/request-fields"
+	epFieldTypes    = "/api/contact-field-types"
 	epLogs          = baseEndpoint + "/logs"
 	epDocuments     = baseEndpoint + "/documents"
 	epConnectReqs   = baseEndpoint + "/connect-requests"
@@ -93,9 +98,25 @@ type Client struct {
 	privateKey *rsa.PrivateKey
 	accountKey *rsa.PrivateKey
 
-	requestFields []RequestField
-	typeBySlug    map[string]string
-	fieldsLoaded  bool
+	// The slug catalog, fetched once and held for the life of the client. A slug it does not
+	// carry — a request slot configured after this client started — triggers ONE refetch; a
+	// slug a refetch still does not carry is remembered in unresolvedSlugs and never asked
+	// for again, so a slot this deployment does not have cannot turn every later value into a
+	// round trip.
+	requestFields   []RequestField
+	typeBySlug      map[string]string
+	fieldsLoaded    bool
+	unresolvedSlugs map[string]bool
+
+	// The field-type registry, fetched beside the catalog and held for the life of the
+	// client. A type it does not carry triggers ONE refetch; a type a refetch still does
+	// not resolve is remembered in unresolvedTypes and never asked for again, so a value of
+	// a type this deployment does not have cannot turn every later value into a round trip.
+	fieldTypes      *FieldTypeRegistry
+	unresolvedTypes map[string]bool
+	// The last registry load's failure, held so a synchronous reader raises it instead of
+	// reading an empty registry. Cleared by the first load that succeeds.
+	fieldTypesErr error
 
 	// Recipient RSA public keys (by share_code), cached for per-person document
 	// encryption. A public key is immutable + not a secret (fetched live, never
@@ -137,12 +158,14 @@ func withClientSleep(s func(time.Duration)) clientOption {
 // a *ConfigError (fail fast).
 func New(config *Config, opts ...clientOption) (*Client, error) {
 	c := &Client{
-		config:      config,
-		logger:      log.Default(),
-		sleep:       time.Sleep,
-		typeBySlug:  map[string]string{},
-		pubkeyCache: map[string]*rsa.PublicKey{},
-		pubkeyGen:   map[string]uint64{},
+		config:          config,
+		logger:          log.Default(),
+		sleep:           time.Sleep,
+		typeBySlug:      map[string]string{},
+		unresolvedSlugs: map[string]bool{},
+		unresolvedTypes: map[string]bool{},
+		pubkeyCache:     map[string]*rsa.PublicKey{},
+		pubkeyGen:       map[string]uint64{},
 	}
 	for _, o := range opts {
 		o(c)
@@ -262,11 +285,49 @@ func (c *Client) binaryFetchCtx(ctx context.Context, valueURL string) (BinaryFet
 }
 
 // typeForSlug resolves a request slug to its field type (loads the catalog once).
-func (c *Client) typeForSlug(slug string) string {
+//
+// The payload is the trigger. The SLUG a value or a change names is what the held catalog may
+// not carry, and no walk of that catalog can discover it; the slug itself asks for one catalog
+// refetch, and the type that refetch names goes on to the registry heal. A refetch that FAILS is
+// reported as that failure: the empty type it would otherwise return accepts anything and reads
+// the value as a raw string, which is a verdict about the deployment, not the answer to a fetch
+// that did not happen. A slug the deployment genuinely does not carry is not an error — it is
+// remembered and answered empty.
+func (c *Client) typeForSlug(slug string) (string, error) {
 	if !c.fieldsLoaded {
-		_, _ = c.RequestFields(context.Background())
+		if _, err := c.RequestFields(context.Background()); err != nil {
+			return "", err
+		}
 	}
-	return c.typeBySlug[slug]
+	if _, ok := c.typeBySlug[slug]; !ok {
+		if err := c.ensureSlugKnown(context.Background(), slug); err != nil {
+			return "", err
+		}
+	}
+	return c.typeBySlug[slug], nil
+}
+
+// ensureSlugKnown performs ONE bounded refetch of the catalog when it does not carry a slug in
+// use.
+//
+// A request slot configured after this client started is what makes a slug unknown here, and one
+// refetch of the catalog is what resolves it — together with the type that slot introduced, which
+// the reload puts through the registry heal. A slug still absent afterwards belongs to no slot
+// this client can see, so it is remembered and never asked for again.
+func (c *Client) ensureSlugKnown(ctx context.Context, slug string) error {
+	if slug == "" || c.unresolvedSlugs[slug] {
+		return nil
+	}
+	if _, ok := c.typeBySlug[slug]; ok {
+		return nil
+	}
+	if err := c.loadRequestFields(ctx); err != nil {
+		return err
+	}
+	if _, ok := c.typeBySlug[slug]; !ok {
+		c.unresolvedSlugs[slug] = true
+	}
+	return nil
 }
 
 // ── definitions ──────────────────────────────────────────────────────────────
@@ -280,20 +341,156 @@ func (c *Client) RequestFields(ctx context.Context) ([]RequestField, error) {
 	if c.fieldsLoaded {
 		return c.requestFields, nil
 	}
+	if err := c.loadRequestFields(ctx); err != nil {
+		return nil, err
+	}
+	return c.requestFields, nil
+}
+
+// loadRequestFields performs ONE fetch of the catalog, replacing the held one only once it has
+// ARRIVED.
+func (c *Client) loadRequestFields(ctx context.Context) error {
 	body, err := c.http.Get(ctx, epRequestFields, nil)
+	if err != nil {
+		return err
+	}
+	fields := requestFieldsFromAPI(body)
+	bySlug := map[string]string{}
+	for _, f := range fields {
+		if f.Slug != "" {
+			bySlug[f.Slug] = f.Type
+		}
+	}
+	types := make([]string, 0, len(bySlug))
+	for _, t := range bySlug {
+		types = append(types, t)
+	}
+	// The catalog is published only once the registry that types it has loaded. Publishing
+	// first would let a registry failure leave a cached catalog behind that no later call
+	// retries, and every value it types would then be read through a registry that knows
+	// nothing.
+	if err := c.ensureTypesKnown(ctx, types); err != nil {
+		return err
+	}
+	c.typeBySlug = bySlug
+	c.requestFields = fields
+	c.fieldsLoaded = true
+	return nil
+}
+
+// FieldTypes returns the field-type registry — what every TYPE in the catalog means.
+//
+// Fetched from GET /api/contact-field-types beside the request-field catalog and held in memory
+// for the life of the client. It says which primitive draws a type, which named check verifies
+// it, which regexes it adds, which sub-fields it carries and on which storage lane its value
+// lives — so a value's shape and a value's validity both follow the served rows rather than a
+// list of type names.
+func (c *Client) FieldTypes(ctx context.Context) (*FieldTypeRegistry, error) {
+	if c.fieldTypes != nil {
+		return c.fieldTypes, nil
+	}
+	registry, err := c.loadFieldTypes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	fields := requestFieldsFromAPI(body)
-	c.requestFields = fields
-	c.typeBySlug = map[string]string{}
-	for _, f := range fields {
-		if f.Slug != "" {
-			c.typeBySlug[f.Slug] = f.Type
+	c.fieldTypes = registry
+	return registry, nil
+}
+
+// loadFieldTypes performs ONE fetch of the registry rows, with no caching of its own.
+//
+// A failure is remembered as a failure: returned to the caller that asked, and recorded so a
+// synchronous reader raises it too rather than reading an empty registry, whose "accept
+// anything" answer for an unknown type would be indistinguishable from a real one.
+func (c *Client) loadFieldTypes(ctx context.Context) (*FieldTypeRegistry, error) {
+	// The registry route answers JSON to every caller — it is not one of the company-data
+	// routes that honour the configured Format — so its body is read as JSON whatever this
+	// client speaks elsewhere.
+	resp, err := c.http.GetResponse(ctx, epFieldTypes)
+	if err != nil {
+		c.fieldTypesErr = err
+		return nil, err
+	}
+	var rows []FieldTypeRow
+	if trimmed := strings.TrimSpace(string(resp.Body)); trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
+			wrapped := NewApiError(resp.Status, "", "field-type registry was not valid JSON: "+err.Error())
+			c.fieldTypesErr = wrapped
+			return nil, wrapped
 		}
 	}
-	c.fieldsLoaded = true
-	return fields, nil
+	c.fieldTypesErr = nil
+	return NewFieldTypeRegistry(rows), nil
+}
+
+// ensureTypesKnown performs ONE bounded refetch when the held registry does not carry a type in
+// use.
+//
+// A row added to the registry after this client started is what makes a type unknown here, and
+// one refetch is what resolves it. A type still absent afterwards is this deployment's answer,
+// not a stale cache, so it is remembered and never asked for again.
+func (c *Client) ensureTypesKnown(ctx context.Context, types []string) error {
+	registry, err := c.FieldTypes(ctx)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, t := range types {
+		if t != "" && !registry.Knows(t) && !c.unresolvedTypes[t] {
+			missing = append(missing, t)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	// The refetch replaces the held registry only once it has ARRIVED. Clearing first would let
+	// a failed refetch leave no registry at all, and every type would then read as unknown — a
+	// verdict about the deployment standing in for a fetch that did not happen.
+	registry, err = c.loadFieldTypes(ctx)
+	if err != nil {
+		return err
+	}
+	c.fieldTypes = registry
+	for _, t := range missing {
+		if !registry.Knows(t) {
+			c.unresolvedTypes[t] = true
+		}
+	}
+	return nil
+}
+
+// prepareTyping is what every path that TYPES a payload does first: hold the catalog, and hold a
+// registry that carries every type the catalog names.
+//
+// It is the catalog leg only. The payload leg — a slug or a type the held state does not carry —
+// runs from typeForSlug, on the value or change that named it.
+func (c *Client) prepareTyping(ctx context.Context) error {
+	if _, err := c.RequestFields(ctx); err != nil {
+		return err
+	}
+	types := make([]string, 0, len(c.typeBySlug))
+	for _, t := range c.typeBySlug {
+		types = append(types, t)
+	}
+	return c.ensureTypesKnown(ctx, types)
+}
+
+// loadedFieldTypes is the registry the synchronous model factories read; RequestFields loads it
+// before any value is typed.
+//
+// A load that FAILED is reported as that failure rather than answered with an empty registry —
+// an unloaded registry says every type is unknown, and "unknown accepts anything" is a verdict
+// about the deployment, never a stand-in for a fetch that did not happen. A client that has never
+// asked for the registry — a receiver calling only the webhook parsers — reads the empty one,
+// which is the honest answer for a client that fetched nothing.
+func (c *Client) loadedFieldTypes() (*FieldTypeRegistry, error) {
+	if c.fieldTypes != nil {
+		return c.fieldTypes, nil
+	}
+	if c.fieldTypesErr != nil {
+		return nil, c.fieldTypesErr
+	}
+	return NewFieldTypeRegistry(nil), nil
 }
 
 // ── connections (heavily rate-limited — initial sync / reconciliation) ──────
@@ -329,7 +526,7 @@ func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Con
 		if cur < 0 {
 			cur = 0
 		}
-		if _, err := c.RequestFields(ctx); err != nil {
+		if err := c.prepareTyping(ctx); err != nil {
 			errc <- err
 			return
 		}
@@ -349,7 +546,7 @@ func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Con
 				if !ok {
 					continue
 				}
-				conn, err := connectionFromAPI(m, c.typeForSlug, c.decryptValue, c.binaryFetch, m)
+				conn, err := connectionFromAPI(m, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch, m)
 				if err != nil {
 					errc <- err
 					return
@@ -417,7 +614,7 @@ func (c *Client) getConnectionsPage(ctx context.Context, page, offset int) (any,
 // connectionDetail returns {connection_id, user_id, values} and no
 // display_name/connected_at; those identity fields simply stay empty.
 func (c *Client) Connection(ctx context.Context, id string) (Connection, error) {
-	if _, err := c.RequestFields(ctx); err != nil {
+	if err := c.prepareTyping(ctx); err != nil {
 		return Connection{}, err
 	}
 	body, err := c.http.Get(ctx, epConnections+"/"+id, nil)
@@ -436,7 +633,7 @@ func (c *Client) Connection(ctx context.Context, id string) (Connection, error) 
 			}
 		}
 	}
-	return connectionFromAPI(m, c.typeForSlug, c.decryptValue, c.binaryFetch, nil)
+	return connectionFromAPI(m, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch, nil)
 }
 
 // ── logs (moderate rate-limit) ──────────────────────────────────────────────
@@ -537,7 +734,7 @@ func (c *Client) decryptChange(event map[string]any) (Change, error) {
 			c.InvalidatePublicKey(sc)
 		}
 	}
-	return changeFromAPI(event, c.typeForSlug, c.decryptValue, c.binaryFetch)
+	return changeFromAPI(event, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch)
 }
 
 // ProcessChanges drains the changes feed through handler one at a time,
@@ -546,7 +743,7 @@ func (c *Client) decryptChange(event map[string]any) (Change, error) {
 // feed is empty then returns (no daemon mode — schedule re-runs yourself).
 // handler must be idempotent (at-least-once; dedup on Change.ID).
 func (c *Client) ProcessChanges(handler Handler, opts PumpOptions) error {
-	if _, err := c.RequestFields(context.Background()); err != nil {
+	if err := c.prepareTyping(context.Background()); err != nil {
 		return err
 	}
 	p, err := c.Pump()
@@ -559,7 +756,7 @@ func (c *Client) ProcessChanges(handler Handler, opts PumpOptions) error {
 // DrainBatch is a raw, UNBUFFERED drain → []Change (advanced — you own
 // durability). Prefer ProcessChanges for safe consumption.
 func (c *Client) DrainBatch(max int) ([]Change, error) {
-	if _, err := c.RequestFields(context.Background()); err != nil {
+	if err := c.prepareTyping(context.Background()); err != nil {
 		return nil, err
 	}
 	p, err := c.Pump()
@@ -580,7 +777,7 @@ func (c *Client) DeadLetters() ([]DeadLetter, error) {
 
 // RetryDeadLetters re-drives dead-lettered events through handler.
 func (c *Client) RetryDeadLetters(handler Handler, opts PumpOptions) (int, error) {
-	if _, err := c.RequestFields(context.Background()); err != nil {
+	if err := c.prepareTyping(context.Background()); err != nil {
 		return 0, err
 	}
 	p, err := c.Pump()
@@ -601,18 +798,18 @@ func (c *Client) VerifyWebhook(rawBody []byte, headers any) bool {
 // ParseWebhook parses a webhook body → a typed Change. Loads the
 // request-fields catalog once for value typing.
 func (c *Client) ParseWebhook(rawBody []byte, headers any) (Change, error) {
-	if _, err := c.RequestFields(context.Background()); err != nil {
+	if err := c.prepareTyping(context.Background()); err != nil {
 		return Change{}, err
 	}
-	return ParseWebhook(rawBody, headers, c.config, c.typeForSlug, c.decryptValue, c.binaryFetch, c.accountKey)
+	return ParseWebhook(rawBody, headers, c.config, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch, c.accountKey)
 }
 
 // HandleWebhook verifies + parses a webhook in one call → Change.
 func (c *Client) HandleWebhook(rawBody []byte, headers any) (Change, error) {
-	if _, err := c.RequestFields(context.Background()); err != nil {
+	if err := c.prepareTyping(context.Background()); err != nil {
 		return Change{}, err
 	}
-	return HandleWebhook(rawBody, headers, c.config, c.typeForSlug, c.decryptValue, c.binaryFetch, c.accountKey)
+	return HandleWebhook(rawBody, headers, c.config, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch, c.accountKey)
 }
 
 // ── company documents (write) ───────────────────────────────────────────────
@@ -1293,10 +1490,29 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 	// Validate each freshly-typed answer against its field type from the pinned
 	// definition, BEFORE encryption. Skip when the type can't be resolved.
 	for slug, val := range fill {
-		if ft := fieldTypeForSlug(run.Definition, slug); ft != "" {
-			if !FieldValueValid(ft, flowPlain(val)) {
-				return FlowRun{}, newValidationError(slug, ft)
-			}
+		element := fieldElementForSlug(run.Definition, slug)
+		if element == nil {
+			continue
+		}
+		ft := fieldTypeOfElement(element)
+		if ft == "" {
+			continue
+		}
+		// The type is named by the pinned definition — a payload, not the request catalog — so
+		// it can be one the held registry has never seen. One bounded refetch resolves it; a
+		// type still absent afterwards validates as unknown, which accepts anything.
+		if err := c.ensureTypesKnown(ctx, []string{ft}); err != nil {
+			return FlowRun{}, err
+		}
+		registry, err := c.FieldTypes(ctx)
+		if err != nil {
+			return FlowRun{}, err
+		}
+		// A choice type whose ROW carries no options takes them from the ELEMENT, which is the
+		// only place they exist for select/multiselect. Passing them is what lets the answer be
+		// validated at all instead of being measured against an empty domain.
+		if !registry.IsFieldValueValid(ft, flowPlain(val), fieldElementOptions(element)...) {
+			return FlowRun{}, newValidationError(slug, ft)
 		}
 	}
 
@@ -1614,14 +1830,14 @@ func computeNextNode(definition map[string]any, fromKey string, answers map[stri
 	return true, ""
 }
 
-// fieldTypeForSlug resolves a field element's field_type from the pinned flow
-// definition by scanning every node's elements for a kind:"field" element with
-// the given slug. Returns "" when the slug is not a field element (or elements
-// are absent) — callers then SKIP validation rather than invent a type.
-func fieldTypeForSlug(definition map[string]any, slug string) string {
+// fieldElementForSlug resolves a fill slug to its field ELEMENT in the pinned flow definition by
+// scanning every node's elements for a kind:"field" element with the given slug. Returns nil when
+// the slug is not a field element (or elements are absent) — callers then SKIP validation rather
+// than invent a type.
+func fieldElementForSlug(definition map[string]any, slug string) map[string]any {
 	nodes, ok := definition["nodes"].([]any)
 	if !ok {
-		return ""
+		return nil
 	}
 	for _, n := range nodes {
 		nm, ok := n.(map[string]any)
@@ -1638,14 +1854,40 @@ func fieldTypeForSlug(definition map[string]any, slug string) string {
 				continue
 			}
 			if asString(em["kind"]) == "field" && asString(em["slug"]) == slug {
-				if ft := asString(em["field_type"]); ft != "" {
-					return ft
-				}
-				return asString(em["type"])
+				return em
 			}
 		}
 	}
-	return ""
+	return nil
+}
+
+// fieldTypeOfElement answers a field element's declared type, "" when it names none.
+func fieldTypeOfElement(element map[string]any) string {
+	if ft := asString(element["field_type"]); ft != "" {
+		return ft
+	}
+	return asString(element["type"])
+}
+
+// fieldElementOptions answers the option VALUES a flow field element supplies.
+//
+// An element's options are {value, label, available_if?} objects; the value is the domain member.
+// nil when the element carries none, which leaves the row's own options — if it has any — to
+// govern.
+func fieldElementOptions(element map[string]any) []string {
+	raw, isList := element["options"].([]any)
+	if !isList {
+		return nil
+	}
+	var values []string
+	for _, o := range raw {
+		if om, ok := o.(map[string]any); ok {
+			if v, present := om["value"]; present && v != nil {
+				values = append(values, asString(v))
+			}
+		}
+	}
+	return values
 }
 
 // partyOf returns the party that owns nodeKey in the definition.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,6 +36,16 @@ func newTestCustomer(t *testing.T, cfg *Config,
 	getRoute func(string, map[string][]string) (int, string),
 	writeRoute func(writeReq) (int, string)) (*CustomerClient, *rwDoer) {
 	t.Helper()
+	// The registry route is served for every test customer, the way a deployment serves it: the
+	// client fetches it beside the connect-screen lookup, and a fake that did not answer it would
+	// be testing an environment no deployment has.
+	inner := getRoute
+	getRoute = func(path string, params map[string][]string) (int, string) {
+		if strings.HasSuffix(path, "/api/contact-field-types") {
+			return 200, testFieldTypesBody()
+		}
+		return inner(path, params)
+	}
 	d := &rwDoer{getRoute: getRoute, writeRoute: writeRoute}
 	httpc := NewHTTPClient(cfg, WithDoer(d))
 	c, err := NewCustomer(cfg, WithCustomerHTTP(httpc))

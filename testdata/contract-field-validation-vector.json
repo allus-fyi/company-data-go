@@ -1,170 +1,2387 @@
 {
-  "_comment": "Canonical parity vector for field-type value validation (#302). Every platform's isFieldValueValid(type, value) MUST return `valid` for each case. Ports: frontend/src/fieldValidation.js (reference), allus/src/fieldValidation.js (verbatim copy), ios FieldValidation.swift, android FieldValidation.kt, sdks/*/field_validation.*. See docs/superpowers/specs/2026-07-15-field-type-validation-design.html. Empty value = valid (required is the caller's job). Only present, non-empty sub-fields of a structured type are checked.",
+  "_comment": "Canonical parity vector for the field-type registry and for field-type value validation. `registry` is the row set every case below is resolved against — the 24 SEEDED rows plus six data-added rows: a child of `url` carrying a regex, a child of `legal_document` overriding nothing, a child of `address` REPLACING its `fields` list, one row whose `input` is outside the fixed vocabulary (a deployed registry's CHECK constraint makes that unreachable; it pins how a client older than a primitive behaves — read-only rendering, and validation by the check and the regexes alone), and two rows whose names are legal per `^[a-z0-9_]{1,40}$` but hostile to a dictionary: `__proto__` and the all-digit `123`. Every platform's resolver MUST reproduce every expectation here. Ports: frontend/src/fieldTypes.js + fieldValidation.js (reference), allus/src/, admin/src/, ios FieldTypeRegistry.swift, android FieldTypeRegistry.kt, sdks/*/. See docs/superpowers/specs/2026-09-07-field-type-definitions.html and its predecessor docs/superpowers/specs/2026-07-15-field-type-validation-design.html.",
+  "_case_kinds": {
+    "cases": "isFieldValueValid(type, value, options) -> valid. Empty value = valid (required is the caller's job). Only present, non-empty sub-fields of a structured type are checked. A type the registry does not carry accepts anything. ORDER: the primitive's own rule, then the resolved check, then every regex root-first, then the sub-field entries — and a CHECK's normalised value is what those regexes see, while a primitive's is not. `options` is the caller's own option list, present only on a choice case: the ROW's resolved options govern when it carries any, else these, and a choice with neither is refused rather than measured against an empty domain.",
+    "resolve_cases": "resolve(type) -> the resolved definition: every inherited column filled in from the nearest ancestor that sets it, plus `validations` root-first. `known` is false for a type the registry does not carry.",
+    "accepts_cases": "accepts(requested, actual) -> true when `actual` is `requested` or any descendant of it.",
+    "ordered_cases": "ordered(types) -> roots first, each followed by its own children, recursively; siblings by `label`. The expectations are keyed by `type` because a rendered label is per language, and are computed from the `label` values in `registry`. A type the registry does not carry sorts after the tree.",
+    "effective_type_cases": "effectiveType(type) -> the nearest ancestor, self included, that is `date` or `number`; otherwise the type itself. The flow BUILDER's question alone — the evaluator never sees it.",
+    "derived_sets": "requestableTypes() / flowTypes() / claimableTypes() over `registry`: requestable = every type except an option-less choice type; flow = requestable plus those choice types; claimable = requestable on the `inline` lane."
+  },
+  "registry": [
+    {
+      "type": "text",
+      "parent": null,
+      "label": "fieldtype_text",
+      "input": "line",
+      "lane": "inline",
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "email",
+      "parent": "text",
+      "label": "fieldtype_email",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": "[^\\s@]+@[^\\s@]+\\.[^\\s@]+",
+      "is_system": true
+    },
+    {
+      "type": "phone",
+      "parent": "text",
+      "label": "fieldtype_phone",
+      "input": "phone",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "url",
+      "parent": "text",
+      "label": "fieldtype_url",
+      "input": null,
+      "lane": null,
+      "check": "url",
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "gender",
+      "parent": "text",
+      "label": "fieldtype_gender",
+      "input": "list",
+      "lane": null,
+      "check": null,
+      "options": [
+        "Male",
+        "Female",
+        "Non-binary",
+        "Prefer not to say"
+      ],
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "country",
+      "parent": "text",
+      "label": "fieldtype_country",
+      "input": "country",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "nationality",
+      "parent": "text",
+      "label": "fieldtype_nationality",
+      "input": "nationality",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "date",
+      "parent": "text",
+      "label": "fieldtype_date",
+      "input": "date",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "date_of_birth",
+      "parent": "date",
+      "label": "fieldtype_date_of_birth",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "number",
+      "parent": null,
+      "label": "fieldtype_number",
+      "input": "line",
+      "lane": "inline",
+      "check": "number",
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "integer",
+      "parent": "number",
+      "label": "fieldtype_integer",
+      "input": null,
+      "lane": null,
+      "check": "integer",
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "decimal",
+      "parent": "number",
+      "label": "fieldtype_decimal",
+      "input": null,
+      "lane": null,
+      "check": "decimal",
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "float",
+      "parent": "number",
+      "label": "fieldtype_float",
+      "input": null,
+      "lane": null,
+      "check": "float",
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "address",
+      "parent": null,
+      "label": "fieldtype_address",
+      "input": "composite",
+      "lane": "inline",
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "street",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "building_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "affix",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "city",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "postal_code",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "[A-Za-z0-9][A-Za-z0-9 -]{1,9}",
+          "options": null
+        },
+        {
+          "key": "state",
+          "input": "state",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "country",
+          "input": "country",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "creditcard",
+      "parent": null,
+      "label": "fieldtype_creditcard",
+      "input": "composite",
+      "lane": "inline",
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "number",
+          "input": "line",
+          "required": false,
+          "check": "card",
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "expiry",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "(0[1-9]|1[0-2])/\\d{2}(\\d{2})?",
+          "options": null
+        },
+        {
+          "key": "cvc",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "\\d{3,4}",
+          "options": null
+        },
+        {
+          "key": "name",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "bank",
+      "parent": null,
+      "label": "fieldtype_bank",
+      "input": "composite",
+      "lane": "inline",
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "swift",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?",
+          "options": null
+        },
+        {
+          "key": "routing_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "\\d{9}",
+          "options": null
+        },
+        {
+          "key": "account_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "[A-Za-z0-9 ]{4,34}",
+          "options": null
+        },
+        {
+          "key": "account_holder",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "bank_name",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "select",
+      "parent": null,
+      "label": "fieldtype_select",
+      "input": "list",
+      "lane": "inline",
+      "check": null,
+      "options": [],
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "multiselect",
+      "parent": null,
+      "label": "fieldtype_multiselect",
+      "input": "multilist",
+      "lane": "inline",
+      "check": null,
+      "options": [],
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "photo",
+      "parent": null,
+      "label": "fieldtype_photo",
+      "input": "file",
+      "lane": "photo",
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "document",
+      "parent": null,
+      "label": "fieldtype_document",
+      "input": "file",
+      "lane": "document",
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "legal_document",
+      "parent": null,
+      "label": "fieldtype_legal_document",
+      "input": "file",
+      "lane": "document",
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "document_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "expiry_date",
+          "input": "date",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "passport",
+      "parent": "legal_document",
+      "label": "fieldtype_passport",
+      "input": "pages",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "document_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "expiry_date",
+          "input": "date",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "issuing_country",
+          "input": "country",
+          "required": true,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "photo_id",
+      "parent": "legal_document",
+      "label": "fieldtype_photo_id",
+      "input": "pages",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "document_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "expiry_date",
+          "input": "date",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "issuing_country",
+          "input": "country",
+          "required": true,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "drivers_license",
+      "parent": "legal_document",
+      "label": "fieldtype_drivers_license",
+      "input": "pages",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "document_number",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "expiry_date",
+          "input": "date",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "issuing_country",
+          "input": "country",
+          "required": true,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "facebook",
+      "parent": "url",
+      "label": "Facebook",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": "https?://(www\\.)?facebook\\.com/.*",
+      "is_system": false
+    },
+    {
+      "type": "id_card",
+      "parent": "legal_document",
+      "label": "Identity card",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": false
+    },
+    {
+      "type": "billing_address",
+      "parent": "address",
+      "label": "Billing address",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": [
+        {
+          "key": "company_name",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "street",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        },
+        {
+          "key": "postal_code",
+          "input": "line",
+          "required": false,
+          "check": null,
+          "validation": "[A-Za-z0-9][A-Za-z0-9 -]{1,9}",
+          "options": null
+        },
+        {
+          "key": "country",
+          "input": "country",
+          "required": false,
+          "check": null,
+          "validation": null,
+          "options": null
+        }
+      ],
+      "validation": null,
+      "is_system": false
+    },
+    {
+      "type": "signature_pad",
+      "parent": null,
+      "label": "Signature pad",
+      "input": "signature",
+      "lane": "inline",
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": false
+    },
+    {
+      "type": "__proto__",
+      "parent": "text",
+      "label": "Proto row",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": false
+    },
+    {
+      "type": "123",
+      "parent": "text",
+      "label": "Numeric row",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": false
+    }
+  ],
   "cases": [
-    { "name": "text_anything", "type": "text", "value": "literally anything @#$", "valid": true },
-    { "name": "text_empty", "type": "text", "value": "", "valid": true },
-    { "name": "unknown_type_anything", "type": "some_future_type", "value": "whatever", "valid": true },
-
-    { "name": "email_ok", "type": "email", "value": "a@b.co", "valid": true },
-    { "name": "email_ok_dotted", "type": "email", "value": "x.y+tag@sub.example.io", "valid": true },
-    { "name": "email_empty_ok", "type": "email", "value": "", "valid": true },
-    { "name": "email_no_tld", "type": "email", "value": "a@b", "valid": false },
-    { "name": "email_space", "type": "email", "value": "a b@c.d", "valid": false },
-    { "name": "email_no_local", "type": "email", "value": "@b.co", "valid": false },
-    { "name": "email_no_at", "type": "email", "value": "abc.co", "valid": false },
-
-    { "name": "phone_intl_spaced", "type": "phone", "value": "+31 6-1234 5678", "valid": true },
-    { "name": "phone_local", "type": "phone", "value": "0612345678", "valid": true },
-    { "name": "phone_parens_dot", "type": "phone", "value": "(020) 123.4567", "valid": true },
-    { "name": "phone_min4", "type": "phone", "value": "1234", "valid": true },
-    { "name": "phone_empty_ok", "type": "phone", "value": "", "valid": true },
-    { "name": "phone_too_short", "type": "phone", "value": "12", "valid": false },
-    { "name": "phone_letters", "type": "phone", "value": "abc", "valid": false },
-    { "name": "phone_too_long", "type": "phone", "value": "1234567890123456", "valid": false },
-    { "name": "phone_plus_mid", "type": "phone", "value": "12+34", "valid": false },
-
-    { "name": "url_bare_host", "type": "url", "value": "allme.fyi", "valid": true },
-    { "name": "url_full_path_query", "type": "url", "value": "https://x.io/p?q=1", "valid": true },
-    { "name": "url_http", "type": "url", "value": "http://sub.example.com/a", "valid": true },
-    { "name": "url_empty_ok", "type": "url", "value": "", "valid": true },
-    { "name": "url_scheme_only", "type": "url", "value": "http://", "valid": false },
-    { "name": "url_space", "type": "url", "value": "hello world", "valid": false },
-    { "name": "url_no_dot", "type": "url", "value": "nodot", "valid": false },
-
-    { "name": "date_ok", "type": "date", "value": "2026-02-28", "valid": true },
-    { "name": "date_leap_ok", "type": "date", "value": "2024-02-29", "valid": true },
-    { "name": "date_empty_ok", "type": "date", "value": "", "valid": true },
-    { "name": "date_non_leap_feb29", "type": "date", "value": "2026-02-29", "valid": false },
-    { "name": "date_bad_month", "type": "date", "value": "2026-13-01", "valid": false },
-    { "name": "date_month_zero", "type": "date", "value": "2026-00-10", "valid": false },
-    { "name": "date_day_zero", "type": "date", "value": "2026-01-00", "valid": false },
-    { "name": "date_day_32", "type": "date", "value": "2026-01-32", "valid": false },
-    { "name": "date_unpadded", "type": "date", "value": "2026-2-1", "valid": false },
-    { "name": "date_apr31", "type": "date", "value": "2026-04-31", "valid": false },
-    { "name": "dob_ok", "type": "date_of_birth", "value": "1990-06-15", "valid": true },
-    { "name": "dob_bad", "type": "date_of_birth", "value": "1990-6-15", "valid": false },
-
-    { "name": "gender_female", "type": "gender", "value": "Female", "valid": true },
-    { "name": "gender_nonbinary", "type": "gender", "value": "Non-binary", "valid": true },
-    { "name": "gender_pnts", "type": "gender", "value": "Prefer not to say", "valid": true },
-    { "name": "gender_empty_ok", "type": "gender", "value": "", "valid": true },
-    { "name": "gender_lowercase", "type": "gender", "value": "female", "valid": false },
-    { "name": "gender_other", "type": "gender", "value": "X", "valid": false },
-
-    { "name": "address_partial_ok", "type": "address", "value": "{\"city\":\"Utrecht\"}", "valid": true },
-    { "name": "address_full_ok", "type": "address", "value": "{\"street\":\"Main\",\"building_number\":\"12\",\"affix\":\"A\",\"city\":\"Utrecht\",\"postal_code\":\"3511 AB\",\"state\":\"UT\",\"country\":\"NL\"}", "valid": true },
-    { "name": "address_empty_subfield_ok", "type": "address", "value": "{\"city\":\"\",\"street\":\"Main\"}", "valid": true },
-    { "name": "address_empty_object_ok", "type": "address", "value": "{}", "valid": true },
-    { "name": "address_empty_value_ok", "type": "address", "value": "", "valid": true },
-    { "name": "address_unknown_key", "type": "address", "value": "{\"foo\":\"x\"}", "valid": false },
-    { "name": "address_non_string_value", "type": "address", "value": "{\"city\":5}", "valid": false },
-    { "name": "address_not_object", "type": "address", "value": "\"abc\"", "valid": false },
-    { "name": "address_array", "type": "address", "value": "[\"a\"]", "valid": false },
-    { "name": "address_bad_postal", "type": "address", "value": "{\"postal_code\":\"###\"}", "valid": false },
-    { "name": "address_good_postal_uk", "type": "address", "value": "{\"postal_code\":\"EC1A 1BB\"}", "valid": true },
-
-    { "name": "cc_cvc3_ok", "type": "creditcard", "value": "{\"cvc\":\"123\"}", "valid": true },
-    { "name": "cc_cvc4_ok", "type": "creditcard", "value": "{\"cvc\":\"1234\"}", "valid": true },
-    { "name": "cc_cvc_too_short", "type": "creditcard", "value": "{\"cvc\":\"12\"}", "valid": false },
-    { "name": "cc_cvc_letters", "type": "creditcard", "value": "{\"cvc\":\"12a\"}", "valid": false },
-    { "name": "cc_number_ok_luhn", "type": "creditcard", "value": "{\"number\":\"4111111111111111\"}", "valid": true },
-    { "name": "cc_number_spaced_ok", "type": "creditcard", "value": "{\"number\":\"4111 1111 1111 1111\"}", "valid": true },
-    { "name": "cc_number_luhn_fail", "type": "creditcard", "value": "{\"number\":\"4111111111111112\"}", "valid": false },
-    { "name": "cc_number_too_short", "type": "creditcard", "value": "{\"number\":\"12345\"}", "valid": false },
-    { "name": "cc_expiry_mmyy_ok", "type": "creditcard", "value": "{\"expiry\":\"09/27\"}", "valid": true },
-    { "name": "cc_expiry_mmyyyy_ok", "type": "creditcard", "value": "{\"expiry\":\"09/2027\"}", "valid": true },
-    { "name": "cc_expiry_bad_month", "type": "creditcard", "value": "{\"expiry\":\"13/27\"}", "valid": false },
-    { "name": "cc_expiry_bad_sep", "type": "creditcard", "value": "{\"expiry\":\"9-27\"}", "valid": false },
-    { "name": "cc_name_any_ok", "type": "creditcard", "value": "{\"name\":\"A. Jansen\"}", "valid": true },
-    { "name": "cc_empty_subfields_ok", "type": "creditcard", "value": "{\"cvc\":\"\",\"number\":\"\"}", "valid": true },
-    { "name": "cc_unknown_key", "type": "creditcard", "value": "{\"pin\":\"1\"}", "valid": false },
-
-    { "name": "bank_swift8_ok", "type": "bank", "value": "{\"swift\":\"ABNANL2A\"}", "valid": true },
-    { "name": "bank_swift11_ok", "type": "bank", "value": "{\"swift\":\"ABNANL2A123\"}", "valid": true },
-    { "name": "bank_swift_short", "type": "bank", "value": "{\"swift\":\"ABC\"}", "valid": false },
-    { "name": "bank_swift_len7", "type": "bank", "value": "{\"swift\":\"ABNANL2\"}", "valid": false },
-    { "name": "bank_routing_ok", "type": "bank", "value": "{\"routing_number\":\"021000021\"}", "valid": true },
-    { "name": "bank_routing_short", "type": "bank", "value": "{\"routing_number\":\"12345\"}", "valid": false },
-    { "name": "bank_account_iban_ok", "type": "bank", "value": "{\"account_number\":\"NL91ABNA0417164300\"}", "valid": true },
-    { "name": "bank_account_bad", "type": "bank", "value": "{\"account_number\":\"!!\"}", "valid": false },
-    { "name": "bank_holder_any_ok", "type": "bank", "value": "{\"account_holder\":\"ING Bank N.V.\"}", "valid": true },
-    { "name": "bank_unknown_key", "type": "bank", "value": "{\"iban_x\":\"1\"}", "valid": false },
-
-    { "name": "doc_size_int_ok", "type": "document", "value": "{\"size\":42,\"name\":\"a\"}", "valid": true },
-    { "name": "doc_size_string_bad", "type": "document", "value": "{\"size\":\"42\"}", "valid": false },
-    { "name": "doc_mime_ok", "type": "document", "value": "{\"mime_type\":\"image/jpeg\"}", "valid": true },
-    { "name": "doc_mime_bad", "type": "document", "value": "{\"mime_type\":\"image\"}", "valid": false },
-    { "name": "doc_unknown_key", "type": "document", "value": "{\"x\":1}", "valid": false },
-    { "name": "doc_empty_ok", "type": "document", "value": "", "valid": true },
-
-    { "name": "legaldoc_size_int_ok", "type": "legal_document", "value": "{\"size\":42,\"expiry_date\":\"2030-01-01\"}", "valid": true },
-    { "name": "legaldoc_expiry_bad", "type": "legal_document", "value": "{\"expiry_date\":\"2030-13-01\"}", "valid": false },
-    { "name": "legaldoc_docnum_any_ok", "type": "legal_document", "value": "{\"document_number\":\"AB-123/x\"}", "valid": true },
-    { "name": "legaldoc_unknown_key", "type": "legal_document", "value": "{\"foo\":\"x\"}", "valid": false },
-
-    { "name": "number_int_ok", "type": "number", "value": "3", "valid": true },
-    { "name": "number_neg_float_ok", "type": "number", "value": "-2.5", "valid": true },
-    { "name": "number_empty_ok", "type": "number", "value": "", "valid": true },
-    { "name": "number_letters_bad", "type": "number", "value": "abc", "valid": false },
-    { "name": "number_trailing_bad", "type": "number", "value": "3a", "valid": false },
-
-    { "name": "integer_pos_ok", "type": "integer", "value": "3", "valid": true },
-    { "name": "integer_neg_ok", "type": "integer", "value": "-42", "valid": true },
-    { "name": "integer_zero_ok", "type": "integer", "value": "0", "valid": true },
-    { "name": "integer_empty_ok", "type": "integer", "value": "", "valid": true },
-    { "name": "integer_decimal_bad", "type": "integer", "value": "1.5", "valid": false },
-    { "name": "integer_letters_bad", "type": "integer", "value": "abc", "valid": false },
-    { "name": "integer_trailing_bad", "type": "integer", "value": "3a", "valid": false },
-    { "name": "integer_exponent_bad", "type": "integer", "value": "1e3", "valid": false },
-    { "name": "integer_unicode_digits_bad", "type": "integer", "value": "١٢٣", "valid": false },
-
-    { "name": "decimal_full_ok", "type": "decimal", "value": "12345678.90", "valid": true },
-    { "name": "decimal_int_ok", "type": "decimal", "value": "100", "valid": true },
-    { "name": "decimal_one_place_ok", "type": "decimal", "value": "1.5", "valid": true },
-    { "name": "decimal_neg_ok", "type": "decimal", "value": "-12.34", "valid": true },
-    { "name": "decimal_empty_ok", "type": "decimal", "value": "", "valid": true },
-    { "name": "decimal_scale_bad", "type": "decimal", "value": "1234567890.123", "valid": false },
-    { "name": "decimal_precision_bad", "type": "decimal", "value": "12345678901.2", "valid": false },
-    { "name": "decimal_letters_bad", "type": "decimal", "value": "abc", "valid": false },
-    { "name": "decimal_unicode_digits_bad", "type": "decimal", "value": "١٢.٣٤", "valid": false },
-
-    { "name": "float_int_ok", "type": "float", "value": "3", "valid": true },
-    { "name": "float_decimal_ok", "type": "float", "value": "1.5", "valid": true },
-    { "name": "float_exponent_ok", "type": "float", "value": "1e3", "valid": true },
-    { "name": "float_exponent_upper_ok", "type": "float", "value": "1E3", "valid": true },
-    { "name": "float_exponent_signed_ok", "type": "float", "value": "1.5e-3", "valid": true },
-    { "name": "float_neg_ok", "type": "float", "value": "-2.5", "valid": true },
-    { "name": "float_empty_ok", "type": "float", "value": "", "valid": true },
-    { "name": "float_letters_bad", "type": "float", "value": "abc", "valid": false },
-    { "name": "float_trailing_bad", "type": "float", "value": "3a", "valid": false },
-    { "name": "float_hex_bad", "type": "float", "value": "0x10", "valid": false },
-    { "name": "float_infinity_word_bad", "type": "float", "value": "Infinity", "valid": false },
-    { "name": "float_nan_word_bad", "type": "float", "value": "NaN", "valid": false },
-    { "name": "float_leading_dot_bad", "type": "float", "value": ".5", "valid": false },
-    { "name": "float_trailing_dot_bad", "type": "float", "value": "5.", "valid": false },
-    { "name": "float_unicode_digits_bad", "type": "float", "value": "١٢.٣", "valid": false },
-
-    { "name": "boolean_true_ok", "type": "boolean", "value": "true", "valid": true },
-    { "name": "boolean_false_ok", "type": "boolean", "value": "false", "valid": true },
-    { "name": "boolean_empty_ok", "type": "boolean", "value": "", "valid": true },
-    { "name": "boolean_yes_bad", "type": "boolean", "value": "yes", "valid": false },
-    { "name": "boolean_one_bad", "type": "boolean", "value": "1", "valid": false },
-
-    { "name": "country_us_ok", "type": "country", "value": "US", "valid": true },
-    { "name": "country_nl_ok", "type": "country", "value": "NL", "valid": true },
-    { "name": "country_empty_ok", "type": "country", "value": "", "valid": true },
-    { "name": "country_lowercase_bad", "type": "country", "value": "us", "valid": false },
-    { "name": "country_name_bad", "type": "country", "value": "United States", "valid": false },
-    { "name": "country_three_bad", "type": "country", "value": "USA", "valid": false },
-    { "name": "nationality_nl_ok", "type": "nationality", "value": "NL", "valid": true },
-    { "name": "nationality_empty_ok", "type": "nationality", "value": "", "valid": true },
-    { "name": "nationality_bad", "type": "nationality", "value": "Dutch", "valid": false },
-
-    { "name": "address_country_code_ok", "type": "address", "value": "{\"country\":\"US\"}", "valid": true },
-    { "name": "address_country_name_bad", "type": "address", "value": "{\"country\":\"United States\"}", "valid": false },
-    { "name": "address_country_unknown_bad", "type": "address", "value": "{\"country\":\"XX\"}", "valid": false },
-    { "name": "address_state_code_ok", "type": "address", "value": "{\"country\":\"US\",\"state\":\"CA\"}", "valid": true },
-    { "name": "address_state_name_bad", "type": "address", "value": "{\"state\":\"California\"}", "valid": false },
-    { "name": "address_country_empty_ok", "type": "address", "value": "{\"country\":\"\",\"city\":\"X\"}", "valid": true }
-  ]
+    {
+      "name": "text_anything",
+      "type": "text",
+      "value": "literally anything @#$",
+      "valid": true
+    },
+    {
+      "name": "text_empty",
+      "type": "text",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "unknown_type_anything",
+      "type": "some_future_type",
+      "value": "whatever",
+      "valid": true
+    },
+    {
+      "name": "email_ok",
+      "type": "email",
+      "value": "a@b.co",
+      "valid": true
+    },
+    {
+      "name": "email_ok_dotted",
+      "type": "email",
+      "value": "x.y+tag@sub.example.io",
+      "valid": true
+    },
+    {
+      "name": "email_empty_ok",
+      "type": "email",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "email_no_tld",
+      "type": "email",
+      "value": "a@b",
+      "valid": false
+    },
+    {
+      "name": "email_space",
+      "type": "email",
+      "value": "a b@c.d",
+      "valid": false
+    },
+    {
+      "name": "email_no_local",
+      "type": "email",
+      "value": "@b.co",
+      "valid": false
+    },
+    {
+      "name": "email_no_at",
+      "type": "email",
+      "value": "abc.co",
+      "valid": false
+    },
+    {
+      "name": "phone_intl_spaced",
+      "type": "phone",
+      "value": "+31 6-1234 5678",
+      "valid": true
+    },
+    {
+      "name": "phone_local",
+      "type": "phone",
+      "value": "0612345678",
+      "valid": true
+    },
+    {
+      "name": "phone_parens_dot",
+      "type": "phone",
+      "value": "(020) 123.4567",
+      "valid": true
+    },
+    {
+      "name": "phone_min4",
+      "type": "phone",
+      "value": "1234",
+      "valid": true
+    },
+    {
+      "name": "phone_empty_ok",
+      "type": "phone",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "phone_too_short",
+      "type": "phone",
+      "value": "12",
+      "valid": false
+    },
+    {
+      "name": "phone_letters",
+      "type": "phone",
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "name": "phone_too_long",
+      "type": "phone",
+      "value": "1234567890123456",
+      "valid": false
+    },
+    {
+      "name": "phone_plus_mid",
+      "type": "phone",
+      "value": "12+34",
+      "valid": false
+    },
+    {
+      "name": "url_bare_host",
+      "type": "url",
+      "value": "allme.fyi",
+      "valid": true
+    },
+    {
+      "name": "url_full_path_query",
+      "type": "url",
+      "value": "https://x.io/p?q=1",
+      "valid": true
+    },
+    {
+      "name": "url_http",
+      "type": "url",
+      "value": "http://sub.example.com/a",
+      "valid": true
+    },
+    {
+      "name": "url_empty_ok",
+      "type": "url",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "url_scheme_only",
+      "type": "url",
+      "value": "http://",
+      "valid": false
+    },
+    {
+      "name": "url_space",
+      "type": "url",
+      "value": "hello world",
+      "valid": false
+    },
+    {
+      "name": "url_no_dot",
+      "type": "url",
+      "value": "nodot",
+      "valid": false
+    },
+    {
+      "name": "date_ok",
+      "type": "date",
+      "value": "2026-02-28",
+      "valid": true
+    },
+    {
+      "name": "date_leap_ok",
+      "type": "date",
+      "value": "2024-02-29",
+      "valid": true
+    },
+    {
+      "name": "date_empty_ok",
+      "type": "date",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "date_non_leap_feb29",
+      "type": "date",
+      "value": "2026-02-29",
+      "valid": false
+    },
+    {
+      "name": "date_bad_month",
+      "type": "date",
+      "value": "2026-13-01",
+      "valid": false
+    },
+    {
+      "name": "date_month_zero",
+      "type": "date",
+      "value": "2026-00-10",
+      "valid": false
+    },
+    {
+      "name": "date_day_zero",
+      "type": "date",
+      "value": "2026-01-00",
+      "valid": false
+    },
+    {
+      "name": "date_day_32",
+      "type": "date",
+      "value": "2026-01-32",
+      "valid": false
+    },
+    {
+      "name": "date_unpadded",
+      "type": "date",
+      "value": "2026-2-1",
+      "valid": false
+    },
+    {
+      "name": "date_apr31",
+      "type": "date",
+      "value": "2026-04-31",
+      "valid": false
+    },
+    {
+      "name": "dob_ok",
+      "type": "date_of_birth",
+      "value": "1990-06-15",
+      "valid": true
+    },
+    {
+      "name": "dob_bad",
+      "type": "date_of_birth",
+      "value": "1990-6-15",
+      "valid": false
+    },
+    {
+      "name": "gender_female",
+      "type": "gender",
+      "value": "Female",
+      "valid": true
+    },
+    {
+      "name": "gender_nonbinary",
+      "type": "gender",
+      "value": "Non-binary",
+      "valid": true
+    },
+    {
+      "name": "gender_pnts",
+      "type": "gender",
+      "value": "Prefer not to say",
+      "valid": true
+    },
+    {
+      "name": "gender_empty_ok",
+      "type": "gender",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "gender_lowercase",
+      "type": "gender",
+      "value": "female",
+      "valid": false
+    },
+    {
+      "name": "gender_other",
+      "type": "gender",
+      "value": "X",
+      "valid": false
+    },
+    {
+      "name": "address_partial_ok",
+      "type": "address",
+      "value": "{\"city\":\"Utrecht\"}",
+      "valid": true
+    },
+    {
+      "name": "address_full_ok",
+      "type": "address",
+      "value": "{\"street\":\"Main\",\"building_number\":\"12\",\"affix\":\"A\",\"city\":\"Utrecht\",\"postal_code\":\"3511 AB\",\"state\":\"UT\",\"country\":\"NL\"}",
+      "valid": true
+    },
+    {
+      "name": "address_empty_subfield_ok",
+      "type": "address",
+      "value": "{\"city\":\"\",\"street\":\"Main\"}",
+      "valid": true
+    },
+    {
+      "name": "address_empty_object_ok",
+      "type": "address",
+      "value": "{}",
+      "valid": true
+    },
+    {
+      "name": "address_empty_value_ok",
+      "type": "address",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "address_unknown_key",
+      "type": "address",
+      "value": "{\"foo\":\"x\"}",
+      "valid": false
+    },
+    {
+      "name": "address_non_string_value",
+      "type": "address",
+      "value": "{\"city\":5}",
+      "valid": false
+    },
+    {
+      "name": "address_not_object",
+      "type": "address",
+      "value": "\"abc\"",
+      "valid": false
+    },
+    {
+      "name": "address_array",
+      "type": "address",
+      "value": "[\"a\"]",
+      "valid": false
+    },
+    {
+      "name": "address_bad_postal",
+      "type": "address",
+      "value": "{\"postal_code\":\"###\"}",
+      "valid": false
+    },
+    {
+      "name": "address_good_postal_uk",
+      "type": "address",
+      "value": "{\"postal_code\":\"EC1A 1BB\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_cvc3_ok",
+      "type": "creditcard",
+      "value": "{\"cvc\":\"123\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_cvc4_ok",
+      "type": "creditcard",
+      "value": "{\"cvc\":\"1234\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_cvc_too_short",
+      "type": "creditcard",
+      "value": "{\"cvc\":\"12\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_cvc_letters",
+      "type": "creditcard",
+      "value": "{\"cvc\":\"12a\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_number_ok_luhn",
+      "type": "creditcard",
+      "value": "{\"number\":\"4111111111111111\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_number_spaced_ok",
+      "type": "creditcard",
+      "value": "{\"number\":\"4111 1111 1111 1111\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_number_luhn_fail",
+      "type": "creditcard",
+      "value": "{\"number\":\"4111111111111112\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_number_too_short",
+      "type": "creditcard",
+      "value": "{\"number\":\"12345\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_expiry_mmyy_ok",
+      "type": "creditcard",
+      "value": "{\"expiry\":\"09/27\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_expiry_mmyyyy_ok",
+      "type": "creditcard",
+      "value": "{\"expiry\":\"09/2027\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_expiry_bad_month",
+      "type": "creditcard",
+      "value": "{\"expiry\":\"13/27\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_expiry_bad_sep",
+      "type": "creditcard",
+      "value": "{\"expiry\":\"9-27\"}",
+      "valid": false
+    },
+    {
+      "name": "cc_name_any_ok",
+      "type": "creditcard",
+      "value": "{\"name\":\"A. Jansen\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_empty_subfields_ok",
+      "type": "creditcard",
+      "value": "{\"cvc\":\"\",\"number\":\"\"}",
+      "valid": true
+    },
+    {
+      "name": "cc_unknown_key",
+      "type": "creditcard",
+      "value": "{\"pin\":\"1\"}",
+      "valid": false
+    },
+    {
+      "name": "bank_swift8_ok",
+      "type": "bank",
+      "value": "{\"swift\":\"ABNANL2A\"}",
+      "valid": true
+    },
+    {
+      "name": "bank_swift11_ok",
+      "type": "bank",
+      "value": "{\"swift\":\"ABNANL2A123\"}",
+      "valid": true
+    },
+    {
+      "name": "bank_swift_short",
+      "type": "bank",
+      "value": "{\"swift\":\"ABC\"}",
+      "valid": false
+    },
+    {
+      "name": "bank_swift_len7",
+      "type": "bank",
+      "value": "{\"swift\":\"ABNANL2\"}",
+      "valid": false
+    },
+    {
+      "name": "bank_routing_ok",
+      "type": "bank",
+      "value": "{\"routing_number\":\"021000021\"}",
+      "valid": true
+    },
+    {
+      "name": "bank_routing_short",
+      "type": "bank",
+      "value": "{\"routing_number\":\"12345\"}",
+      "valid": false
+    },
+    {
+      "name": "bank_account_iban_ok",
+      "type": "bank",
+      "value": "{\"account_number\":\"NL91ABNA0417164300\"}",
+      "valid": true
+    },
+    {
+      "name": "bank_account_bad",
+      "type": "bank",
+      "value": "{\"account_number\":\"!!\"}",
+      "valid": false
+    },
+    {
+      "name": "bank_holder_any_ok",
+      "type": "bank",
+      "value": "{\"account_holder\":\"ING Bank N.V.\"}",
+      "valid": true
+    },
+    {
+      "name": "bank_unknown_key",
+      "type": "bank",
+      "value": "{\"iban_x\":\"1\"}",
+      "valid": false
+    },
+    {
+      "name": "doc_size_int_ok",
+      "type": "document",
+      "value": "{\"size\":42,\"name\":\"a\"}",
+      "valid": true
+    },
+    {
+      "name": "doc_size_string_bad",
+      "type": "document",
+      "value": "{\"size\":\"42\"}",
+      "valid": false
+    },
+    {
+      "name": "doc_mime_ok",
+      "type": "document",
+      "value": "{\"mime_type\":\"image/jpeg\"}",
+      "valid": true
+    },
+    {
+      "name": "doc_mime_bad",
+      "type": "document",
+      "value": "{\"mime_type\":\"image\"}",
+      "valid": false
+    },
+    {
+      "name": "doc_unknown_key",
+      "type": "document",
+      "value": "{\"x\":1}",
+      "valid": false
+    },
+    {
+      "name": "doc_empty_ok",
+      "type": "document",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "legaldoc_size_int_ok",
+      "type": "legal_document",
+      "value": "{\"size\":42,\"expiry_date\":\"2030-01-01\"}",
+      "valid": true
+    },
+    {
+      "name": "legaldoc_expiry_bad",
+      "type": "legal_document",
+      "value": "{\"expiry_date\":\"2030-13-01\"}",
+      "valid": false
+    },
+    {
+      "name": "legaldoc_docnum_any_ok",
+      "type": "legal_document",
+      "value": "{\"document_number\":\"AB-123/x\"}",
+      "valid": true
+    },
+    {
+      "name": "legaldoc_unknown_key",
+      "type": "legal_document",
+      "value": "{\"foo\":\"x\"}",
+      "valid": false
+    },
+    {
+      "name": "number_int_ok",
+      "type": "number",
+      "value": "3",
+      "valid": true
+    },
+    {
+      "name": "number_neg_float_ok",
+      "type": "number",
+      "value": "-2.5",
+      "valid": true
+    },
+    {
+      "name": "number_empty_ok",
+      "type": "number",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "number_letters_bad",
+      "type": "number",
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "name": "number_trailing_bad",
+      "type": "number",
+      "value": "3a",
+      "valid": false
+    },
+    {
+      "name": "integer_pos_ok",
+      "type": "integer",
+      "value": "3",
+      "valid": true
+    },
+    {
+      "name": "integer_neg_ok",
+      "type": "integer",
+      "value": "-42",
+      "valid": true
+    },
+    {
+      "name": "integer_zero_ok",
+      "type": "integer",
+      "value": "0",
+      "valid": true
+    },
+    {
+      "name": "integer_empty_ok",
+      "type": "integer",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "integer_decimal_bad",
+      "type": "integer",
+      "value": "1.5",
+      "valid": false
+    },
+    {
+      "name": "integer_letters_bad",
+      "type": "integer",
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "name": "integer_trailing_bad",
+      "type": "integer",
+      "value": "3a",
+      "valid": false
+    },
+    {
+      "name": "integer_exponent_bad",
+      "type": "integer",
+      "value": "1e3",
+      "valid": false
+    },
+    {
+      "name": "integer_unicode_digits_bad",
+      "type": "integer",
+      "value": "١٢٣",
+      "valid": false
+    },
+    {
+      "name": "decimal_full_ok",
+      "type": "decimal",
+      "value": "12345678.90",
+      "valid": true
+    },
+    {
+      "name": "decimal_int_ok",
+      "type": "decimal",
+      "value": "100",
+      "valid": true
+    },
+    {
+      "name": "decimal_one_place_ok",
+      "type": "decimal",
+      "value": "1.5",
+      "valid": true
+    },
+    {
+      "name": "decimal_neg_ok",
+      "type": "decimal",
+      "value": "-12.34",
+      "valid": true
+    },
+    {
+      "name": "decimal_empty_ok",
+      "type": "decimal",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "decimal_scale_bad",
+      "type": "decimal",
+      "value": "1234567890.123",
+      "valid": false
+    },
+    {
+      "name": "decimal_precision_bad",
+      "type": "decimal",
+      "value": "12345678901.2",
+      "valid": false
+    },
+    {
+      "name": "decimal_letters_bad",
+      "type": "decimal",
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "name": "decimal_unicode_digits_bad",
+      "type": "decimal",
+      "value": "١٢.٣٤",
+      "valid": false
+    },
+    {
+      "name": "float_int_ok",
+      "type": "float",
+      "value": "3",
+      "valid": true
+    },
+    {
+      "name": "float_decimal_ok",
+      "type": "float",
+      "value": "1.5",
+      "valid": true
+    },
+    {
+      "name": "float_exponent_ok",
+      "type": "float",
+      "value": "1e3",
+      "valid": true
+    },
+    {
+      "name": "float_exponent_upper_ok",
+      "type": "float",
+      "value": "1E3",
+      "valid": true
+    },
+    {
+      "name": "float_exponent_signed_ok",
+      "type": "float",
+      "value": "1.5e-3",
+      "valid": true
+    },
+    {
+      "name": "float_neg_ok",
+      "type": "float",
+      "value": "-2.5",
+      "valid": true
+    },
+    {
+      "name": "float_empty_ok",
+      "type": "float",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "float_letters_bad",
+      "type": "float",
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "name": "float_trailing_bad",
+      "type": "float",
+      "value": "3a",
+      "valid": false
+    },
+    {
+      "name": "float_hex_bad",
+      "type": "float",
+      "value": "0x10",
+      "valid": false
+    },
+    {
+      "name": "float_infinity_word_bad",
+      "type": "float",
+      "value": "Infinity",
+      "valid": false
+    },
+    {
+      "name": "float_nan_word_bad",
+      "type": "float",
+      "value": "NaN",
+      "valid": false
+    },
+    {
+      "name": "float_leading_dot_bad",
+      "type": "float",
+      "value": ".5",
+      "valid": false
+    },
+    {
+      "name": "float_trailing_dot_bad",
+      "type": "float",
+      "value": "5.",
+      "valid": false
+    },
+    {
+      "name": "float_unicode_digits_bad",
+      "type": "float",
+      "value": "١٢.٣",
+      "valid": false
+    },
+    {
+      "name": "country_us_ok",
+      "type": "country",
+      "value": "US",
+      "valid": true
+    },
+    {
+      "name": "country_nl_ok",
+      "type": "country",
+      "value": "NL",
+      "valid": true
+    },
+    {
+      "name": "country_empty_ok",
+      "type": "country",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "country_lowercase_bad",
+      "type": "country",
+      "value": "us",
+      "valid": false
+    },
+    {
+      "name": "country_name_bad",
+      "type": "country",
+      "value": "United States",
+      "valid": false
+    },
+    {
+      "name": "country_three_bad",
+      "type": "country",
+      "value": "USA",
+      "valid": false
+    },
+    {
+      "name": "nationality_nl_ok",
+      "type": "nationality",
+      "value": "NL",
+      "valid": true
+    },
+    {
+      "name": "nationality_empty_ok",
+      "type": "nationality",
+      "value": "",
+      "valid": true
+    },
+    {
+      "name": "nationality_bad",
+      "type": "nationality",
+      "value": "Dutch",
+      "valid": false
+    },
+    {
+      "name": "address_country_code_ok",
+      "type": "address",
+      "value": "{\"country\":\"US\"}",
+      "valid": true
+    },
+    {
+      "name": "address_country_name_bad",
+      "type": "address",
+      "value": "{\"country\":\"United States\"}",
+      "valid": false
+    },
+    {
+      "name": "address_country_unknown_bad",
+      "type": "address",
+      "value": "{\"country\":\"XX\"}",
+      "valid": false
+    },
+    {
+      "name": "address_state_code_ok",
+      "type": "address",
+      "value": "{\"country\":\"US\",\"state\":\"CA\"}",
+      "valid": true
+    },
+    {
+      "name": "address_state_name_bad",
+      "type": "address",
+      "value": "{\"state\":\"California\"}",
+      "valid": false
+    },
+    {
+      "name": "address_country_empty_ok",
+      "type": "address",
+      "value": "{\"country\":\"\",\"city\":\"X\"}",
+      "valid": true
+    },
+    {
+      "name": "facebook_full_url_ok",
+      "type": "facebook",
+      "value": "https://www.facebook.com/me",
+      "valid": true
+    },
+    {
+      "name": "facebook_bare_host_ok",
+      "type": "facebook",
+      "value": "facebook.com/me",
+      "valid": true
+    },
+    {
+      "name": "facebook_other_host_bad",
+      "type": "facebook",
+      "value": "https://example.com/x",
+      "valid": false
+    },
+    {
+      "name": "facebook_not_a_url_bad",
+      "type": "facebook",
+      "value": "not a url",
+      "valid": false
+    },
+    {
+      "name": "id_card_inherits_legal_document_fields",
+      "type": "id_card",
+      "value": "{\"document_number\":\"AB-1\"}",
+      "valid": true
+    },
+    {
+      "name": "id_card_unknown_key",
+      "type": "id_card",
+      "value": "{\"foo\":\"x\"}",
+      "valid": false
+    },
+    {
+      "name": "billing_address_replaced_fields_ok",
+      "type": "billing_address",
+      "value": "{\"company_name\":\"Acme\",\"country\":\"NL\"}",
+      "valid": true
+    },
+    {
+      "name": "billing_address_replaced_fields_drops_state",
+      "type": "billing_address",
+      "value": "{\"state\":\"CA\"}",
+      "valid": false
+    },
+    {
+      "name": "unimplemented_input_accepts_anything",
+      "type": "signature_pad",
+      "value": "anything",
+      "valid": true
+    },
+    {
+      "name": "passport_pages_envelope_ok",
+      "type": "passport",
+      "value": "{\"pages\":[{\"label\":\"front\",\"file\":\"a.jpg\",\"original_name\":\"front.jpg\",\"mime_type\":\"image/jpeg\",\"size\":1024}],\"document_number\":\"X1\",\"expiry_date\":\"2030-01-01\",\"issuing_country\":\"NL\"}",
+      "valid": true
+    },
+    {
+      "name": "passport_pages_minimal_ok",
+      "type": "passport",
+      "value": "{\"pages\":[{\"file\":\"front.jpg\",\"label\":\"front\"}],\"issuing_country\":\"NL\"}",
+      "valid": true
+    },
+    {
+      "name": "passport_pages_scalar_bad",
+      "type": "passport",
+      "value": "{\"pages\":\"nonsense\",\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_element_not_object_bad",
+      "type": "passport",
+      "value": "{\"pages\":[\"front.jpg\"],\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_unknown_member_bad",
+      "type": "passport",
+      "value": "{\"pages\":[{\"file\":\"a.jpg\",\"rotation\":\"90\"}],\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_bad_label_bad",
+      "type": "passport",
+      "value": "{\"pages\":[{\"file\":\"a.jpg\",\"label\":\"middle\"}],\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_no_file_bad",
+      "type": "passport",
+      "value": "{\"pages\":[{\"label\":\"front\"}],\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_size_not_int_bad",
+      "type": "passport",
+      "value": "{\"pages\":[{\"file\":\"a.jpg\",\"size\":\"1024\"}],\"issuing_country\":\"NL\"}",
+      "valid": false
+    },
+    {
+      "name": "passport_pages_empty_list_ok",
+      "type": "passport",
+      "value": "{\"pages\":[],\"issuing_country\":\"NL\"}",
+      "valid": true
+    },
+    {
+      "name": "passport_missing_required_issuing_country_bad",
+      "type": "passport",
+      "value": "{\"pages\":[{\"file\":\"a.jpg\"}]}",
+      "valid": false
+    },
+    {
+      "name": "address_empty_array_bad",
+      "type": "address",
+      "value": "[]",
+      "valid": false
+    },
+    {
+      "name": "multilist_empty_object_bad",
+      "type": "multiselect",
+      "value": "{}",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": false
+    },
+    {
+      "name": "multilist_empty_list_ok",
+      "type": "multiselect",
+      "value": "[]",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": true
+    },
+    {
+      "name": "multilist_object_bad",
+      "type": "multiselect",
+      "value": "{\"a\":\"Yes\"}",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": false
+    },
+    {
+      "name": "proto_named_row_validates",
+      "type": "__proto__",
+      "value": "anything at all",
+      "valid": true
+    },
+    {
+      "name": "numeric_named_row_validates",
+      "type": "123",
+      "value": "anything at all",
+      "valid": true
+    },
+    {
+      "name": "constructor_is_not_a_type",
+      "type": "constructor",
+      "value": "anything at all",
+      "valid": true
+    },
+    {
+      "name": "gender_row_options_govern",
+      "type": "gender",
+      "value": "Male",
+      "valid": true
+    },
+    {
+      "name": "gender_row_options_beat_supplied",
+      "type": "gender",
+      "value": "Other",
+      "options": [
+        "Other"
+      ],
+      "valid": false
+    },
+    {
+      "name": "select_supplied_options_member_ok",
+      "type": "select",
+      "value": "Yes",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": true
+    },
+    {
+      "name": "select_supplied_options_non_member_bad",
+      "type": "select",
+      "value": "Maybe",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": false
+    },
+    {
+      "name": "select_without_any_options_bad",
+      "type": "select",
+      "value": "Yes",
+      "valid": false
+    },
+    {
+      "name": "multiselect_supplied_options_member_ok",
+      "type": "multiselect",
+      "value": "[\"Yes\"]",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": true
+    },
+    {
+      "name": "multiselect_supplied_options_non_member_bad",
+      "type": "multiselect",
+      "value": "[\"Maybe\"]",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "valid": false
+    },
+    {
+      "name": "multiselect_without_any_options_bad",
+      "type": "multiselect",
+      "value": "[\"Yes\"]",
+      "valid": false
+    }
+  ],
+  "resolve_cases": [
+    {
+      "name": "resolve_passport",
+      "type": "passport",
+      "resolved": {
+        "type": "passport",
+        "parent": "legal_document",
+        "label": "fieldtype_passport",
+        "is_system": true,
+        "known": true,
+        "input": "pages",
+        "lane": "document",
+        "check": null,
+        "options": null,
+        "fields": [
+          {
+            "key": "document_number",
+            "input": "line",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          },
+          {
+            "key": "expiry_date",
+            "input": "date",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          },
+          {
+            "key": "issuing_country",
+            "input": "country",
+            "required": true,
+            "check": null,
+            "validation": null,
+            "options": null
+          }
+        ],
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_id_card",
+      "type": "id_card",
+      "resolved": {
+        "type": "id_card",
+        "parent": "legal_document",
+        "label": "Identity card",
+        "is_system": false,
+        "known": true,
+        "input": "file",
+        "lane": "document",
+        "check": null,
+        "options": null,
+        "fields": [
+          {
+            "key": "document_number",
+            "input": "line",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          },
+          {
+            "key": "expiry_date",
+            "input": "date",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          }
+        ],
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_facebook",
+      "type": "facebook",
+      "resolved": {
+        "type": "facebook",
+        "parent": "url",
+        "label": "Facebook",
+        "is_system": false,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": "url",
+        "options": null,
+        "fields": null,
+        "validations": [
+          "https?://(www\\.)?facebook\\.com/.*"
+        ]
+      }
+    },
+    {
+      "name": "resolve_billing_address",
+      "type": "billing_address",
+      "resolved": {
+        "type": "billing_address",
+        "parent": "address",
+        "label": "Billing address",
+        "is_system": false,
+        "known": true,
+        "input": "composite",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": [
+          {
+            "key": "company_name",
+            "input": "line",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          },
+          {
+            "key": "street",
+            "input": "line",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          },
+          {
+            "key": "postal_code",
+            "input": "line",
+            "required": false,
+            "check": null,
+            "validation": "[A-Za-z0-9][A-Za-z0-9 -]{1,9}",
+            "options": null
+          },
+          {
+            "key": "country",
+            "input": "country",
+            "required": false,
+            "check": null,
+            "validation": null,
+            "options": null
+          }
+        ],
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_email",
+      "type": "email",
+      "resolved": {
+        "type": "email",
+        "parent": "text",
+        "label": "fieldtype_email",
+        "is_system": true,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": [
+          "[^\\s@]+@[^\\s@]+\\.[^\\s@]+"
+        ]
+      }
+    },
+    {
+      "name": "resolve_integer",
+      "type": "integer",
+      "resolved": {
+        "type": "integer",
+        "parent": "number",
+        "label": "fieldtype_integer",
+        "is_system": true,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": "integer",
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_signature_pad",
+      "type": "signature_pad",
+      "resolved": {
+        "type": "signature_pad",
+        "parent": null,
+        "label": "Signature pad",
+        "is_system": false,
+        "known": true,
+        "input": "signature",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_some_future_type",
+      "type": "some_future_type",
+      "resolved": {
+        "type": "some_future_type",
+        "parent": null,
+        "label": "some_future_type",
+        "is_system": false,
+        "known": false,
+        "input": null,
+        "lane": null,
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_select",
+      "type": "select",
+      "resolved": {
+        "type": "select",
+        "parent": null,
+        "label": "fieldtype_select",
+        "is_system": true,
+        "known": true,
+        "input": "list",
+        "lane": "inline",
+        "check": null,
+        "options": [],
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_gender",
+      "type": "gender",
+      "resolved": {
+        "type": "gender",
+        "parent": "text",
+        "label": "fieldtype_gender",
+        "is_system": true,
+        "known": true,
+        "input": "list",
+        "lane": "inline",
+        "check": null,
+        "options": [
+          "Male",
+          "Female",
+          "Non-binary",
+          "Prefer not to say"
+        ],
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_proto",
+      "type": "__proto__",
+      "resolved": {
+        "type": "__proto__",
+        "parent": "text",
+        "label": "Proto row",
+        "is_system": false,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_numeric_type",
+      "type": "123",
+      "resolved": {
+        "type": "123",
+        "parent": "text",
+        "label": "Numeric row",
+        "is_system": false,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_constructor",
+      "type": "constructor",
+      "resolved": {
+        "type": "constructor",
+        "parent": null,
+        "label": "constructor",
+        "is_system": false,
+        "known": false,
+        "input": null,
+        "lane": null,
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    }
+  ],
+  "accepts_cases": [
+    {
+      "name": "accepts_legal_document_by_passport",
+      "requested": "legal_document",
+      "actual": "passport",
+      "accepts": true
+    },
+    {
+      "name": "accepts_legal_document_by_id_card",
+      "requested": "legal_document",
+      "actual": "id_card",
+      "accepts": true
+    },
+    {
+      "name": "accepts_legal_document_by_legal_document",
+      "requested": "legal_document",
+      "actual": "legal_document",
+      "accepts": true
+    },
+    {
+      "name": "accepts_passport_by_legal_document",
+      "requested": "passport",
+      "actual": "legal_document",
+      "accepts": false
+    },
+    {
+      "name": "accepts_text_by_email",
+      "requested": "text",
+      "actual": "email",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_date_of_birth",
+      "requested": "text",
+      "actual": "date_of_birth",
+      "accepts": true
+    },
+    {
+      "name": "accepts_date_by_date_of_birth",
+      "requested": "date",
+      "actual": "date_of_birth",
+      "accepts": true
+    },
+    {
+      "name": "accepts_date_of_birth_by_date",
+      "requested": "date_of_birth",
+      "actual": "date",
+      "accepts": false
+    },
+    {
+      "name": "accepts_number_by_integer",
+      "requested": "number",
+      "actual": "integer",
+      "accepts": true
+    },
+    {
+      "name": "accepts_url_by_facebook",
+      "requested": "url",
+      "actual": "facebook",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_facebook",
+      "requested": "text",
+      "actual": "facebook",
+      "accepts": true
+    },
+    {
+      "name": "accepts_email_by_phone",
+      "requested": "email",
+      "actual": "phone",
+      "accepts": false
+    },
+    {
+      "name": "accepts_address_by_billing_address",
+      "requested": "address",
+      "actual": "billing_address",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_some_future_type",
+      "requested": "text",
+      "actual": "some_future_type",
+      "accepts": false
+    },
+    {
+      "name": "accepts_some_future_type_by_some_future_type",
+      "requested": "some_future_type",
+      "actual": "some_future_type",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_proto_named_row",
+      "requested": "text",
+      "actual": "__proto__",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_numeric_named_row",
+      "requested": "text",
+      "actual": "123",
+      "accepts": true
+    },
+    {
+      "name": "accepts_text_by_constructor",
+      "requested": "text",
+      "actual": "constructor",
+      "accepts": false
+    }
+  ],
+  "ordered_cases": [
+    {
+      "name": "ordered_whole_registry",
+      "types": [
+        "text",
+        "email",
+        "phone",
+        "url",
+        "gender",
+        "country",
+        "nationality",
+        "date",
+        "date_of_birth",
+        "number",
+        "integer",
+        "decimal",
+        "float",
+        "address",
+        "creditcard",
+        "bank",
+        "select",
+        "multiselect",
+        "photo",
+        "document",
+        "legal_document",
+        "passport",
+        "photo_id",
+        "drivers_license",
+        "facebook",
+        "id_card",
+        "billing_address",
+        "signature_pad",
+        "__proto__",
+        "123"
+      ],
+      "ordered": [
+        "address",
+        "billing_address",
+        "bank",
+        "creditcard",
+        "document",
+        "legal_document",
+        "drivers_license",
+        "passport",
+        "photo_id",
+        "id_card",
+        "multiselect",
+        "number",
+        "decimal",
+        "float",
+        "integer",
+        "photo",
+        "select",
+        "text",
+        "country",
+        "date",
+        "date_of_birth",
+        "email",
+        "gender",
+        "nationality",
+        "phone",
+        "url",
+        "facebook",
+        "123",
+        "__proto__",
+        "signature_pad"
+      ]
+    },
+    {
+      "name": "ordered_subset_keeps_the_tree",
+      "types": [
+        "url",
+        "text",
+        "facebook",
+        "email"
+      ],
+      "ordered": [
+        "text",
+        "email",
+        "url",
+        "facebook"
+      ]
+    },
+    {
+      "name": "ordered_unknown_type_sorts_last",
+      "types": [
+        "email",
+        "some_future_type",
+        "text"
+      ],
+      "ordered": [
+        "text",
+        "email",
+        "some_future_type"
+      ]
+    }
+  ],
+  "effective_type_cases": [
+    {
+      "name": "effective_date_of_birth",
+      "type": "date_of_birth",
+      "effective_type": "date"
+    },
+    {
+      "name": "effective_date",
+      "type": "date",
+      "effective_type": "date"
+    },
+    {
+      "name": "effective_integer",
+      "type": "integer",
+      "effective_type": "number"
+    },
+    {
+      "name": "effective_decimal",
+      "type": "decimal",
+      "effective_type": "number"
+    },
+    {
+      "name": "effective_number",
+      "type": "number",
+      "effective_type": "number"
+    },
+    {
+      "name": "effective_facebook",
+      "type": "facebook",
+      "effective_type": "facebook"
+    },
+    {
+      "name": "effective_text",
+      "type": "text",
+      "effective_type": "text"
+    },
+    {
+      "name": "effective_email",
+      "type": "email",
+      "effective_type": "email"
+    },
+    {
+      "name": "effective_passport",
+      "type": "passport",
+      "effective_type": "passport"
+    },
+    {
+      "name": "effective_some_future_type",
+      "type": "some_future_type",
+      "effective_type": "some_future_type"
+    },
+    {
+      "name": "effective_billing_address",
+      "type": "billing_address",
+      "effective_type": "billing_address"
+    }
+  ],
+  "derived_sets": {
+    "requestable_types": [
+      "text",
+      "email",
+      "phone",
+      "url",
+      "gender",
+      "country",
+      "nationality",
+      "date",
+      "date_of_birth",
+      "number",
+      "integer",
+      "decimal",
+      "float",
+      "address",
+      "creditcard",
+      "bank",
+      "photo",
+      "document",
+      "legal_document",
+      "passport",
+      "photo_id",
+      "drivers_license",
+      "facebook",
+      "id_card",
+      "billing_address",
+      "signature_pad",
+      "__proto__",
+      "123"
+    ],
+    "flow_types": [
+      "text",
+      "email",
+      "phone",
+      "url",
+      "gender",
+      "country",
+      "nationality",
+      "date",
+      "date_of_birth",
+      "number",
+      "integer",
+      "decimal",
+      "float",
+      "address",
+      "creditcard",
+      "bank",
+      "photo",
+      "document",
+      "legal_document",
+      "passport",
+      "photo_id",
+      "drivers_license",
+      "facebook",
+      "id_card",
+      "billing_address",
+      "signature_pad",
+      "__proto__",
+      "123",
+      "select",
+      "multiselect"
+    ],
+    "claimable_types": [
+      "text",
+      "email",
+      "phone",
+      "url",
+      "gender",
+      "country",
+      "nationality",
+      "date",
+      "date_of_birth",
+      "number",
+      "integer",
+      "decimal",
+      "float",
+      "address",
+      "creditcard",
+      "bank",
+      "facebook",
+      "billing_address",
+      "signature_pad",
+      "__proto__",
+      "123"
+    ]
+  }
 }

@@ -64,8 +64,8 @@ func whConfig(t *testing.T, v *vectorDoc, extra func(*Config)) *Config {
 	return cfg
 }
 
-func whTypeForSlug(slug string) string {
-	return map[string]string{"work_email": "email", "logo": "photo"}[slug]
+func whTypeForSlug(slug string) (string, error) {
+	return map[string]string{"work_email": "email", "logo": "photo"}[slug], nil
 }
 
 func sign(body []byte, secret string) string {
@@ -174,7 +174,7 @@ func TestParsePlainJSONBody(t *testing.T) {
 	cfg := whConfig(t, v, nil)
 	decryptValue, _ := vectorDecryptValue(t, v)
 	body := changeBody(v)
-	change, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, decryptValue, nil, nil)
+	change, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err != nil {
 		t.Fatalf("ParseWebhook: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestParseXMLBody(t *testing.T) {
 		"</value>" +
 		"</response>"
 	body := []byte(xml)
-	change, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, decryptValue, nil, nil)
+	change, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err != nil {
 		t.Fatalf("ParseWebhook XML: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestParseAccountKeyEnvelope(t *testing.T) {
 	if !VerifyWebhook(body, headers, cfg) {
 		t.Fatal("verify should pass (HMAC over envelope)")
 	}
-	change, err := ParseWebhook(body, headers, cfg, whTypeForSlug, decryptValue, nil, nil)
+	change, err := ParseWebhook(body, headers, cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err != nil {
 		t.Fatalf("ParseWebhook envelope: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestParseAccountEnvelopeWithoutAccountKeyFails(t *testing.T) {
 	decryptValue, _ := vectorDecryptValue(t, v)
 	_, acctPub := makeAccountKey(t, "x")
 	body := wrapToAccountKey(t, acctPub, changeBody(v))
-	_, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, decryptValue, nil, nil)
+	_, err := ParseWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err == nil || !errors.Is(err, ErrWebhook) {
 		t.Fatalf("expected ErrWebhook, got %v", err)
 	}
@@ -306,7 +306,7 @@ func TestHandleVerifyThenParse(t *testing.T) {
 	cfg := whConfig(t, v, nil)
 	decryptValue, _ := vectorDecryptValue(t, v)
 	body := changeBody(v)
-	change, err := HandleWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, decryptValue, nil, nil)
+	change, err := HandleWebhook(body, whHeaders(body, whSecret, whID, true), cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err != nil {
 		t.Fatalf("HandleWebhook: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestHandleBadSignatureFails(t *testing.T) {
 	body := changeBody(v)
 	headers := whHeaders(body, whSecret, whID, true)
 	headers["X-Allus-Signature"] = "deadbeef" // wrong
-	_, err := HandleWebhook(body, headers, cfg, whTypeForSlug, decryptValue, nil, nil)
+	_, err := HandleWebhook(body, headers, cfg, whTypeForSlug, testFieldTypesSource, decryptValue, nil, nil)
 	if err == nil || !errors.Is(err, ErrWebhook) {
 		t.Fatalf("expected ErrWebhook, got %v", err)
 	}
