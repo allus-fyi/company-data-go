@@ -307,32 +307,38 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes
 // events carry no slot/value). HasLive distinguishes "live was absent" from
 // "live was false".
 type Change struct {
-	ID                  string
-	Event               string
-	PersonID            string
-	ShareCode           string // the person's profile share code (every event; may be empty)
-	CustomerType        string // "person" | "company" (B2B); empty on an older API
-	Slug                string
-	Value               any
-	Live                bool
-	HasLive             bool
-	DocumentID          string     // set on document_status_changed
-	Status              string     // set on document_status_changed
-	Action              string     // set on document_status_changed for a contract: signed | accepted | cancelled
-	Note                string     // set on document_status_changed: the person's optional cancellation note
-	Method              string     // set on a signature: biometric | twofa | email | custodian
-	ContentSHA256       string     // set on a signature: SHA-256 of the signed content
-	SignedAt            string     // set on a signature: ISO timestamp the signature was recorded
-	CancelEffectiveDate string     // set on a cancelled document_status_changed: ISO date the cancellation takes effect
-	RequestID           string     // set on connection_request_accepted | connection_request_rejected
-	PublicKeySHA256     string     // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
-	ConnectionID        string     // set on message_received — the connection to reply/ack on
-	MessageID           string     // set on message_received — the ack boundary (upToMessageID)
-	PersonPublicKey     string     // set on message_received — base64 SPKI to encrypt the reply to
-	MessageBody         string     // set on message_received — the DECRYPTED message text
-	Verified            bool       // true iff a field_updated value's hash matches AND the verification has not lapsed
-	VerifiedAt          *time.Time // when the answering field was verified; nil when the value carries no verification
-	VerifiedExpiresAt   *time.Time // when that verification lapses; nil = it does not. Past → Verified reads false
+	ID                    string
+	Event                 string
+	PersonID              string
+	ShareCode             string // the person's profile share code (every event; may be empty)
+	CustomerType          string // "person" | "company" (B2B); empty on an older API
+	Slug                  string
+	Value                 any
+	Live                  bool
+	HasLive               bool
+	DocumentID            string // set on document_status_changed
+	Status                string // set on document_status_changed
+	Action                string // set on document_status_changed for a contract: signed | accepted | cancelled
+	Note                  string // set on document_status_changed: the person's optional cancellation note
+	Method                string // set on a signature: biometric | twofa | email | custodian
+	ContentSHA256         string // set on a signature: SHA-256 of the signed content
+	SignedAt              string // set on a signature: ISO timestamp the signature was recorded
+	CancelEffectiveDate   string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
+	SealedAt              string // set on document_status_changed: when the platform seal was applied; empty until sealed
+	PlainSHA256           string // set on document_status_changed: SHA-256 of the document's unencrypted PDF bytes; empty on a JSON contract
+	SignerFirstName       string // set on document_status_changed: the signature's own signer evidence
+	SignerLastName        string
+	SignerNameVerified    bool       // true iff the submitted name matched the signer's verified ID name
+	HasSignerNameVerified bool       // whether SignerNameVerified was present on the event at all
+	RequestID             string     // set on connection_request_accepted | connection_request_rejected
+	PublicKeySHA256       string     // set on key_rotated — SHA-256 fingerprint of the person's NEW public key
+	ConnectionID          string     // set on message_received — the connection to reply/ack on
+	MessageID             string     // set on message_received — the ack boundary (upToMessageID)
+	PersonPublicKey       string     // set on message_received — base64 SPKI to encrypt the reply to
+	MessageBody           string     // set on message_received — the DECRYPTED message text
+	Verified              bool       // true iff a field_updated value's hash matches AND the verification has not lapsed
+	VerifiedAt            *time.Time // when the answering field was verified; nil when the value carries no verification
+	VerifiedExpiresAt     *time.Time // when that verification lapses; nil = it does not. Past → Verified reads false
 	// The proof metadata beside the binding: HOW it was bound, by WHOM, and the id to quote back
 	// in a dispute. All three or none; readable whatever Verified says.
 	VerifiedMethod   string
@@ -376,6 +382,8 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fie
 	}
 
 	var documentID, status, action, note, method, contentSHA256, signedAt, cancelEffectiveDate string
+	var sealedAt, plainSHA256, signerFirstName, signerLastName string
+	var signerNameVerified, hasSignerNameVerified bool
 	if event == "document_status_changed" {
 		documentID = asString(obj["document_id"])
 		status = asString(obj["status"])
@@ -385,6 +393,14 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fie
 		contentSHA256 = asString(obj["content_sha256"])
 		signedAt = asString(obj["signed_at"])
 		cancelEffectiveDate = asString(obj["cancel_effective_date"])
+		sealedAt = asString(obj["sealed_at"])
+		plainSHA256 = asString(obj["plain_sha256"])
+		signerFirstName = asString(obj["signer_first_name"])
+		signerLastName = asString(obj["signer_last_name"])
+		if v, ok := obj["signer_name_verified"]; ok && v != nil {
+			hasSignerNameVerified = true
+			signerNameVerified = coerceBool(v)
+		}
 	}
 
 	// 2fa_challenge_completed carries the outcome in status (approved|denied|revoked); its
@@ -424,37 +440,43 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fie
 	}
 
 	return Change{
-		ID:                  asString(obj["id"]),
-		Event:               event,
-		PersonID:            firstString(obj["person_user_id"], obj["person_id"]),
-		ShareCode:           asString(obj["share_code"]),
-		CustomerType:        asString(obj["customer_type"]),
-		Slug:                slug,
-		Value:               value,
-		Live:                live,
-		HasLive:             hasLive,
-		DocumentID:          documentID,
-		Status:              status,
-		Action:              action,
-		Note:                note,
-		Method:              method,
-		ContentSHA256:       contentSHA256,
-		SignedAt:            signedAt,
-		CancelEffectiveDate: cancelEffectiveDate,
-		RequestID:           requestID,
-		PublicKeySHA256:     publicKeySHA256,
-		ConnectionID:        connectionID,
-		MessageID:           messageID,
-		PersonPublicKey:     personPublicKey,
-		MessageBody:         messageBody,
-		Verified:            verifiedFrom(obj, value),
-		VerifiedAt:          parseISO(asString(obj["verified_at"])),
-		VerifiedExpiresAt:   parseISO(asString(obj["verified_expires_at"])),
-		VerifiedMethod:      asString(obj["verified_method"]),
-		VerifiedProvider:    asString(obj["verified_provider"]),
-		VerificationID:      asString(obj["verification_id"]),
-		At:                  parseISO(asString(obj["at"])),
-		Raw:                 obj,
+		ID:                    asString(obj["id"]),
+		Event:                 event,
+		PersonID:              firstString(obj["person_user_id"], obj["person_id"]),
+		ShareCode:             asString(obj["share_code"]),
+		CustomerType:          asString(obj["customer_type"]),
+		Slug:                  slug,
+		Value:                 value,
+		Live:                  live,
+		HasLive:               hasLive,
+		DocumentID:            documentID,
+		Status:                status,
+		Action:                action,
+		Note:                  note,
+		Method:                method,
+		ContentSHA256:         contentSHA256,
+		SignedAt:              signedAt,
+		CancelEffectiveDate:   cancelEffectiveDate,
+		SealedAt:              sealedAt,
+		PlainSHA256:           plainSHA256,
+		SignerFirstName:       signerFirstName,
+		SignerLastName:        signerLastName,
+		SignerNameVerified:    signerNameVerified,
+		HasSignerNameVerified: hasSignerNameVerified,
+		RequestID:             requestID,
+		PublicKeySHA256:       publicKeySHA256,
+		ConnectionID:          connectionID,
+		MessageID:             messageID,
+		PersonPublicKey:       personPublicKey,
+		MessageBody:           messageBody,
+		Verified:              verifiedFrom(obj, value),
+		VerifiedAt:            parseISO(asString(obj["verified_at"])),
+		VerifiedExpiresAt:     parseISO(asString(obj["verified_expires_at"])),
+		VerifiedMethod:        asString(obj["verified_method"]),
+		VerifiedProvider:      asString(obj["verified_provider"]),
+		VerificationID:        asString(obj["verification_id"]),
+		At:                    parseISO(asString(obj["at"])),
+		Raw:                   obj,
 	}, nil
 }
 
@@ -687,7 +709,12 @@ type Document struct {
 	// Contract fields.
 	RequiresSignature  bool
 	RequiresAcceptance bool
-	Signatures         []map[string]any // contract sign/accept audit trail (company-side reads only)
+	PlainSHA256        string     // SHA-256 of the unencrypted PDF bytes; empty on a JSON contract
+	SealedAt           *time.Time // when the platform seal was applied; nil until sealed
+	// Contract sign/accept audit trail (company-side reads only), one map per signature: action,
+	// method, content_sha256, plain_sha256, signer_first_name, signer_last_name,
+	// signer_name_verified, ip, user_agent, created_at.
+	Signatures []map[string]any
 
 	// RunSignatures is present only on a contract-flow run-participant document: the run's
 	// ordered signature summary, one entry per participant owing an act — each
@@ -737,7 +764,7 @@ func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
 	if arr, ok := obj["signatures"].([]any); ok {
 		for _, s := range arr {
 			if sm, ok := s.(map[string]any); ok {
-				signatures = append(signatures, sm)
+				signatures = append(signatures, normalizeSignatureMap(sm))
 			}
 		}
 	}
@@ -763,6 +790,8 @@ func documentFromAPI(obj map[string]any, decryptValue decryptValueFn) Document {
 		UpdatedAt:          parseISO(asString(obj["updated_at"])),
 		RequiresSignature:  coerceBool(obj["requires_signature"]),
 		RequiresAcceptance: coerceBool(obj["requires_acceptance"]),
+		PlainSHA256:        asString(obj["plain_sha256"]),
+		SealedAt:           parseISO(asString(obj["sealed_at"])),
 		Signatures:         signatures,
 		RunSignatures:      runSignatures,
 		decryptValue:       decryptValue,
@@ -827,6 +856,26 @@ func firstString(vals ...any) string {
 		}
 	}
 	return ""
+}
+
+// normalizeSignatureMap returns a COPY of a signature map entry with its one
+// schema-defined boolean coerced. The map stays untyped (matching every
+// existing signature field), but signer_name_verified is a boolean in the
+// schema — XML carries it as the string "false"/"true", and a caller testing
+// that raw string for truthiness reads a false verification as verified.
+// Coerce it the same way every other boolean field on this transport is
+// coerced — on a copy, never the source map, which Document.Raw also
+// references and must keep exactly as parsed.
+func normalizeSignatureMap(sm map[string]any) map[string]any {
+	if _, ok := sm["signer_name_verified"]; !ok {
+		return sm
+	}
+	copied := make(map[string]any, len(sm))
+	for k, v := range sm {
+		copied[k] = v
+	}
+	copied["signer_name_verified"] = coerceBool(sm["signer_name_verified"])
+	return copied
 }
 
 // coerceBool coerces a JSON bool or an XML "true"/"false" string into a bool.

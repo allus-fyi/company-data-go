@@ -859,6 +859,11 @@ type CreateDocumentOptions struct {
 	RequiresSignature  bool
 	RequiresAcceptance bool
 
+	// PlainSHA256, for PayloadKind="file", is the SHA-256 (lowercase hex) of FileBytes —
+	// required by the server for a signable file document, optional for any other, ignored
+	// for PayloadKind="json". Computed from FileBytes via ComputePlainSHA256 when empty.
+	PlainSHA256 string
+
 	Metadata map[string]any
 	Status   string
 }
@@ -966,6 +971,11 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 	// file: create the metadata row first, then upload bytes to /{id}/file.
 	if opts.FileBytes == nil {
 		return Document{}, newConfigError("file_bytes is required for payload_kind='file'")
+	}
+	if opts.PlainSHA256 != "" {
+		body["plain_sha256"] = opts.PlainSHA256
+	} else {
+		body["plain_sha256"] = ComputePlainSHA256(opts.FileBytes)
 	}
 	created, err := c.http.Post(ctx, epDocuments, body)
 	if err != nil {

@@ -429,13 +429,18 @@ contract, err := client.CreateDocument(ctx, companydata.CreateDocumentOptions{
 })
 
 // PER-PERSON, FILE — the file bytes are encrypted to the recipient before upload.
+// PlainSHA256 (SHA-256 of the raw PDF bytes) is computed for you when left empty;
+// it is required by the server for a signable file document (RequiresSignature/
+// RequiresAcceptance) and ignored for PayloadKind="json".
 pdf, _ := os.ReadFile("./agreement.pdf")
 signed, err := client.CreateDocument(ctx, companydata.CreateDocumentOptions{
-    PersonUserID: "019yyyyyyyyyyyyyyyyyyyyyyyyy",
-    Name:         "Signed agreement",
-    PayloadKind:  "file",
-    FileBytes:    pdf,
-    FileMime:     "application/pdf",
+    PersonUserID:      "019yyyyyyyyyyyyyyyyyyyyyyyyy",
+    Name:              "Signed agreement",
+    PayloadKind:       "file",
+    FileBytes:         pdf,
+    FileMime:          "application/pdf",
+    RequiresSignature: true,
+    // PlainSHA256: companydata.ComputePlainSHA256(pdf), // optional — computed for you otherwise
 })
 ```
 
@@ -481,6 +486,22 @@ pdf, err = client.FlowRunDocument(ctx, runID)
 // waiting/ready_to_sign/offering — that status moves only through flow
 // generation, the run's own advance, sign/accept, or a run cancel/decline.
 // Such a document's RunSignatures carries the run's ordered signature summary.
+//
+// The document seal: completing every required signature/acceptance is not
+// the same as sealing. When the last one is recorded the platform ATTEMPTS,
+// on that same request, to append a Signatures page and sign the whole PDF
+// with a platform certificate, replacing every party's copy with the sealed
+// one. The attempt can fail (no PDF bytes on the completing act, a byte
+// mismatch, the sealing service unavailable, or a custodian-completed ward
+// act) without affecting the signatures or the document's completed status —
+// it is simply left unsealed, and any party can seal it afterwards from
+// their own device or the owning company's portal (no SDK call triggers a
+// seal). doc.SealedAt is nil until a seal actually succeeds; doc.PlainSHA256
+// is the SHA-256 of the document's unencrypted PDF bytes (empty on a json
+// document, and on a file document with no stored plaintext hash). Each doc.Signatures entry
+// additionally carries plain_sha256, signer_first_name, signer_last_name and
+// signer_name_verified beside its existing action/method/content_sha256/ip/
+// user_agent/created_at keys.
 doc, err = client.UpdateDocumentStatus(ctx, doc.ID, "active")
 
 // Update metadata / name / description (any one of the three is required).
@@ -509,7 +530,11 @@ does).
 
 When a recipient acts on a document, the change feed emits a
 **`document_status_changed`** event carrying `DocumentID` + `Status` (no slug, no
-value) — handle it alongside the field events:
+value) — handle it alongside the field events. A transition to `active`
+additionally carries the same seal state the document read carries —
+`SealedAt`, `PlainSHA256`, `SignerFirstName`, `SignerLastName`,
+`SignerNameVerified` (+ `HasSignerNameVerified`) — so you never need a
+follow-up `Document(id)` call just to learn a run sealed:
 
 ```go
 err := client.ProcessChanges(func(c companydata.Change) error {

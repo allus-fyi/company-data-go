@@ -602,6 +602,15 @@ func (h *BinaryHandle) Save(path string) (int, error) {
 	return len(data), nil
 }
 
+// ComputePlainSHA256 returns the SHA-256 of raw PDF bytes, lowercase hex — the
+// PlainSHA256 a signable file document's create call and every sign/accept act
+// must agree on. Exposed so a caller can precompute or verify it; CreateDocument
+// calls this itself when a PlainSHA256 override is not supplied.
+func ComputePlainSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // HashMatches reports whether sha256(salt ‖ plaintext) equals expectedHash (hex).
 // Verified fields: consumers recompute this from the plaintext they just
 // decrypted and trust the verified flag ONLY on a match.
