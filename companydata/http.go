@@ -247,9 +247,10 @@ func (c *HTTPClient) GetRaw(ctx context.Context, path string) ([]byte, error) {
 
 // RawResponse is a 2xx response with its status, headers AND unparsed body.
 //
-// The company-facing binary file endpoints have two 200 shapes (a JSON
-// wrapper for an encrypted answer, raw file bytes for a plaintext one) that are
-// told apart by Content-Type, and both carry an X-Allus-Content-Sha256 digest
+// The company-facing binary file endpoints have three 200 shapes (a JSON wrapper
+// for an encrypted answer, a JSON plaintext envelope, raw file bytes) — the bytes
+// shape told apart by Content-Type and the two JSON ones by the body's
+// "encrypted" member — and all three carry an X-Allus-Content-Sha256 digest
 // header. Neither Get (which parses) nor GetRaw (which drops the headers) can
 // express that, so GetResponse hands the caller the response itself.
 type RawResponse struct {

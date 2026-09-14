@@ -335,58 +335,92 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 // URI, in priority order (photo → "full", document → "file").
 var envelopeDataURIKeys = []string{"full", "file"}
 
+// envelopeMembers are the envelope members that describe the envelope itself
+// rather than the type's own declared entries — everything NOT in this set is
+// metadata.
+var envelopeMembers = map[string]bool{
+	"pages": true, "file": true, "full": true, "thumb": true,
+	"original_name": true, "mime_type": true, "size": true,
+}
+
 // BinaryFetchResult is one response from a company-facing binary file endpoint,
 // in the shape a BinaryHandle needs.
 //
-// The route has TWO 200 shapes and the company cannot predict which it
-// will get, because the answer depends on whether the person's source field is
-// private, which is theirs to change:
+// The route has THREE 200 shapes and the company cannot predict which it will
+// get, because the answer depends on the person's own privacy setting and on the
+// TYPE of the field they answered with, neither of which the company chooses:
 //
 //   - encrypted — application/json, {"encrypted":true,"value":<wrapper>}. The
-//     wrapper decrypts to the binary ENVELOPE string, from which the file bytes
-//     are extracted.
-//   - plaintext — the file's own Content-Type (e.g. image/jpeg, application/pdf)
-//     and the body IS the file bytes. Nothing to decrypt.
+//     wrapper decrypts to the binary ENVELOPE string.
+//   - envelope — application/json, {"encrypted":false,"value":"<envelope>"}. The
+//     plaintext envelope string itself, for a non-private source whose type
+//     stores more than one file or declares metadata entries. Nothing to decrypt.
+//   - plaintext bytes — the file's own Content-Type (e.g. image/jpeg,
+//     application/pdf) and the body IS the file bytes.
 //
-// The distinction is made on the response's Content-Type, never guessed from the
-// body: a plaintext answer's first byte is whatever the file starts with, and a
-// PDF or a JPEG that happened to begin with a brace would be indistinguishable
-// from a wrapper by sniffing.
+// The bytes shape is told apart from the two JSON ones on the response's
+// Content-Type, never guessed from the body: a plaintext answer's first byte is
+// whatever the file starts with, and a PDF or a JPEG that happened to begin with
+// a brace would be indistinguishable from a wrapper by sniffing. Inside a JSON
+// body it is Encrypted that decides; a JSON body that does not carry
+// "encrypted": false with a string "value" is the wrapper arm, which is what the
+// bare-wrapper routes (a company's own contract copy, its run slot file) answer
+// with.
 //
-// ContentSha256 is the platform's X-Allus-Content-Sha256 — the sha256 of exactly
-// these bytes, present on both shapes — so a consumer can record what it received
-// and later prove its archived copy has not drifted.
+// ContentSha256 is the platform's X-Allus-Content-Sha256 — the sha256 of the
+// SERVED ARTIFACT: the raw bytes on the bytes shape, the served "value" string on
+// either JSON shape — so a consumer can record what it received and later prove
+// its archived copy has not drifted.
 type BinaryFetchResult struct {
 	Encrypted bool
 	// Wrapper is the {"_enc":1,…} wrapper (encrypted shape only).
 	Wrapper any
-	// Bytes are the file bytes themselves (plaintext shape only).
-	Bytes         []byte
+	// Bytes are the file bytes themselves (plaintext-bytes shape only).
+	Bytes []byte
+	// Envelope is the plaintext envelope string (envelope shape only).
+	Envelope      string
+	HasEnvelope   bool
 	ContentType   string
 	ContentSha256 string
+}
+
+// BinaryPage is one page of a multi-page binary answer (an ID document's front,
+// back, …).
+//
+// Label is the page's own label ("front" | "back" | "additional"), Name the
+// original filename the person uploaded it under, Mime the server-derived media
+// type, and Bytes the decoded page bytes.
+type BinaryPage struct {
+	Label string
+	Name  string
+	Mime  string
+	Bytes []byte
 }
 
 // BinaryHandle is a lazy handle for a binary (photo/document) value.
 //
 // A binary answer is stored server-side as a file, exposed in the hardened API
 // as a slot-keyed value_url (never the source field). Bytes() and Save() GET
-// that URL and return the FILE BYTES either way — the caller never has to know
-// which of the two response shapes arrived.
+// that URL and return the FILE BYTES; Pages() and Metadata() expose the rest of
+// the envelope. The caller never has to know which of the three response shapes
+// arrived.
 //
-// THERE ARE TWO SHAPES, AND WHICH ONE ARRIVES IS THE PERSON'S CHOICE, NOT
-// THE COMPANY'S. Whether the person's source field is private decides it, they
-// can change it at any time, and nothing in the API announces it in advance:
+// THERE ARE THREE SHAPES, AND WHICH ONE ARRIVES IS NOT THE COMPANY'S CHOICE. The
+// person's own privacy setting and the TYPE of the field they answered with
+// decide it, either can change at any time, and nothing in the API announces it
+// in advance:
 //
 //   - private source → application/json {"encrypted":true,"value":<wrapper>}. The
 //     wrapper decrypts to a JSON envelope STRING (photo: {"full":"data:...","thumb":...};
-//     document: {"file":"data:...",...}) — NOT raw bytes — whose primary data-URI
-//     payload ("full" for photos, "file" for documents) base64-decodes to the file.
-//   - plaintext source → the file's own Content-Type and the body IS the file.
-//     There is nothing to decrypt, and a handle built this way needs no service
-//     key at all.
+//     single-file document: {"file":"data:...",...}; multi-page document:
+//     {"pages":[{"file":"data:...",...}],...}) — NOT raw bytes.
+//   - non-private source whose type stores pages or declares entries →
+//     application/json {"encrypted":false,"value":"<envelope>"}. The same envelope
+//     string, in the clear. There is nothing to decrypt.
+//   - every other non-private source → the file's own Content-Type and the body
+//     IS the file. A handle built this way needs no service key at all.
 //
-// Photos resolve to the "full" representation. There is no variant selection: one
-// slot has one byte sequence and therefore one digest.
+// Photos resolve to the "full" representation. There is no variant selection.
 //
 // The fetch + decrypt are supplied by the client as plain callables, so the
 // handle never holds a key (config-only key handling):
@@ -400,6 +434,9 @@ type BinaryFetchResult struct {
 // For the shared crypto test vector the decrypted envelope is already in hand,
 // so a handle can also be built directly from an envelope string (no fetch) via
 // NewBinaryHandleFromEnvelope.
+//
+// Bytes(), Pages() and Metadata() share ONE lazy fetch: whichever is called first
+// performs it, and every later call answers from the parsed envelope.
 type BinaryHandle struct {
 	envelopeJSON string
 	hasEnvelope  bool
@@ -432,11 +469,19 @@ func newLazyBinaryHandle(valueURL string, fetch func(string) (BinaryFetchResult,
 // callers; empty for an inline-envelope handle).
 func (h *BinaryHandle) ValueURL() string { return h.valueURL }
 
-// ContentSha256 returns the platform's X-Allus-Content-Sha256 for the bytes this
-// handle fetched — the sha256 of exactly what Bytes() returns, so a consumer can
-// record it and later show that its archived copy has not drifted. Empty until
-// something has been fetched, and on a handle built from an envelope that was
-// never fetched through this class.
+// ContentSha256 returns the platform's X-Allus-Content-Sha256 — the digest of the
+// SERVED ARTIFACT.
+//
+// Which artifact that is follows the response arm: the raw bytes when the answer
+// arrived as bytes, and the served "value" string on either JSON arm — the
+// ciphertext wrapper for a private source, the plaintext envelope for a
+// non-private one. It is NOT "the sha256 of what Bytes() returns": on an envelope
+// carrying pages Bytes() errors, and on an envelope carrying one file it returns
+// the decoded payload rather than the envelope string.
+//
+// A consumer can record it and later show that its archived copy has not drifted.
+// Empty until something has been fetched, and on a handle built from an envelope
+// that was never fetched through this class.
 //
 // It is the platform's word, not a signature: it proves agreement with the
 // platform's record, not anything to a third party who doubts that record.
@@ -467,7 +512,13 @@ func (h *BinaryHandle) fetchOnce() error {
 	if !res.Encrypted {
 		// A plaintext answer needs no service key. Demanding decrypt up front
 		// would make a handle built without one fail on exactly the answers that
-		// do not need it.
+		// do not need it. The envelope arm is plaintext too — the same envelope
+		// string the wrapper arm decrypts to — so both JSON arms converge here.
+		if res.HasEnvelope {
+			h.envelopeJSON = res.Envelope
+			h.hasEnvelope = true
+			return nil
+		}
 		h.plainBytes = res.Bytes
 		h.hasPlain = true
 		return nil
@@ -499,29 +550,20 @@ func (h *BinaryHandle) resolveEnvelope() (string, error) {
 	return h.envelopeJSON, nil
 }
 
-// ParseEnvelopeBytes turns a decrypted binary envelope STRING into the primary
-// file bytes: a photo envelope -> the "full" data-URI payload; a document
-// envelope -> the "file" data-URI payload. Returns a *DecryptError on a
-// malformed envelope.
-func ParseEnvelopeBytes(envelopeJSON string) ([]byte, error) {
+// parseEnvelope is the ONE envelope parser both JSON arms go through.
+func parseEnvelope(envelopeJSON string) (map[string]any, error) {
 	var envelope map[string]any
 	if err := json.Unmarshal([]byte(envelopeJSON), &envelope); err != nil {
 		return nil, &DecryptError{msg: "binary envelope is not valid JSON"}
 	}
-
-	var dataURI string
-	found := false
-	for _, key := range envelopeDataURIKeys {
-		if s, ok := envelope[key].(string); ok {
-			dataURI = s
-			found = true
-			break
-		}
+	if envelope == nil {
+		return nil, &DecryptError{msg: "binary envelope must be a JSON object"}
 	}
-	if !found {
-		return nil, &DecryptError{msg: "binary envelope has no 'full'/'file' data-URI payload"}
-	}
+	return envelope, nil
+}
 
+// decodeDataURI turns data:<mime>;base64,<payload> into the decoded payload.
+func decodeDataURI(dataURI string) ([]byte, error) {
 	const marker = "base64,"
 	idx := strings.Index(dataURI, marker)
 	if idx == -1 {
@@ -535,9 +577,127 @@ func ParseEnvelopeBytes(envelopeJSON string) ([]byte, error) {
 	return out, nil
 }
 
+// ParseEnvelopeBytes turns a decrypted binary envelope STRING into the primary
+// file bytes: a photo envelope -> the "full" data-URI payload; a single-file
+// document envelope -> the "file" data-URI payload. A MULTI-PAGE envelope has no
+// single primary file, so it errors rather than handing back the first page as
+// though it were the whole document. Returns a *DecryptError on a malformed
+// envelope.
+func ParseEnvelopeBytes(envelopeJSON string) ([]byte, error) {
+	envelope, err := parseEnvelope(envelopeJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	var dataURI string
+	found := false
+	for _, key := range envelopeDataURIKeys {
+		if s, ok := envelope[key].(string); ok {
+			dataURI = s
+			found = true
+			break
+		}
+	}
+	if !found {
+		if pages, ok := envelope["pages"].([]any); ok && len(pages) > 0 {
+			return nil, &DecryptError{msg: "multi-page envelope: use pages"}
+		}
+		return nil, &DecryptError{msg: "binary envelope has no 'full'/'file' data-URI payload"}
+	}
+
+	return decodeDataURI(dataURI)
+}
+
+// envelopeOrNil returns the parsed envelope, fetching+decrypting on first use.
+// A nil map with a nil error means the answer is plaintext BYTES, which carries
+// no envelope at all.
+func (h *BinaryHandle) envelopeOrNil() (map[string]any, error) {
+	if !h.hasEnvelope {
+		if err := h.fetchOnce(); err != nil {
+			return nil, err
+		}
+		if !h.hasEnvelope {
+			return nil, nil
+		}
+	}
+	return parseEnvelope(h.envelopeJSON)
+}
+
+// Pages returns the envelope's pages, in envelope order — an empty slice for a
+// single-file envelope.
+//
+// Lazy exactly as Bytes() is: the first call of Bytes, Pages or Metadata performs
+// the one fetch and optional decrypt, and every later call answers from the
+// parsed envelope. A handle built from an envelope string needs no fetch. A
+// plaintext-BYTES answer carries no envelope, so it has no pages.
+func (h *BinaryHandle) Pages() ([]BinaryPage, error) {
+	envelope, err := h.envelopeOrNil()
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := envelope["pages"].([]any)
+	if envelope == nil || !ok {
+		return []BinaryPage{}, nil
+	}
+
+	out := make([]BinaryPage, 0, len(raw))
+	for _, entry := range raw {
+		page, ok := entry.(map[string]any)
+		if !ok {
+			return nil, &DecryptError{msg: "binary envelope page has no data-URI payload"}
+		}
+		uri, ok := page["file"].(string)
+		if !ok {
+			return nil, &DecryptError{msg: "binary envelope page has no data-URI payload"}
+		}
+		bytes, err := decodeDataURI(uri)
+		if err != nil {
+			return nil, err
+		}
+		label, _ := page["label"].(string)
+		name, _ := page["original_name"].(string)
+		mime, _ := page["mime_type"].(string)
+		out = append(out, BinaryPage{Label: label, Name: name, Mime: mime, Bytes: bytes})
+	}
+	return out, nil
+}
+
+// Metadata returns every declared entry the envelope carries, as a plain map.
+//
+// Keys are every envelope member other than the envelope's own ("pages", "file",
+// "full", "thumb", "original_name", "mime_type", "size"); values are the stored
+// string, or nil for an entry the person left unset. "name" — the holder name an
+// ID provider extracted — is a member like any other and appears here.
+//
+// The map carries NO ordering guarantee (a Go map has none). A consumer that
+// needs the type's declared order reads the envelope string itself.
+//
+// Empty for a photo, for a plain document that declares no entries, and for a
+// plaintext-BYTES answer. Lazy exactly as Pages() is.
+func (h *BinaryHandle) Metadata() (map[string]*string, error) {
+	envelope, err := h.envelopeOrNil()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]*string{}
+	for key, value := range envelope {
+		if envelopeMembers[key] {
+			continue
+		}
+		if s, ok := value.(string); ok {
+			v := s
+			out[key] = &v
+			continue
+		}
+		out[key] = nil
+	}
+	return out, nil
+}
+
 // Bytes fetches (if needed), decrypts, and returns the decoded primary file
-// bytes — the same bytes for either response shape, so a caller never has
-// to branch on which one the person's privacy setting produced.
+// bytes — the same bytes whichever response shape arrived, so a caller never has
+// to branch on which one the person's privacy setting produced. A MULTI-PAGE
+// envelope has no single primary file and errors: use Pages().
 func (h *BinaryHandle) Bytes() ([]byte, error) {
 	if h.hasPlain {
 		return h.plainBytes, nil

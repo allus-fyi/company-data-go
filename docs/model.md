@@ -94,25 +94,60 @@ fmt.Println(v.Live, v.UpdatedAt)
 
 ```go
 handle := conn.Values["logo"].Value.(*companydata.BinaryHandle)
-data, err := handle.Bytes()         // GETs the slot file endpoint → the file bytes
-n, err := handle.Save("./logo.png") // atomic write (temp + fsync + rename)
-url := handle.ValueURL()            // the slot-keyed file URL (opaque)
-ct := handle.ContentType()          // the Content-Type the bytes arrived with
-sum := handle.ContentSha256()       // the platform's X-Allus-Content-Sha256 for those bytes
+data, err := handle.Bytes()          // GETs the slot file endpoint → the primary file bytes
+n, err := handle.Save("./logo.png")  // atomic write (temp + fsync + rename)
+pages, err := handle.Pages()         // []BinaryPage, in envelope order (empty for a single-file one)
+meta, err := handle.Metadata()       // map[string]*string — the type's declared entries
+url := handle.ValueURL()             // the slot-keyed file URL (opaque)
+ct := handle.ContentType()           // the Content-Type the answer arrived with
+sum := handle.ContentSha256()        // the platform's X-Allus-Content-Sha256 for the SERVED ARTIFACT
+
+type BinaryPage struct {
+	Label string // front | back | additional
+	Name  string // the original filename
+	Mime  string // the server-derived media type
+	Bytes []byte // the decoded page bytes
+}
 ```
 
-The handle is lazy — nothing is fetched until `Bytes()`/`Save()` — and caches what
-it fetched so repeated calls don't re-fetch. `Save` is crash-safe: a crash
-mid-write never leaves a truncated file.
+The handle is lazy — nothing is fetched until `Bytes()`/`Pages()`/`Metadata()`/`Save()`
+— and caches what it fetched so repeated calls don't re-fetch. `Save` is crash-safe: a
+crash mid-write never leaves a truncated file.
 
-**Two 200 shapes, absorbed by the handle.** Whether the slot endpoint returns
-`application/json` `{"encrypted":true,"value":<wrapper>}` (decrypted with the
-service key, envelope parsed, data-URI decoded) or the file's own `Content-Type`
-with the raw bytes as the body depends on whether the person's source field is
-private — their choice, changeable at any time, unannounced. `Bytes()` returns the
-file either way. The shape is decided on `Content-Type`, never by sniffing the
-body, and there is no variant selection: one slot has one byte sequence and one
-digest.
+**Three 200 shapes, absorbed by the handle.** Which one the slot endpoint returns
+depends on whether the person's source field is private AND on the TYPE of the field
+they answered with — neither yours to choose, both changeable, unannounced:
+
+* `application/json` `{"encrypted":true,"value":<wrapper>}` — decrypted with the
+  service key into the JSON ENVELOPE string.
+* `application/json` `{"encrypted":false,"value":"<envelope>"}` — that same envelope in
+  the clear, for a non-private source whose type stores more than one file or declares
+  metadata entries (the ID-document subtypes and `legal_document`). Nothing to decrypt.
+* the file's own `Content-Type` with the raw bytes as the body — every other
+  non-private source.
+
+The raw-bytes shape is decided on `Content-Type`, never by sniffing the body; inside a
+JSON body it is `encrypted` that decides.
+The envelope is a photo's `{"full": "data:…", "thumb": …}`, a single-file document's
+`{"file": "data:…", …}`, or a multi-page document's
+`{"pages": [{"label": …, "file": "data:…", …}], …}`, with every entry the type declares
+beside it.
+
+`Pages()` answers the pages of a multi-page envelope in order, and an empty slice for a
+single-file one. `Metadata()` answers every envelope member other than `pages`, `file`,
+`full`, `thumb`, `original_name`, `mime_type` and `size`, so a passport's
+`document_number`, `expiry_date`, `issuing_country` and `name` are all there; **a Go map
+has no ordering guarantee at all** — read the envelope string yourself if you need the
+declared order. **`Bytes()`/`Save()` return a `*DecryptError` carrying
+`multi-page envelope: use pages` on a multi-page envelope** rather than handing back the
+front page as though it were the whole document.
+
+All of the accessors share ONE lazy fetch: whichever is called first performs it, and
+the result is cached (repeated calls don't re-fetch). The digest header
+`X-Allus-Content-Sha256` is the sha256 of the **served artifact** — the raw bytes on the
+bytes shape, the served `value` string on either JSON shape — not "the sha256 of what
+`Bytes()` returns", which is false on a multi-page envelope. There is no variant
+selection.
 
 `ContentSha256()` and `ContentType()` are empty until something has been fetched,
 and on a handle built from an envelope directly. A `410`

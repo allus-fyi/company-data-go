@@ -330,36 +330,51 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 ### Binary fields
 
 A binary answer is a `*BinaryHandle`: `Bytes()` GETs the slot-keyed file endpoint
-and returns the file bytes. `Save(path)` writes those bytes atomically. The handle
-is lazy and caches what it fetched, so repeated `Bytes()`/`Save()` don't re-fetch.
+and returns the primary file bytes, `Pages()` every page of a multi-page answer and
+`Metadata()` the entries its type declares. `Save(path)` writes the bytes atomically.
+The handle is lazy and caches what it fetched, so repeated calls don't re-fetch.
 
-**That endpoint has two 200 shapes, and which one you get is the person's choice,
-not yours** — it depends on whether their source field is private, they can change
-it at any time, and nothing announces it in advance. The handle absorbs the
-difference; you never branch on it:
+**That endpoint has three 200 shapes, and which one you get is not yours to choose**
+— it depends on whether the person's source field is private AND on the type of the
+field they answered with, both can change, and nothing announces either in advance.
+The handle absorbs the difference:
 
 - **private source** → `application/json` `{"encrypted":true,"value":<wrapper>}`.
-  The wrapper is decrypted with your service key, the envelope (`{"full":…}` /
-  `{"file":…}`) parsed, and its primary data-URI payload base64-decoded into the
-  file bytes.
-- **plaintext source** → the file's own `Content-Type` and the body **is** the
-  file. Nothing is decrypted; no service key is involved.
+  The wrapper is decrypted with your service key into the JSON ENVELOPE string.
+- **non-private source whose type stores more than one file or declares metadata
+  entries** (the ID-document subtypes and `legal_document`) → `application/json`
+  `{"encrypted":false,"value":"<envelope>"}` — that same envelope in the clear.
+  Nothing is decrypted.
+- **every other non-private source** → the file's own `Content-Type` and the body
+  **is** the file. No service key is involved.
 
-The shape is decided on the response `Content-Type`, never by sniffing the body.
+The raw-bytes shape is decided on the response `Content-Type`, never by sniffing the
+body; inside a JSON body it is `encrypted` that decides.
 
 ```go
 data, err := logo.Bytes()
-logo.ContentType()    // the Content-Type the bytes arrived with, e.g. "image/jpeg"
-logo.ContentSha256()  // the platform's X-Allus-Content-Sha256 for exactly those bytes
+pages, err := passport.Pages()     // []BinaryPage — Label, Name, Mime, Bytes
+meta, err := passport.Metadata()   // map[string]*string — document_number, expiry_date, …
+logo.ContentType()    // the Content-Type the answer arrived with, e.g. "image/jpeg"
+logo.ContentSha256()  // the platform's X-Allus-Content-Sha256 for the SERVED ARTIFACT
 ```
 
-`ContentSha256()` is the platform's `X-Allus-Content-Sha256` header, sent on both
-shapes — record it and you can later show your archived copy has not drifted. It
-is the platform's word, not a signature: it proves agreement with the platform's
-record, not anything to a third party who doubts that record.
+The envelope is a photo's `{"full": "data:…", "thumb": …}`, a single-file document's
+`{"file": "data:…", …}`, or a multi-page document's
+`{"pages": [{"label": …, "file": "data:…", …}], …}`, with every declared entry beside
+it. **`Bytes()`/`Save()` return a `*DecryptError` carrying
+`multi-page envelope: use pages` on a multi-page envelope** rather than handing back
+the front page as though it were the whole document. `Metadata()` is a Go map and so
+has **no ordering guarantee at all**; read the envelope string yourself if you need
+the declared order.
 
-There is **no variant selection** — one slot has one byte sequence and therefore
-one digest. Photos resolve to the `full` representation.
+`ContentSha256()` is the platform's `X-Allus-Content-Sha256` header, sent on all
+three shapes — the digest of the raw bytes on the bytes shape and of the served
+`value` string on either JSON shape. Record it and you can later show your archived
+copy has not drifted. It is the platform's word, not a signature: it proves agreement
+with the platform's record, not anything to a third party who doubts that record.
+
+There is **no variant selection**. Photos resolve to the `full` representation.
 
 **Expiry.** A frozen (share-once) answer is retained for 90 days. After that the
 endpoint returns a `410` with error key `company_data.file_expired`, surfaced as an

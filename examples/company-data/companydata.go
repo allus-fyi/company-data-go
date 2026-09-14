@@ -692,13 +692,44 @@ func stringifyValue(v any) any {
 	case time.Time:
 		return t.Format(time.RFC3339)
 	case *companydata.BinaryHandle:
-		if b, err := t.Bytes(); err == nil {
-			return "[binary " + itoa(len(b)) + " bytes]"
-		}
-		return "[binary value]"
+		return binaryDescriptor(t)
 	default:
 		return v
 	}
+}
+
+// binaryDescriptor is the one-line descriptor every SDK example prints for a fetched binary.
+//
+// The PAGE COUNT for a multi-page envelope (whose Bytes() has no single answer), the byte length
+// otherwise, and the declared metadata keys whenever the envelope carries any — so a
+// legal_document shows its byte length AND its document_number/expiry_date. Keys are sorted,
+// because a Go map has no ordering guarantee at all.
+func binaryDescriptor(handle *companydata.BinaryHandle) string {
+	pages, err := handle.Pages()
+	if err != nil {
+		return "[binary value]"
+	}
+	head := "binary " + itoa(len(pages)) + " pages"
+	if len(pages) == 0 {
+		b, err := handle.Bytes()
+		if err != nil {
+			return "[binary value]"
+		}
+		head = "binary " + itoa(len(b)) + " bytes"
+	}
+	meta, err := handle.Metadata()
+	if err != nil {
+		return "[binary value]"
+	}
+	if len(meta) > 0 {
+		keys := make([]string, 0, len(meta))
+		for k := range meta {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		head += "; meta: " + strings.Join(keys, ", ")
+	}
+	return "[" + head + "]"
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────

@@ -227,12 +227,15 @@ func (c *Client) binaryFetch(valueURL string) (BinaryFetchResult, error) {
 // binaryFetchCtx fetches a company-facing binary file endpoint and classifies its
 // response.
 //
-// The endpoint has TWO 200 shapes and which one arrives is not the
-// company's to predict: a person whose source field is PRIVATE yields
-// application/json {"encrypted":true,"value":<wrapper>}, a person whose field is
-// not yields the file's own Content-Type and the bytes themselves. The decision is
-// made on Content-Type and never by sniffing the body — a PDF or an image that
-// happened to start with a brace would be indistinguishable from a wrapper.
+// The endpoint has THREE 200 shapes and which one arrives is not the company's to
+// predict: a person whose source field is PRIVATE yields application/json
+// {"encrypted":true,"value":<wrapper>}; a NON-PRIVATE source whose type stores
+// more than one file or declares metadata entries yields
+// {"encrypted":false,"value":"<envelope>"}; every other non-private source yields
+// the file's own Content-Type and the bytes themselves. The bytes shape is told
+// apart on Content-Type and never by sniffing the body — a PDF or an image that
+// happened to start with a brace would be indistinguishable from a wrapper — and
+// inside a JSON body it is "encrypted" that decides.
 //
 // A 410 company_data.file_expired (the answer's 90-day retention has elapsed)
 // surfaces as an *ApiError whose Details carry content_sha256 and expired_at.
@@ -263,14 +266,29 @@ func (c *Client) binaryFetchCtx(ctx context.Context, valueURL string) (BinaryFet
 		}, nil
 	}
 
-	// The wrapper shape is served in whichever of JSON/XML this service asked for,
-	// so it goes through the same parser every other response does.
-	body, err := parseBody(resp.Body, c.config.Format == "xml")
+	// Parsed by what the RESPONSE says it is, never by the configured Format: these four routes
+	// answer application/json on both structured arms whatever the client speaks, so a client
+	// configured for XML must not hand this body to its XML parser.
+	body, err := parseBody(resp.Body, strings.Contains(lowered, "xml"))
 	if err != nil {
 		return BinaryFetchResult{}, err
 	}
 	wrapper := body
 	if m, ok := body.(map[string]any); ok {
+		// "encrypted": false with a string "value" is the PLAINTEXT ENVELOPE arm;
+		// every other JSON body is the wrapper arm, which is what the bare-wrapper
+		// routes (a company's own contract copy, its run slot file) answer with.
+		if enc, ok := m["encrypted"].(bool); ok && !enc {
+			if envelope, ok := m["value"].(string); ok {
+				return BinaryFetchResult{
+					Encrypted:     false,
+					Envelope:      envelope,
+					HasEnvelope:   true,
+					ContentType:   contentType,
+					ContentSha256: digest,
+				}, nil
+			}
+		}
 		if v, ok := m["value"]; ok {
 			wrapper = v
 		}
