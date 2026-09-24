@@ -270,7 +270,9 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 
   For the seeded types that means, unchanged: `email`/`phone`/`url`/`text` → `string` (`phone` is a
   single E.164-style string: `+` and digits); `country`/`nationality` → `string`, an ISO 3166-1
-  alpha-2 code (e.g. `"US"`, `"NL"`), not a display name; `address`/`bank`/`creditcard` →
+  alpha-2 code (e.g. `"US"`, `"NL"`), not a display name;
+  `personal_number`/`place_of_birth` → `string`, and a verified place of birth is `<city>, <alpha-2>`
+  (e.g. `"Amsterdam, NL"`) — a country CODE, not a name; `address`/`bank`/`creditcard` →
   `map[string]any`; `date`/`date_of_birth` → `time.Time`; `photo`, `document`, `legal_document` and
   the ID-document subtypes `passport`, `photo_id`, `drivers_license` → `*BinaryHandle`.
 

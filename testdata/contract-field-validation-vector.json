@@ -1,5 +1,5 @@
 {
-  "_comment": "Canonical parity vector for the field-type registry and for field-type value validation. `registry` is the row set every case below is resolved against — the 24 SEEDED rows plus six data-added rows: a child of `url` carrying a regex, a child of `legal_document` overriding nothing, a child of `address` REPLACING its `fields` list, one row whose `input` is outside the fixed vocabulary (a deployed registry's CHECK constraint makes that unreachable; it pins how a client older than a primitive behaves — read-only rendering, and validation by the check and the regexes alone), and two rows whose names are legal per `^[a-z0-9_]{1,40}$` but hostile to a dictionary: `__proto__` and the all-digit `123`. Every platform's resolver MUST reproduce every expectation here. Ports: frontend/src/fieldTypes.js + fieldValidation.js (reference), allus/src/, admin/src/, ios FieldTypeRegistry.swift, android FieldTypeRegistry.kt, sdks/*/. See docs/superpowers/specs/2026-09-07-field-type-definitions.html and its predecessor docs/superpowers/specs/2026-07-15-field-type-validation-design.html.",
+  "_comment": "Canonical parity vector for the field-type registry and for field-type value validation. `registry` is the row set every case below is resolved against — the 26 SEEDED rows plus six data-added rows: a child of `url` carrying a regex, a child of `legal_document` overriding nothing, a child of `address` REPLACING its `fields` list, one row whose `input` is outside the fixed vocabulary (a deployed registry's CHECK constraint makes that unreachable; it pins how a client older than a primitive behaves — read-only rendering, and validation by the check and the regexes alone), and two rows whose names are legal per `^[a-z0-9_]{1,40}$` but hostile to a dictionary: `__proto__` and the all-digit `123`. Every platform's resolver MUST reproduce every expectation here. Ports: frontend/src/fieldTypes.js + fieldValidation.js (reference), allus/src/, admin/src/, ios FieldTypeRegistry.swift, android FieldTypeRegistry.kt, sdks/*/. See docs/superpowers/specs/2026-09-07-field-type-definitions.html and its predecessor docs/superpowers/specs/2026-07-15-field-type-validation-design.html.",
   "_case_kinds": {
     "cases": "isFieldValueValid(type, value, options) -> valid. Empty value = valid (required is the caller's job). Only present, non-empty sub-fields of a structured type are checked. A type the registry does not carry accepts anything. ORDER: the primitive's own rule, then the resolved check, then every regex root-first, then the sub-field entries — and a CHECK's normalised value is what those regexes see, while a primitive's is not. `options` is the caller's own option list, present only on a choice case: the ROW's resolved options govern when it carries any, else these, and a choice with neither is refused rather than measured against an empty domain.",
     "resolve_cases": "resolve(type) -> the resolved definition: every inherited column filled in from the nearest ancestor that sets it, plus `validations` root-first. `known` is false for a type the registry does not carry.",
@@ -91,6 +91,30 @@
       "parent": "text",
       "label": "fieldtype_nationality",
       "input": "nationality",
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "personal_number",
+      "parent": "text",
+      "label": "fieldtype_personal_number",
+      "input": null,
+      "lane": null,
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true
+    },
+    {
+      "type": "place_of_birth",
+      "parent": "text",
+      "label": "fieldtype_place_of_birth",
+      "input": null,
       "lane": null,
       "check": null,
       "options": null,
@@ -1455,6 +1479,18 @@
       "valid": false
     },
     {
+      "name": "personal_number_ok",
+      "type": "personal_number",
+      "value": "123456782",
+      "valid": true
+    },
+    {
+      "name": "place_of_birth_ok",
+      "type": "place_of_birth",
+      "value": "Amsterdam, NL",
+      "valid": true
+    },
+    {
       "name": "address_country_code_ok",
       "type": "address",
       "value": "{\"country\":\"US\"}",
@@ -2031,6 +2067,40 @@
         "fields": null,
         "validations": []
       }
+    },
+    {
+      "name": "resolve_personal_number",
+      "type": "personal_number",
+      "resolved": {
+        "type": "personal_number",
+        "parent": "text",
+        "label": "fieldtype_personal_number",
+        "is_system": true,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_place_of_birth",
+      "type": "place_of_birth",
+      "resolved": {
+        "type": "place_of_birth",
+        "parent": "text",
+        "label": "fieldtype_place_of_birth",
+        "is_system": true,
+        "known": true,
+        "input": "line",
+        "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
     }
   ],
   "accepts_cases": [
@@ -2080,6 +2150,30 @@
       "name": "accepts_date_of_birth_by_date",
       "requested": "date_of_birth",
       "actual": "date",
+      "accepts": false
+    },
+    {
+      "name": "accepts_text_by_personal_number",
+      "requested": "text",
+      "actual": "personal_number",
+      "accepts": true
+    },
+    {
+      "name": "accepts_personal_number_by_text",
+      "requested": "personal_number",
+      "actual": "text",
+      "accepts": false
+    },
+    {
+      "name": "accepts_text_by_place_of_birth",
+      "requested": "text",
+      "actual": "place_of_birth",
+      "accepts": true
+    },
+    {
+      "name": "accepts_place_of_birth_by_text",
+      "requested": "place_of_birth",
+      "actual": "text",
       "accepts": false
     },
     {
@@ -2154,6 +2248,8 @@
         "gender",
         "country",
         "nationality",
+        "personal_number",
+        "place_of_birth",
         "date",
         "date_of_birth",
         "number",
@@ -2203,7 +2299,9 @@
         "email",
         "gender",
         "nationality",
+        "personal_number",
         "phone",
+        "place_of_birth",
         "url",
         "facebook",
         "123",
@@ -2306,6 +2404,8 @@
       "gender",
       "country",
       "nationality",
+      "personal_number",
+      "place_of_birth",
       "date",
       "date_of_birth",
       "number",
@@ -2336,6 +2436,8 @@
       "gender",
       "country",
       "nationality",
+      "personal_number",
+      "place_of_birth",
       "date",
       "date_of_birth",
       "number",
@@ -2368,6 +2470,8 @@
       "gender",
       "country",
       "nationality",
+      "personal_number",
+      "place_of_birth",
       "date",
       "date_of_birth",
       "number",
