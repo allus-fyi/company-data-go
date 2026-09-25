@@ -1568,7 +1568,7 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 		answersOut = append(answersOut, map[string]any{"slug": slug, "values": values})
 	}
 
-	leaf, nextNode := computeNextNode(run.Definition, run.CurrentNode, full)
+	leaf, nextNode := computeNextNode(run.Definition, run.CurrentNode, full, run.ReferenceDate)
 	body := map[string]any{"answers": answersOut}
 	if leaf {
 		body["leaf"] = true
@@ -1659,7 +1659,7 @@ func (c *Client) ProcessFlowRun(ctx context.Context, runID string, fillNode func
 	for k, v := range fill {
 		merged[k] = v
 	}
-	wasLeaf, _ := computeNextNode(run.Definition, run.CurrentNode, merged)
+	wasLeaf, _ := computeNextNode(run.Definition, run.CurrentNode, merged, run.ReferenceDate)
 	run, err = c.SubmitFlowAnswers(ctx, run, fill, partyPubKeys)
 	if err != nil {
 		return FlowRun{}, err
@@ -1823,10 +1823,10 @@ func nodeByKey(definition map[string]any, key string) map[string]any {
 	return nil
 }
 
-// computeNextNode returns the next node after fromKey — ordered outgoing edges,
-// first match wins. leaf is true when there is no outgoing edge or none matched
-// (a dead-end is a leaf, matching the platform engine).
-func computeNextNode(definition map[string]any, fromKey string, answers map[string]any) (leaf bool, next string) {
+// computeNextNode checks ordered outgoing edges; the first match wins.
+// Conditions use the answers plus computed constants at the run reference date.
+// No matching outgoing edge means a leaf.
+func computeNextNode(definition map[string]any, fromKey string, answers map[string]any, referenceDate string) (leaf bool, next string) {
 	edgesRaw, _ := definition["edges"].([]any)
 	type edge struct {
 		m    map[string]any
@@ -1850,8 +1850,10 @@ func computeNextNode(definition map[string]any, fromKey string, answers map[stri
 			edges[j-1], edges[j] = edges[j], edges[j-1]
 		}
 	}
+	constantsRaw, _ := definition["constants"].([]any)
+	materialized := ComputeConstants(constantsRaw, answers, referenceDate)
 	for _, e := range edges {
-		if EvaluateCondition(e.m["condition"], answers) {
+		if EvaluateCondition(e.m["condition"], materialized) {
 			return false, asString(e.m["to"])
 		}
 	}
