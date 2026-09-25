@@ -652,7 +652,7 @@ run's bound parties.
 | `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
 | `FlowRun(ctx, runID)` | `FlowRun, error` | Fetches one run by id. |
 | `SubmitFlowAnswers(ctx, run, fill, partyPubKeys)` | `FlowRun, error` | Fills the company's current node, encrypts one answer copy per bound party, and advances the run. |
-| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and kicks off contract generation. Returns `{document_id, status}` (no bytes — see below). |
+| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and kicks off contract generation. Returns `{document_id, documents, status}` (no bytes — see below). |
 | `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate, chained. |
 | `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
 | `PluginPass(ctx, runID)` / `PluginOptions(…)` / `PluginOutputs(…)` / `CheckFlowValue(…)` | | Call a plugin element on the company's step and check a field's min/max — see [Plugins](#plugins). |
@@ -669,6 +669,20 @@ run, err := client.TriggerFlowRun(ctx, flowID, connectionID, map[string]string{
 run, err = client.FlowRun(ctx, run.ID)
 answers, err := client.FlowRunAnswers(run) // {slug: plaintext}, e.g. answers["monthly_eur"]
 ```
+
+**The party that answers a run's last step generates the contract — the customer role included.**
+When your company is a CUSTOMER of another company's service and its answer completes a document-mode
+leaf, the run parks at `generating` until you generate:
+
+```go
+res, err := customer.GenerateFlowDocument(connectionID, run) // POST /api/company-connections/{connectionID}/flow-runs/{runID}/generate
+```
+
+Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
+answers, opened with the account key — every party's answers are sealed to every bound party, so that
+copy holds the whole run and no service key is involved. Returns `{document_id, documents, status}`;
+a repeat answers the same document set. A `*ConfigError` is returned when the run's current step is
+not bound to your company.
 
 Once a document-mode leaf has generated the contract, download its bytes with
 `FlowRunDocument(runID)` — see [Company documents](#company-documents) above.

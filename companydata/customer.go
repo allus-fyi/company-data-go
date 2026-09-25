@@ -386,6 +386,39 @@ func (c *CustomerClient) DeclineFlowRun(connectionID, runID string) (any, error)
 	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/decline", nil)
 }
 
+// GenerateFlowDocument generates the contract of a document-mode run whose LEAF
+// this company answered (POST /api/company-connections/{id}/flow-runs/{runId}/generate).
+// The party that answers a run's last step generates. Submitting the leaf's
+// answers leaves the run "generating"; pass the run as re-read then. The whole
+// answer map comes from this company's OWN copy of the answers, opened with the
+// account key — every party's answers are sealed to every bound party, so that
+// copy holds the whole run and no service key is involved — and is sealed with
+// oneTimeKeyBundle. Returns the API response {document_id, documents, status}
+// (idempotent — a repeat answers the same document set). A *ConfigError is
+// returned when the run's current step is not bound to this company — the
+// participant the run lists on connectionID.
+func (c *CustomerClient) GenerateFlowDocument(connectionID string, run FlowRun) (any, error) {
+	own := ""
+	for _, p := range run.Participants {
+		if p.ConnectionID == connectionID {
+			own = p.PersonUserID
+			break
+		}
+	}
+	if own == "" || customerOwnUserID(run) != own {
+		return nil, newConfigError("run %s is not at a step this company answered", run.ID)
+	}
+	stored, err := c.decryptOwnRunAnswers(run)
+	if err != nil {
+		return nil, err
+	}
+	body, err := oneTimeKeyBundle(stored)
+	if err != nil {
+		return nil, err
+	}
+	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+run.ID+"/generate", body)
+}
+
 // EncryptFlowAnswer encrypts one answer value for one flow party per the P4 key rule.
 func (c *CustomerClient) EncryptFlowAnswer(plaintext string, party FlowParty, companyCode, serviceCode string) (map[string]any, error) {
 	var pub *rsa.PublicKey

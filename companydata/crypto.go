@@ -337,6 +337,46 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 	}, nil
 }
 
+// oneTimeKeyBundle builds the one-time-key bundle a flow run's /generate takes: the
+// WHOLE answer map, sealed under a key used once and never stored. answers is
+// {slug: plaintext} (a non-string value is JSON-encoded). A random 32-byte
+// AES-256-GCM key encrypts JSON(answers); the result is packed
+// iv(12)||ciphertext||tag(16) and both halves are base64-encoded → {otk, values}.
+// The server evaluates every leaf-PDF condition, constant and {{tag}} over this
+// map, so a slug missing from it prints blank on the contract.
+func oneTimeKeyBundle(answers map[string]any) (map[string]any, error) {
+	strMap := map[string]string{}
+	for k, v := range answers {
+		strMap[k] = flowPlain(v)
+	}
+	payload, err := json.Marshal(strMap)
+	if err != nil {
+		return nil, newConfigError("could not marshal answer values: %v", err)
+	}
+	otk := make([]byte, 32)
+	if _, err := rand.Read(otk); err != nil {
+		return nil, err
+	}
+	iv := make([]byte, gcmIVLen)
+	if _, err := rand.Read(iv); err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(otk)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	ctWithTag := gcm.Seal(nil, iv, payload, nil) // ciphertext || tag(16)
+	blob := append(append([]byte{}, iv...), ctWithTag...)
+	return map[string]any{
+		"otk":    base64.StdEncoding.EncodeToString(otk),
+		"values": base64.StdEncoding.EncodeToString(blob),
+	}, nil
+}
+
 // ── plugin keys and the plugin-server builder routine ──────────────────────
 
 // GenerateReplyKey makes a fresh RSA-2048 key pair for one plugin call and

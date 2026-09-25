@@ -2,9 +2,6 @@ package companydata
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -1667,44 +1664,18 @@ func (c *Client) CheckFlowValue(run FlowRun, slug string, value any, draft map[s
 }
 
 // GenerateFlowDocument runs the document-mode company leaf: a one-time-key value
-// gather → POST /generate. It builds a random 32-byte AES-256-GCM key, encrypts
-// JSON({slug: plaintext}) of the company's decrypted answers, packs
-// iv(12)||ciphertext||tag(16), and POSTs {otk: base64(key), values: base64(blob)}.
-// Returns the API response {document_id, status: "awaiting_signature"} (idempotent).
+// gather → POST /generate. It seals the company's decrypted answers with
+// oneTimeKeyBundle and POSTs {otk, values}. Returns the API response
+// {document_id, documents, status} (idempotent — a repeat answers the same
+// document set).
 func (c *Client) GenerateFlowDocument(ctx context.Context, run FlowRun) (any, error) {
 	answers, err := c.decryptRunAnswers(run)
 	if err != nil {
 		return nil, err
 	}
-	strMap := map[string]string{}
-	for k, v := range answers {
-		strMap[k] = flowPlain(v)
-	}
-	payload, err := json.Marshal(strMap)
-	if err != nil {
-		return nil, newConfigError("could not marshal answer values: %v", err)
-	}
-	otk := make([]byte, 32)
-	if _, err := rand.Read(otk); err != nil {
-		return nil, err
-	}
-	iv := make([]byte, 12)
-	if _, err := rand.Read(iv); err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(otk)
+	body, err := oneTimeKeyBundle(answers)
 	if err != nil {
 		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	ctWithTag := gcm.Seal(nil, iv, payload, nil) // ciphertext || tag(16)
-	blob := append(append([]byte{}, iv...), ctWithTag...)
-	body := map[string]any{
-		"otk":    base64.StdEncoding.EncodeToString(otk),
-		"values": base64.StdEncoding.EncodeToString(blob),
 	}
 	return c.http.Post(ctx, epFlowRuns+"/"+run.ID+"/generate", body)
 }
