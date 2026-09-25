@@ -19,6 +19,9 @@ type flowConstCase struct {
 	Answers       json.RawMessage `json:"answers"`
 	ReferenceDate string          `json:"reference_date"`
 	Expect        json.RawMessage `json:"expect"`
+	// PluginSlugs, when the case carries it, is fed through ExpandPluginAnswers
+	// before the constants are computed.
+	PluginSlugs []string `json:"plugin_slugs"`
 }
 
 func loadFlowConstantsVector(t *testing.T) []flowConstCase {
@@ -66,8 +69,8 @@ func flowValueEq(got, want any) bool {
 
 func TestFlowConstantsVector(t *testing.T) {
 	cases := loadFlowConstantsVector(t)
-	if len(cases) != 51 {
-		t.Fatalf("expected 51 vector cases, got %d", len(cases))
+	if len(cases) != 62 {
+		t.Fatalf("expected 62 vector cases, got %d", len(cases))
 	}
 	for _, c := range cases {
 		c := c
@@ -84,6 +87,9 @@ func TestFlowConstantsVector(t *testing.T) {
 			expectAny := decodeNumber(t, c.Expect)
 			expect, _ := expectAny.(map[string]any)
 
+			if c.PluginSlugs != nil {
+				answers = ExpandPluginAnswers(answers, c.PluginSlugs)
+			}
 			out := ComputeConstants(constants, answers, c.ReferenceDate)
 
 			for key, want := range expect {
@@ -120,12 +126,25 @@ func TestResolveConstantsVector(t *testing.T) {
 			expectAny := decodeNumber(t, c.Expect)
 			expect, _ := expectAny.(map[string]any)
 
-			out := ResolveConstants(constants, answers, c.ReferenceDate)
+			out := ResolveConstants(constants, answers, c.ReferenceDate, c.PluginSlugs...)
 
-			if len(out) != len(expect) {
-				t.Fatalf("%s: got %d keys %v, want %d keys %v", c.Name, len(out), keysOf(out), len(expect), keysOf(expect))
+			// The expect map may also pin expanded answer keys; ResolveConstants
+			// answers the declared constants only.
+			declared := map[string]bool{}
+			for _, cst := range constants {
+				if cm, ok := cst.(map[string]any); ok {
+					if k, ok := cm["key"].(string); ok {
+						declared[k] = true
+					}
+				}
+			}
+			if len(out) != len(declared) {
+				t.Fatalf("%s: got %d keys %v, want %d declared constants", c.Name, len(out), keysOf(out), len(declared))
 			}
 			for key, want := range expect {
+				if !declared[key] {
+					continue
+				}
 				got, present := out[key]
 				if !present {
 					t.Fatalf("%s: key %q missing from ResolveConstants result", c.Name, key)
@@ -136,7 +155,7 @@ func TestResolveConstantsVector(t *testing.T) {
 				}
 			}
 			for key := range out {
-				if _, ok := expect[key]; !ok {
+				if !declared[key] {
 					t.Fatalf("%s: unexpected extra key %q in ResolveConstants result (answers leaked?)", c.Name, key)
 				}
 			}

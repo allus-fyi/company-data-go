@@ -79,11 +79,38 @@ type RequestField struct {
 	// age limit. Enforced at the accepting act only — a standing live link is not
 	// re-enforced afterwards, so apply your own policy from each Value's VerifiedAt.
 	VerifiedMaxAgeDays *int
-	Raw                map[string]any
+	// Plugin describes a plugin row (Type "plugin"): the plugin's name, its field
+	// type and the snapshot of that field type's blocks, inputs and outputs. nil on
+	// every other row, and on an older API.
+	Plugin *RequestFieldPlugin
+	Raw    map[string]any
+}
+
+// RequestFieldPlugin is the plugin member of a plugin request row or flow row.
+type RequestFieldPlugin struct {
+	PluginName string
+	FieldType  string
+	// Snapshot is the field type's description as the company saved it:
+	// plugin_name, host, label, blocks, inputs, outputs.
+	Snapshot map[string]any
+}
+
+func requestFieldPluginFromAPI(v any) *RequestFieldPlugin {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	snapshot, _ := m["snapshot"].(map[string]any)
+	return &RequestFieldPlugin{
+		PluginName: asString(m["plugin_name"]),
+		FieldType:  asString(m["field_type"]),
+		Snapshot:   snapshot,
+	}
 }
 
 func requestFieldFromAPI(obj map[string]any) RequestField {
 	return RequestField{
+		Plugin:  requestFieldPluginFromAPI(obj["plugin"]),
 		Slug:    asString(obj["slug"]),
 		Label:   asString(obj["label"]),
 		Type:    asString(obj["type"]),
@@ -169,6 +196,25 @@ func valueFromAPI(obj map[string]any, fieldType string, fieldTypes *FieldTypeReg
 // and its primitive — so a type added to the registry types itself from the day it is a row.
 func typedValue(obj map[string]any, fieldType string, fieldTypes *FieldTypeRegistry, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (any, error) {
 	ftype := strings.ToLower(fieldType)
+
+	// The type key "plugin" is reserved and never a registry row: a plugin answer is the
+	// self-describing JSON of its blocks and outputs, typed before the registry is asked.
+	if ftype == pluginTypeKey {
+		ciphertext, ok := obj["value"]
+		if !ok || ciphertext == nil {
+			return nil, nil
+		}
+		plaintext, err := decryptValue(ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		pv, err := ParsePluginValue(plaintext)
+		if err != nil {
+			return nil, err
+		}
+		return pv, nil
+	}
+
 	definition := fieldTypes.Resolve(ftype)
 
 	// Binary → a lazy handle over the slot value_url (no eager fetch/decrypt).
@@ -528,6 +574,11 @@ type FlowRun struct {
 	// §5a/§9 item 12). ConnectionID above names only the PRIMARY counterparty, so a
 	// multi-actor run's other counterparties are reachable only here.
 	Participants []FlowRunParticipant
+	// PrivateSlugs names the slugs whose answer came from a private source. Every
+	// party of the run sees it; it is metadata, never a value. nil when the run read
+	// did not carry the list, which the plugin helpers read as "unknown": every other
+	// party's value is then treated as private.
+	PrivateSlugs []string
 	Raw          map[string]any
 }
 
@@ -624,7 +675,17 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 			}
 		}
 	}
+	var privateSlugs []string
+	if lst, ok := obj["private_slugs"].([]any); ok {
+		privateSlugs = make([]string, 0, len(lst))
+		for _, v := range lst {
+			if s := asString(v); s != "" {
+				privateSlugs = append(privateSlugs, s)
+			}
+		}
+	}
 	return FlowRun{
+		PrivateSlugs:  privateSlugs,
 		ID:            asString(obj["id"]),
 		FlowID:        asString(obj["flow_id"]),
 		FlowVersion:   obj["flow_version"],

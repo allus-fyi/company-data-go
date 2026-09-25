@@ -31,6 +31,9 @@ var (
 	ErrRateLimit = errors.New("rate limit error")
 	// ErrValidation is matched by errors.Is(err, ErrValidation) for any *ValidationError.
 	ErrValidation = errors.New("validation error")
+	// ErrPluginInputUnavailable is matched by errors.Is(err, ErrPluginInputUnavailable) for
+	// any *PluginInputUnavailableError.
+	ErrPluginInputUnavailable = errors.New("plugin input unavailable")
 )
 
 // ConfigError is raised for missing or invalid configuration (or key file) at
@@ -146,12 +149,23 @@ func newWebhookError(format string, a ...any) *WebhookError {
 // ValidationError is raised when a freshly-typed value fails its field type's
 // shape/format check before encryption. It names the offending Slug and
 // the resolved FieldType. Client validation is UX, never a security boundary.
+//
+// A flow value outside its field's minimum or maximum is refused with the same
+// type: Bound is then "min" or "max" and BoundValue the bound it broke.
 type ValidationError struct {
-	Slug      string
-	FieldType string
+	Slug       string
+	FieldType  string
+	Bound      string
+	BoundValue any
 }
 
 func (e *ValidationError) Error() string {
+	switch e.Bound {
+	case "min":
+		return fmt.Sprintf("validation error: value for %q is below its minimum %s", e.Slug, flowStr(e.BoundValue))
+	case "max":
+		return fmt.Sprintf("validation error: value for %q is above its maximum %s", e.Slug, flowStr(e.BoundValue))
+	}
 	return fmt.Sprintf("validation error: value for %q is not a valid %s", e.Slug, e.FieldType)
 }
 
@@ -183,4 +197,48 @@ func NewRateLimitError(retryAfter *float64, errorKey, message string) *RateLimit
 		ApiError:   &ApiError{Status: 429, ErrorKey: errorKey, Message: message},
 		RetryAfter: retryAfter,
 	}
+}
+
+// Reasons a plugin input is unavailable (PluginInputUnavailableError.Reason), checked
+// in this order.
+const (
+	// PluginInputUnwired: the company wired no source to the input.
+	PluginInputUnwired = "unwired"
+	// PluginInputUnanswered: the input's source has no value yet.
+	PluginInputUnanswered = "unanswered"
+	// PluginInputOtherPartyPrivate: the source is another party's private value, which is
+	// never sent to a plugin.
+	PluginInputOtherPartyPrivate = "other_party_private"
+	// PluginInputNotConvertible: the source's value does not convert to the input's type.
+	PluginInputNotConvertible = "not_convertible"
+)
+
+// PluginInputUnavailableError is raised by the plugin flow helpers when a
+// required plugin input cannot be sent. Input names the plugin's input key,
+// Source the key it is wired to ("" when unwired) and Reason says why (one of the
+// PluginInput* constants).
+type PluginInputUnavailableError struct {
+	Input  string
+	Source string
+	Reason string
+}
+
+func (e *PluginInputUnavailableError) Error() string {
+	why := e.Reason
+	switch e.Reason {
+	case PluginInputUnwired:
+		why = "no source is wired to it"
+	case PluginInputUnanswered:
+		why = "its source has no value yet"
+	case PluginInputOtherPartyPrivate:
+		why = "its source is another party's private value"
+	case PluginInputNotConvertible:
+		why = "its source's value does not convert to the input's type"
+	}
+	return fmt.Sprintf("plugin input %q is unavailable: %s", e.Input, why)
+}
+
+// Is reports ErrPluginInputUnavailable membership for errors.Is.
+func (e *PluginInputUnavailableError) Is(target error) bool {
+	return target == ErrPluginInputUnavailable
 }

@@ -14,7 +14,9 @@ package companydata
 // from flowcondition.go unchanged, so the 27-case condition vector is untouched.
 
 import (
+	"encoding/json"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -157,6 +159,27 @@ func evalExpr(expr any, answers map[string]any, referenceDate string) any {
 		return nil
 	case "math":
 		args := asAnyList(m["args"])
+		op, _ := m["op"].(string)
+		// max/min are variadic and skip the arguments that are not finite numbers, so they
+		// run before the any-null guard below; no numeric argument at all -> nil.
+		if op == "max" || op == "min" {
+			var best float64
+			found := false
+			for _, a := range args {
+				n, ok := flowToNum(evalExpr(a, answers, referenceDate))
+				if !ok || math.IsInf(n, 0) || math.IsNaN(n) {
+					continue
+				}
+				if !found || (op == "max" && n > best) || (op == "min" && n < best) {
+					best = n
+					found = true
+				}
+			}
+			if !found {
+				return nil
+			}
+			return best
+		}
 		nums := make([]float64, 0, len(args))
 		for _, a := range args {
 			n, ok := flowToNum(evalExpr(a, answers, referenceDate))
@@ -167,7 +190,6 @@ func evalExpr(expr any, answers map[string]any, referenceDate string) any {
 			}
 			nums = append(nums, n)
 		}
-		op, _ := m["op"].(string)
 		switch op {
 		case "add":
 			s := 0.0
@@ -255,7 +277,8 @@ func collectExprConstRefs(expr any, constKeys map[string]bool, acc *orderedKeySe
 	}
 	switch typ {
 	case "ref":
-		if k, _ := m["key"].(string); constKeys[k] {
+		// A nil constKeys collects every ref, not only the constant ones.
+		if k, _ := m["key"].(string); constKeys == nil || constKeys[k] {
 			acc.add(k)
 		}
 	case "lit", "today":
@@ -293,7 +316,7 @@ func collectCondConstRefs(cond any, constKeys map[string]bool, acc *orderedKeySe
 		}
 		return
 	}
-	if f, ok := m["field"].(string); ok && constKeys[f] {
+	if f, ok := m["field"].(string); ok && (constKeys == nil || constKeys[f]) {
 		acc.add(f)
 	}
 }
@@ -365,7 +388,14 @@ func ComputeConstants(constants []any, answers map[string]any, referenceDate str
 // ResolveConstants is the SDK-ergonomic helper: it returns ONLY the computed
 // {constKey:value} entries (answers stripped out), for callers that want the
 // resolved constants without the merged answer map.
-func ResolveConstants(constants []any, answers map[string]any, referenceDate string) map[string]any {
+//
+// pluginSlugs, when given, names the definition's plugin element slugs: their
+// stored answers are expanded (ExpandPluginAnswers) before the constants are
+// computed, so a constant can read a plugin output such as "cao.min_wage".
+func ResolveConstants(constants []any, answers map[string]any, referenceDate string, pluginSlugs ...string) map[string]any {
+	if len(pluginSlugs) > 0 {
+		answers = ExpandPluginAnswers(answers, pluginSlugs)
+	}
 	full := ComputeConstants(constants, answers, referenceDate)
 	out := make(map[string]any)
 	for _, c := range constants {
@@ -378,6 +408,156 @@ func ResolveConstants(constants []any, answers map[string]any, referenceDate str
 		}
 	}
 	return out
+}
+
+// ── plugin answers ─────────────────────────────────────────────────────────
+
+// pluginKeyPattern is the key shape a plugin block or output must have to be
+// readable as "<slug>.<key>"; the key "id" is reserved for a pick's id.
+var pluginKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,39}$`)
+
+func pluginKeyUsable(key string) bool {
+	return key != "id" && pluginKeyPattern.MatchString(key)
+}
+
+// parsePluginPlaintext parses a stored plugin answer. ok is false when the text
+// is not a JSON object; finished reports whether it carries an "outputs" array
+// (an answer without one is unfinished).
+func parsePluginPlaintext(plaintext string) (obj map[string]any, ok bool, finished bool) {
+	if err := json.Unmarshal([]byte(plaintext), &obj); err != nil || obj == nil {
+		return nil, false, false
+	}
+	_, finished = obj["outputs"].([]any)
+	return obj, true, finished
+}
+
+// pluginSummaryOf joins the value of every block, in stored order, with " / ".
+func pluginSummaryOf(obj map[string]any) string {
+	parts := []string{}
+	for _, b := range asAnyList(obj["blocks"]) {
+		bm, _ := b.(map[string]any)
+		parts = append(parts, flowStr(bm["value"]))
+	}
+	return strings.Join(parts, " / ")
+}
+
+// ExpandPluginAnswers returns a NEW answer map in which every finished plugin
+// answer named by pluginSlugs is replaced by its summary (the block values
+// joined by " / ") and joined by "<slug>.<block>" (the block's value),
+// "<slug>.<block>.id" (a search_select pick's id) and "<slug>.<output>" (the
+// output's typed value; a null output adds no key). A plugin answer that parses
+// but carries no "outputs" array is unfinished and its entry is removed; a value
+// that is not a JSON object is left as it is. The input map is not changed and a
+// slug outside pluginSlugs is never touched.
+func ExpandPluginAnswers(answers map[string]any, pluginSlugs []string) map[string]any {
+	out := make(map[string]any, len(answers))
+	for k, v := range answers {
+		out[k] = v
+	}
+	for _, slug := range pluginSlugs {
+		raw, present := answers[slug]
+		if !present {
+			continue
+		}
+		text, isString := raw.(string)
+		if !isString {
+			continue
+		}
+		obj, ok, finished := parsePluginPlaintext(text)
+		if !ok {
+			continue
+		}
+		if !finished {
+			delete(out, slug)
+			continue
+		}
+		out[slug] = pluginSummaryOf(obj)
+		for _, b := range asAnyList(obj["blocks"]) {
+			bm, isMap := b.(map[string]any)
+			if !isMap {
+				continue
+			}
+			key, _ := bm["key"].(string)
+			if !pluginKeyUsable(key) {
+				continue
+			}
+			if v := bm["value"]; v != nil {
+				out[slug+"."+key] = v
+			}
+			if kind, _ := bm["kind"].(string); kind == "search_select" {
+				if id, has := bm["id"]; has && id != nil {
+					out[slug+"."+key+".id"] = flowStr(id)
+				}
+			}
+		}
+		for _, o := range asAnyList(obj["outputs"]) {
+			om, isMap := o.(map[string]any)
+			if !isMap {
+				continue
+			}
+			key, _ := om["key"].(string)
+			if !pluginKeyUsable(key) {
+				continue
+			}
+			if v := om["value"]; v != nil {
+				out[slug+"."+key] = v
+			}
+		}
+	}
+	return out
+}
+
+// PluginAnswerSummary returns a stored plugin answer's summary — its block
+// values joined by " / " — and ok=false when the plaintext is not a finished
+// plugin answer (a JSON object with an "outputs" array).
+func PluginAnswerSummary(plaintext string) (summary string, ok bool) {
+	obj, parsed, finished := parsePluginPlaintext(plaintext)
+	if !parsed || !finished {
+		return "", false
+	}
+	return pluginSummaryOf(obj), true
+}
+
+// PluginViewBlock is one block of a stored plugin answer as shown to a reader:
+// its label and its value (the option label for a search_select pick).
+type PluginViewBlock struct {
+	Label string
+	Value any
+}
+
+// PluginViewOutput is one output of a stored plugin answer as shown to a reader.
+type PluginViewOutput struct {
+	Label string
+	Type  string
+	Value any
+}
+
+// PluginView is what every surface renders for a stored plugin answer: the
+// blocks, then the outputs, in stored order.
+type PluginView struct {
+	Blocks  []PluginViewBlock
+	Outputs []PluginViewOutput
+}
+
+// PluginAnswerView returns the display form of a stored plugin answer, or nil
+// when the plaintext is not a JSON object with an "outputs" array. Reading it
+// needs neither the plugin nor its description: labels and order are part of
+// the answer.
+func PluginAnswerView(plaintext string) *PluginView {
+	obj, parsed, finished := parsePluginPlaintext(plaintext)
+	if !parsed || !finished {
+		return nil
+	}
+	view := &PluginView{Blocks: []PluginViewBlock{}, Outputs: []PluginViewOutput{}}
+	for _, b := range asAnyList(obj["blocks"]) {
+		bm, _ := b.(map[string]any)
+		view.Blocks = append(view.Blocks, PluginViewBlock{Label: flowStr(bm["label"]), Value: bm["value"]})
+	}
+	for _, o := range asAnyList(obj["outputs"]) {
+		om, _ := o.(map[string]any)
+		view.Outputs = append(view.Outputs, PluginViewOutput{Label: flowStr(om["label"]), Type: flowStr(om["type"]), Value: om["value"]})
+	}
+	return view
 }
 
 // EvaluateFlowCondition is the per-call-site wrapper: materialise the constants,

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -136,6 +137,10 @@ type Client struct {
 	pubkeyCache map[string]*rsa.PublicKey
 	pubkeyGen   map[string]uint64
 
+	// pluginHTTP is the plain transport plugin calls reach the forwarder over — never the API
+	// transport, which attaches the bearer token and rewrites the base URL.
+	pluginHTTP *http.Client
+
 	pump *Pump
 }
 
@@ -166,6 +171,7 @@ func New(config *Config, opts ...clientOption) (*Client, error) {
 		unresolvedTypes: map[string]bool{},
 		pubkeyCache:     map[string]*rsa.PublicKey{},
 		pubkeyGen:       map[string]uint64{},
+		pluginHTTP:      newPluginTransport(),
 	}
 	for _, o := range opts {
 		o(c)
@@ -454,7 +460,7 @@ func (c *Client) ensureTypesKnown(ctx context.Context, types []string) error {
 	}
 	var missing []string
 	for _, t := range types {
-		if t != "" && !registry.Knows(t) && !c.unresolvedTypes[t] {
+		if t != "" && t != pluginTypeKey && !registry.Knows(t) && !c.unresolvedTypes[t] {
 			missing = append(missing, t)
 		}
 	}
@@ -1544,6 +1550,16 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 		}
 	}
 
+	// A field's min and max are expressions over the live answer map (plugin outputs
+	// included); a value outside them is refused before anything is encrypted.
+	live := liveFlowAnswers(run, answersSoFar, fill)
+	for slug, val := range fill {
+		if err := flowBoundError(run, slug, val, live); err != nil {
+			return FlowRun{}, err
+		}
+	}
+
+	private := sourcePrivate(run, fill, run.ServiceUserID())
 	answersOut := make([]map[string]any, 0, len(fill))
 	for slug, val := range fill {
 		plain := flowPlain(val)
@@ -1565,7 +1581,12 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 			}
 			values = append(values, map[string]any{"for_user_id": uid, "value": wrapper})
 		}
-		answersOut = append(answersOut, map[string]any{"slug": slug, "values": values})
+		answer := map[string]any{"slug": slug, "values": values}
+		if private[slug] {
+			// The value came from a private source: a default reaching one.
+			answer["source_private"] = true
+		}
+		answersOut = append(answersOut, answer)
 	}
 
 	leaf, nextNode := computeNextNode(run.Definition, run.CurrentNode, full, run.ReferenceDate)
@@ -1581,6 +1602,68 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 		return FlowRun{}, err
 	}
 	return flowRunFromAPI(asMap(res)), nil
+}
+
+// ── plugins on the company's flow steps ────────────────────────────────────
+
+// PluginPass asks the API for a pass to the plugins of the plugin elements on
+// the run's current step (POST /api/company-data/flow-runs/{runId}/plugin-pass).
+// The run must be awaiting the company.
+func (c *Client) PluginPass(ctx context.Context, runID string) (PluginPass, error) {
+	body, err := c.http.Post(ctx, epFlowRuns+"/"+runID+"/plugin-pass", nil)
+	if err != nil {
+		return PluginPass{}, err
+	}
+	return pluginPassFromAPI(asMap(body)), nil
+}
+
+func (c *Client) pluginParty(runID string) pluginFlowParty {
+	return pluginFlowParty{
+		transport:     c.pluginHTTP,
+		fetchRun:      func(ctx context.Context) (FlowRun, error) { return c.FlowRun(ctx, runID) },
+		fetchPass:     func(ctx context.Context) (PluginPass, error) { return c.PluginPass(ctx, runID) },
+		storedAnswers: c.decryptRunAnswers,
+		ownUserID:     func(run FlowRun) string { return run.ServiceUserID() },
+	}
+}
+
+// PluginOptions asks the plugin behind the plugin element slug for the options
+// of one search_select block. query filters them ("" lists everything); picks
+// holds the ids picked so far by block key and values the typed block values.
+//
+// draft holds the current step's answers not yet submitted (slug → plaintext).
+// The plugin's inputs are read from ONE live answer map — the run's stored
+// answers, overlaid with draft for the current step's slugs, plugin answers
+// expanded, constants computed — and converted to their declared types. An input
+// that is another party's private value (a slug in PrivateSlugs, a constant
+// reaching one, or a draft whose field's default reaches one) is never sent: a
+// required one raises *PluginInputUnavailableError.
+//
+// The request is sealed to the plugin's public key and posted to the forwarder
+// over a plain transport that carries no allme credential; the reply is sealed to
+// a key pair made for the call and opened here.
+func (c *Client) PluginOptions(ctx context.Context, runID, slug, block, query string, picks map[string]string, values, draft map[string]any) (PluginOptionsResult, error) {
+	return c.pluginParty(runID).options(ctx, slug, block, query, picks, values, draft)
+}
+
+// PluginOutputs asks the plugin behind the plugin element slug for the outputs
+// of the picks and typed values so far, reading inputs as PluginOptions does. It
+// answers *PluginOutputs, or *PluginPicksInvalid when the picks no longer fit;
+// after changing an input, call it again before submitting.
+func (c *Client) PluginOutputs(ctx context.Context, runID, slug string, picks map[string]string, values, draft map[string]any) (PluginOutputsResult, error) {
+	return c.pluginParty(runID).outputs(ctx, slug, picks, values, draft)
+}
+
+// CheckFlowValue applies slug's min and max to value over the live answer map
+// (the stored answers overlaid with draft, plugin answers expanded, constants
+// computed) and returns a *ValidationError naming the broken bound, or nil.
+// SubmitFlowAnswers applies the same check to every value it submits.
+func (c *Client) CheckFlowValue(run FlowRun, slug string, value any, draft map[string]any) error {
+	stored, err := c.decryptRunAnswers(run)
+	if err != nil {
+		return err
+	}
+	return flowBoundError(run, slug, value, liveFlowAnswers(run, stored, draft))
 }
 
 // GenerateFlowDocument runs the document-mode company leaf: a one-time-key value
@@ -1824,7 +1907,8 @@ func nodeByKey(definition map[string]any, key string) map[string]any {
 }
 
 // computeNextNode checks ordered outgoing edges; the first match wins.
-// Conditions use the answers plus computed constants at the run reference date.
+// Conditions use the answers — plugin answers expanded — plus computed constants
+// at the run reference date.
 // No matching outgoing edge means a leaf.
 func computeNextNode(definition map[string]any, fromKey string, answers map[string]any, referenceDate string) (leaf bool, next string) {
 	edgesRaw, _ := definition["edges"].([]any)
@@ -1851,7 +1935,7 @@ func computeNextNode(definition map[string]any, fromKey string, answers map[stri
 		}
 	}
 	constantsRaw, _ := definition["constants"].([]any)
-	materialized := ComputeConstants(constantsRaw, answers, referenceDate)
+	materialized := ComputeConstants(constantsRaw, ExpandPluginAnswers(answers, pluginSlugsOf(definition)), referenceDate)
 	for _, e := range edges {
 		if EvaluateCondition(e.m["condition"], materialized) {
 			return false, asString(e.m["to"])

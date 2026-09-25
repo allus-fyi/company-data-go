@@ -53,12 +53,20 @@ type wrapper struct {
 // Config-only key handling: this is the single place a passphrase
 // is used, and it is driven by Config.KeyPassphrase — never passed in by
 // application code (the exported callers in this package read it from Config).
+//
+// An UNENCRYPTED PKCS#8 PEM ("-----BEGIN PRIVATE KEY-----") loads too, whatever
+// the passphrase: a plugin server's own key (PluginOpenRequest) is commonly kept
+// that way.
 func LoadPrivateKey(encryptedPEM []byte, passphrase string) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(encryptedPEM)
 	if block == nil {
 		return nil, &DecryptError{msg: "could not find a PEM block in the private key"}
 	}
-	key, err := pkcs8.ParsePKCS8PrivateKey(block.Bytes, []byte(passphrase))
+	password := []byte(passphrase)
+	if block.Type == "PRIVATE KEY" {
+		password = nil
+	}
+	key, err := pkcs8.ParsePKCS8PrivateKey(block.Bytes, password)
 	if err != nil {
 		// A wrong passphrase or a malformed PEM both land here.
 		return nil, &DecryptError{msg: fmt.Sprintf("could not load private key PEM: %v", err)}
@@ -327,6 +335,85 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 		"iv":   base64.StdEncoding.EncodeToString(iv),
 		"d":    base64.StdEncoding.EncodeToString(ciphertextWithTag),
 	}, nil
+}
+
+// ── plugin keys and the plugin-server builder routine ──────────────────────
+
+// GenerateReplyKey makes a fresh RSA-2048 key pair for one plugin call and
+// returns the private half with the public half as base64 SPKI — the
+// "reply_key" a plugin seals its reply to. The private half stays in memory.
+func GenerateReplyKey() (*rsa.PrivateKey, string, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, "", &DecryptError{msg: fmt.Sprintf("could not generate a reply key: %v", err)}
+	}
+	spki, err := ExportPublicKeySPKI(&key.PublicKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return key, spki, nil
+}
+
+// ExportPublicKeySPKI encodes an RSA public key as base64 SPKI (DER), the form
+// LoadPublicKey reads.
+func ExportPublicKeySPKI(pub *rsa.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", &DecryptError{msg: fmt.Sprintf("could not encode the public key: %v", err)}
+	}
+	return base64.StdEncoding.EncodeToString(der), nil
+}
+
+// PluginOpenRequest is for a plugin's OWN server, never a call on the allme
+// API: it opens the body of a POST {base_url}/call — {"request": "<wrapper>"} —
+// with the plugin's private key and returns the request object (field_type, op,
+// block, query, picks, values, inputs, reply_key). privateKeyPEM is a PKCS#8
+// PEM, encrypted (pass its passphrase) or unencrypted (pass "").
+func PluginOpenRequest(body []byte, privateKeyPEM []byte, passphrase string) (map[string]any, error) {
+	var envelope map[string]any
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope == nil {
+		return nil, &DecryptError{msg: "plugin call body is not a JSON object"}
+	}
+	sealed, ok := envelope["request"]
+	if !ok || sealed == nil {
+		return nil, &DecryptError{msg: `plugin call body carries no "request"`}
+	}
+	key, err := LoadPrivateKey(privateKeyPEM, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := Decrypt(sealed, key)
+	if err != nil {
+		return nil, err
+	}
+	var request map[string]any
+	if err := json.Unmarshal([]byte(plaintext), &request); err != nil || request == nil {
+		return nil, &DecryptError{msg: "plugin request plaintext is not a JSON object"}
+	}
+	return request, nil
+}
+
+// PluginSealReply is for a plugin's OWN server: it seals a reply object
+// ({"options":[…],"more":…}, {"outputs":{…}} or {"picks_invalid":true}) to the
+// request's reply_key and returns the response body {"reply": "<wrapper>"}.
+func PluginSealReply(reply any, replyKeySPKI string) (map[string]any, error) {
+	pub, err := LoadPublicKey(replyKeySPKI)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := json.Marshal(reply)
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("plugin reply is not JSON-encodable: %v", err)}
+	}
+	sealed, err := EncryptForPublicKey(string(plaintext), pub)
+	if err != nil {
+		return nil, err
+	}
+	wrapperJSON, err := json.Marshal(sealed)
+	if err != nil {
+		return nil, &DecryptError{msg: fmt.Sprintf("could not encode the reply wrapper: %v", err)}
+	}
+	return map[string]any{"reply": string(wrapperJSON)}, nil
 }
 
 // ── BinaryHandle ────────────────────────────────────────────

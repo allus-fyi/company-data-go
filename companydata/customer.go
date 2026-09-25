@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -122,6 +123,9 @@ type CustomerClient struct {
 	// read instead of being handed an empty one. Cleared by the first load that succeeds.
 	fieldTypesErr error
 	pump          *Pump
+	// pluginHTTP is the plain transport plugin calls reach the forwarder over — never the API
+	// transport, which attaches the bearer token and rewrites the base URL.
+	pluginHTTP *http.Client
 }
 
 // NewCustomer builds a CustomerClient. The transport authenticates as the acct_*
@@ -140,6 +144,7 @@ func NewCustomer(config *Config, opts ...customerOption) (*CustomerClient, error
 		serviceKeyGen:    map[string]uint64{},
 		requestTypeCache: map[string]map[string]string{},
 		unresolvedTypes:  map[string]bool{},
+		pluginHTTP:       newPluginTransport(),
 	}
 	for _, o := range opts {
 		o(c)
@@ -343,7 +348,36 @@ func (c *CustomerClient) FlowRun(connectionID, runID string) (FlowRun, error) {
 }
 
 // SubmitFlowAnswers submits this party's turn (body carries the encrypted per-party answers).
+//
+// It reads the run first and sets source_private: true on every answer in body["answers"]
+// that is private: a field whose default reaches a private source.
 func (c *CustomerClient) SubmitFlowAnswers(connectionID, runID string, body map[string]any) (any, error) {
+	answers, _ := body["answers"].([]map[string]any)
+	if answers == nil {
+		for _, a := range asAnyList(body["answers"]) {
+			if m, ok := a.(map[string]any); ok {
+				answers = append(answers, m)
+			}
+		}
+	}
+	if len(answers) > 0 {
+		run, err := c.FlowRun(connectionID, runID)
+		if err != nil {
+			return nil, err
+		}
+		submitted := map[string]any{}
+		for _, a := range answers {
+			if slug := asString(a["slug"]); slug != "" {
+				submitted[slug] = true
+			}
+		}
+		private := sourcePrivate(run, submitted, customerOwnUserID(run))
+		for _, a := range answers {
+			if private[asString(a["slug"])] {
+				a["source_private"] = true
+			}
+		}
+	}
 	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/answers", body)
 }
 
@@ -368,6 +402,93 @@ func (c *CustomerClient) EncryptFlowAnswer(plaintext string, party FlowParty, co
 		return nil, fmt.Errorf("no public key available for party %s", party.UserID)
 	}
 	return EncryptForPublicKey(plaintext, pub)
+}
+
+// ── plugins on this company's flow steps ─────────────────────────────────────────
+
+// PluginPass asks the API for a pass to the plugins of the plugin elements on
+// the run's current step (POST /api/company-connections/{id}/flow-runs/{runId}/plugin-pass).
+// The run must be awaiting this company's party.
+func (c *CustomerClient) PluginPass(connectionID, runID string) (PluginPass, error) {
+	body, err := c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/plugin-pass", nil)
+	if err != nil {
+		return PluginPass{}, err
+	}
+	return pluginPassFromAPI(asMap(body)), nil
+}
+
+func (c *CustomerClient) pluginParty(connectionID, runID string) pluginFlowParty {
+	return pluginFlowParty{
+		transport: c.pluginHTTP,
+		fetchRun: func(context.Context) (FlowRun, error) {
+			return c.FlowRun(connectionID, runID)
+		},
+		fetchPass: func(context.Context) (PluginPass, error) {
+			return c.PluginPass(connectionID, runID)
+		},
+		storedAnswers: c.decryptOwnRunAnswers,
+		ownUserID:     customerOwnUserID,
+	}
+}
+
+// PluginOptions asks the plugin behind the plugin element slug for the options
+// of one search_select block — Client.PluginOptions for this company's own
+// party, with the inputs read from the run's answers this company can open with
+// its account key, overlaid with draft for the current step's slugs.
+func (c *CustomerClient) PluginOptions(connectionID, runID, slug, block, query string, picks map[string]string, values, draft map[string]any) (PluginOptionsResult, error) {
+	return c.pluginParty(connectionID, runID).options(context.Background(), slug, block, query, picks, values, draft)
+}
+
+// PluginOutputs asks the plugin behind the plugin element slug for the outputs
+// of the picks and typed values so far — Client.PluginOutputs for this
+// company's own party. It answers *PluginOutputs or *PluginPicksInvalid.
+func (c *CustomerClient) PluginOutputs(connectionID, runID, slug string, picks map[string]string, values, draft map[string]any) (PluginOutputsResult, error) {
+	return c.pluginParty(connectionID, runID).outputs(context.Background(), slug, picks, values, draft)
+}
+
+// CheckFlowValue applies slug's min and max to value over the live answer map
+// (this company's own copies of the run's answers, overlaid with draft, plugin
+// answers expanded, constants computed) and returns a *ValidationError naming
+// the broken bound, or nil. Call it before EncryptFlowAnswer seals the value.
+func (c *CustomerClient) CheckFlowValue(run FlowRun, slug string, value any, draft map[string]any) error {
+	stored, err := c.decryptOwnRunAnswers(run)
+	if err != nil {
+		return err
+	}
+	return flowBoundError(run, slug, value, liveFlowAnswers(run, stored, draft))
+}
+
+// customerOwnUserID is the user id bound to the party of the run's current step:
+// the plugin calls and the bound check act on this company's own turn.
+func customerOwnUserID(run FlowRun) string {
+	return run.Bindings[partyOf(run.Definition, run.CurrentNode)]
+}
+
+// decryptOwnRunAnswers opens this company's own copies of the run's answers
+// (for_user_id = the user bound to the current step) with the account key. Each
+// bound party's copy holds the whole run, whoever answered each slug.
+func (c *CustomerClient) decryptOwnRunAnswers(run FlowRun) (map[string]any, error) {
+	own := customerOwnUserID(run)
+	out := map[string]any{}
+	if own == "" {
+		return out, nil
+	}
+	for _, row := range run.Answers {
+		if asString(row["for_user_id"]) != own {
+			continue
+		}
+		slug := asString(row["slug"])
+		v := row["value"]
+		if slug == "" || v == nil {
+			continue
+		}
+		plain, err := c.decryptAccount(v)
+		if err != nil {
+			return nil, err
+		}
+		out[slug] = plain
+	}
+	return out, nil
 }
 
 // ── change feed (P2 account feed) ──────────────────────────────────────────────

@@ -243,7 +243,7 @@ Everything you read is one of these. Names are Go-idiomatic; shapes match the
 other five SDKs.
 
 ```go
-type RequestField struct { Slug, Label, Type string; OneTime, Mandatory, Verified bool; VerifiedMaxAgeDays *int; Raw map[string]any }
+type RequestField struct { Slug, Label, Type string; OneTime, Mandatory, Verified bool; VerifiedMaxAgeDays *int; Plugin *RequestFieldPlugin; Raw map[string]any }
 type Connection   struct { ID, PersonID, DisplayName string; ConnectedAt *time.Time; Values map[string]Value; Raw map[string]any }
 type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; VerifiedMethod, VerifiedProvider, VerificationID string; Raw map[string]any }
 type Change       struct { ID, Event, PersonID, ShareCode, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
@@ -262,6 +262,7 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
 
   | The type's resolved… | Go type of `Value.Value` |
   |----------------------|--------------------------|
+  | the reserved type key `plugin` (checked before the registry) | `PluginValue` — see [Plugins](#plugins) |
   | storage lane `photo` / `document` | `*BinaryHandle` (lazy) |
   | primitive `composite` | `map[string]any` (parsed JSON object) |
   | primitive `date` | `time.Time` |
@@ -654,6 +655,7 @@ run's bound parties.
 | `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and kicks off contract generation. Returns `{document_id, status}` (no bytes — see below). |
 | `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate, chained. |
 | `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
+| `PluginPass(ctx, runID)` / `PluginOptions(…)` / `PluginOutputs(…)` / `CheckFlowValue(…)` | | Call a plugin element on the company's step and check a field's min/max — see [Plugins](#plugins). |
 | `Identity(ctx)` | `Identity, error` | **(#491)** This client's OWN identity — `{CompanyUserID, ServiceID}` from `GET /api/company-data/whoami`. The company party of a `TriggerFlowRun`/`SubmitFlowAnswers` binding must bind to `CompanyUserID` (the person party's user_id comes from the connection), so without this the company-side binding was otherwise unconstructible through the SDK. |
 
 ```go
@@ -670,6 +672,116 @@ answers, err := client.FlowRunAnswers(run) // {slug: plaintext}, e.g. answers["m
 
 Once a document-mode leaf has generated the contract, download its bytes with
 `FlowRunDocument(runID)` — see [Company documents](#company-documents) above.
+
+---
+
+## Plugins
+
+A company can put a **plugin field** on a flow step, a request row or a sign-in claim. A plugin
+serves the options of the field's blocks (`search_select`, `text`, `number`, `date`) and computes
+its outputs. Its answer is stored like any other answer and reads back without the plugin: it is
+self-describing JSON.
+
+```json
+{"plugin":"Flex","type":"cao",
+ "blocks":[{"key":"cao","kind":"search_select","label":"CAO","id":"hrc","value":"Horeca Fictief"}],
+ "outputs":[{"key":"min_wage","type":"number","label":"Minimum wage","value":9.5}]}
+```
+
+### Reading plugin answers
+
+- **Values.** A value whose row type is the reserved key `plugin` is typed as a `PluginValue`
+  (`Plugin`, `Type`, `Blocks []PluginBlock{Key, Kind, Label, ID, Value}`,
+  `Outputs []PluginOutput{Key, Type, Label, Value}`) before the field-type registry is consulted.
+  A plaintext that is not a JSON object with an `outputs` array (an unfinished answer has none) raises the SDK's validation error with field type `plugin`, both here and from `ParsePluginValue`.
+- **The catalog.** `RequestField.Plugin` is `{PluginName, FieldType, Snapshot}` on a plugin row
+  (request or flow) and `nil` elsewhere; `Snapshot` holds the field type's blocks, inputs and outputs.
+- **Sign-in.** A plugin claim's value in `SignInResult.Values` is the same JSON string;
+  `companydata.ParsePluginValue(s)` turns it into a `PluginValue`.
+- **Display.** `PluginAnswerView(plaintext)` → `*PluginView{Blocks: [{Label, Value}], Outputs:
+  [{Label, Type, Value}]}` in stored order (nil when it is not a finished answer), and
+  `PluginAnswerSummary(plaintext)` → the block values joined by `" / "`.
+
+### Flow expressions over plugin answers
+
+On a flow, a plugin element `cao` is readable in conditions and constants as `cao` (the summary),
+`cao.<block>`, `cao.<block>.id` (a `search_select` pick's id) and `cao.<output>`.
+`ExpandPluginAnswers(answers, pluginSlugs)` returns a new map with those keys; an unfinished answer
+is removed and a value that is not a JSON object is left as it is. `ResolveConstants(constants,
+answers, referenceDate, pluginSlugs...)` expands first when you pass the definition's plugin element
+slugs. The `math` ops include `max` and `min` (variadic; arguments that are not finite numbers are
+skipped; none left → `nil`). `SubmitFlowAnswers` and `ProcessFlowRun` route over the expanded,
+constants-computed map.
+
+### A plugin field on the company's own step
+
+Methods on `Client` (the service's own party) and on `CustomerClient` (this company's party on
+another company's flow — the same methods with a leading `connectionID` and no `ctx`):
+
+| Method | Returns | What it does |
+|--------|---------|--------------|
+| `PluginPass(ctx, runID)` | `PluginPass, error` | A pass for the plugins of the plugin elements on the run's current step: `POST /api/company-data/flow-runs/{runId}/plugin-pass` (`CustomerClient`: `POST /api/company-connections/{id}/flow-runs/{runId}/plugin-pass`). The run must be awaiting your party. |
+| `PluginOptions(ctx, runID, slug, block, query, picks, values, draft)` | `PluginOptionsResult, error` | The options of one `search_select` block (`Options []PluginOption{ID, Label}`, `More` = the list was cut at 50; `query` `""` lists everything). `picks` = ids picked so far by block key, `values` = typed block values. |
+| `PluginOutputs(ctx, runID, slug, picks, values, draft)` | `PluginOutputsResult, error` | `*PluginOutputs{Outputs}` or `*PluginPicksInvalid` (the picks no longer fit: pick again). After an input changes, call it again before you submit. |
+| `CheckFlowValue(run, slug, value, draft)` | `error` | A `*ValidationError` naming the bound when `value` is below the field's `min` or above its `max`, else `nil`. `SubmitFlowAnswers` applies the same check to every value it submits. `CustomerClient`: call it before `EncryptFlowAnswer`. |
+
+- **One live answer map.** `draft` is the current step's answers you have not submitted yet (slug
+  → plaintext; `nil` for none). The SDK reads the run's stored answers it can open (the service
+  key's copies; the account key's copies on `CustomerClient`), overlays `draft` for the current
+  step's slugs, expands plugin answers and computes the constants. Inputs and bounds are read from
+  that map. An input is converted to its declared type: `number` a JSON number, `date` a
+  `YYYY-MM-DD` string, `boolean` a JSON boolean, `text` a string.
+- **Another party's private value is never sent.** A source is private when its slug is in
+  `FlowRun.PrivateSlugs`, when it is a constant reaching one, or when it is a draft whose field has a
+  default reaching one (whatever the draft's value). A run read without `PrivateSlugs` (`nil`)
+  treats every other party's value as private. A required input that cannot be sent raises
+  `*PluginInputUnavailableError{Input, Source, Reason}` — `Source` is the key the input is wired
+  to, and `Reason` is, checked in this order, `PluginInputUnwired` (`"unwired"`),
+  `PluginInputUnanswered` (`"unanswered"`), `PluginInputOtherPartyPrivate`
+  (`"other_party_private"`) or `PluginInputNotConvertible` (`"not_convertible"`); an optional one
+  is left out.
+- **`source_private` on submit.** `SubmitFlowAnswers` (and `CustomerClient.SubmitFlowAnswers`, which
+  reads the run first) sets `source_private: true` on every submitted answer that is private by the
+  same rule: a field whose default reaches a private source. Every party of the run then sees that
+  slug in `PrivateSlugs`. A plugin answer's outputs are never private, whatever inputs produced them,
+  so a plugin answer is never marked.
+- **The call.** The request is sealed to the plugin's public key and posted to the pass's
+  `forwarder_url` + `/call` over a plain `http.Client` that carries no allme credential, follows no
+  redirect and never rewrites the URL. The reply is sealed to an RSA-2048 key pair made for the call
+  and opened in memory. A `409 plugin.key_changed` reseals once with the key it names; a 401/403
+  takes a new pass once. Any other refusal is an `*ApiError` carrying the forwarder's `error_key`
+  (for example `plugin.not_responding`, `plugin.busy`, `plugin.rate_limited`).
+
+```go
+res, err := client.PluginOptions(ctx, run.ID, "cao", "cao", "hor", nil, nil,
+    map[string]any{"age": "19"})
+out, err := client.PluginOutputs(ctx, run.ID, "cao",
+    map[string]string{"cao": "hrc", "scale": "c", "step": "4"}, nil, map[string]any{"age": "19"})
+switch o := out.(type) {
+case *companydata.PluginOutputs:
+    minWage := o.Outputs["min_wage"]
+case *companydata.PluginPicksInvalid:
+    // pick again
+}
+if err := client.CheckFlowValue(run, "wage", "9.00", draft); err != nil { /* below the minimum */ }
+```
+
+### Building a plugin server
+
+A plugin's own server uses two standalone functions — never a call on the allme API, so they
+take the plugin's own key:
+
+```go
+req, err := companydata.PluginOpenRequest(body, pluginKeyPEM, "") // "" for an unencrypted PKCS#8 PEM
+// req["field_type"], req["op"] ("options" | "outputs"), req["block"], req["query"],
+// req["picks"], req["values"], req["inputs"], req["reply_key"]
+resp, err := companydata.PluginSealReply(map[string]any{"options": opts, "more": false}, req["reply_key"].(string))
+// write resp ({"reply": "<wrapper>"}) as the JSON answer
+```
+
+`LoadPrivateKey` accepts an unencrypted PKCS#8 PEM as well as an encrypted one.
+`GenerateReplyKey()` (an RSA-2048 key pair and its base64 SPKI) and `ExportPublicKeySPKI(pub)` are
+the key helpers the flow methods use.
 
 ---
 
@@ -910,6 +1022,8 @@ Idiomatic Go error types matching the §9 taxonomy. Each has a sentinel for
 | `*DecryptError` | `ErrDecrypt` | Wrapper malformed, wrong key, or GCM tag mismatch. |
 | `*WebhookError` | `ErrWebhook` | Signature verification failed or an envelope couldn't be unwrapped. |
 | `*RateLimitError` (`RetryAfter`) | `ErrRateLimit` (also `ErrAPI`) | A 429 from a rate-limited endpoint (embeds `*ApiError`). |
+| `*ValidationError` (`Slug`, `FieldType`, `Bound`, `BoundValue`) | `ErrValidation` | A value fails its field type's check, or (`Bound` = `"min"`/`"max"`) lies outside a flow field's bound. |
+| `*PluginInputUnavailableError` (`Input`, `Source`, `Reason`) | `ErrPluginInputUnavailable` | A required plugin input cannot be sent — see [Plugins](#plugins). |
 
 ```go
 if errors.Is(err, companydata.ErrRateLimit) {
