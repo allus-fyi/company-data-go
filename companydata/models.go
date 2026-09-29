@@ -291,6 +291,10 @@ type Connection struct {
 	// ShareCode: the customer's profile share code (previously only via Raw).
 	ShareCode string
 	Raw       map[string]any
+	// ValuesPrivate: per answered slug, whether its value is private — the source field's
+	// privacy, false for an answer with no source field. A slug absent here is private.
+	// Metadata only.
+	ValuesPrivate map[string]bool
 }
 
 // connectionFromAPI builds a Connection from a hardened connectionDetail (or
@@ -332,15 +336,28 @@ func connectionFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes
 	}
 
 	return Connection{
-		ID:           connID,
-		PersonID:     personID,
-		DisplayName:  displayName,
-		ConnectedAt:  connectedAt,
-		Values:       values,
-		CustomerType: firstString(obj["customer_type"], identity["customer_type"]),
-		ShareCode:    firstString(obj["share_code"], identity["share_code"]),
-		Raw:          obj,
+		ID:            connID,
+		PersonID:      personID,
+		DisplayName:   displayName,
+		ConnectedAt:   connectedAt,
+		Values:        values,
+		CustomerType:  firstString(obj["customer_type"], identity["customer_type"]),
+		ShareCode:     firstString(obj["share_code"], identity["share_code"]),
+		Raw:           obj,
+		ValuesPrivate: valuesPrivateFromAPI(obj["values_private"]),
 	}, nil
+}
+
+func valuesPrivateFromAPI(raw any) map[string]bool {
+	out := map[string]bool{}
+	if m, ok := raw.(map[string]any); ok {
+		for slug, v := range m {
+			if b, ok := v.(bool); ok {
+				out[slug] = b
+			}
+		}
+	}
+	return out
 }
 
 // ── change ───────────────────────────────────────────────────────────────────
@@ -582,7 +599,44 @@ type FlowRun struct {
 	// {source_key: file} — the owning company's on the service Client, the customer's
 	// own on CustomerClient. Empty when the run holds none.
 	SourceFiles map[string]string
-	Raw         map[string]any
+	// OwnerTagValues: the owning company's profile values the run's owner-party text tags name,
+	// fixed at start — "party.field" → {"v": value, "t": field_type}. nil on a run whose text
+	// names none.
+	OwnerTagValues map[string]any
+	// TagValues: the company's sealed values for the run's non-owner party text tags, fixed at
+	// start — {"public": wrapper, "public_tags": [tag], "private": {tag: wrapper}}, sealed to the
+	// service key. nil on a run whose text names none.
+	TagValues map[string]any
+	Raw       map[string]any
+}
+
+// PublishedFlow is the latest published version of a flow — what Client.TriggerFlowRun compiles a
+// run's text-tag values from.
+type PublishedFlow struct {
+	Version    int
+	Definition map[string]any
+	// RequestFieldTypes: the service's request fields, slug → field type.
+	RequestFieldTypes map[string]string
+}
+
+func publishedFlowFromAPI(obj map[string]any) PublishedFlow {
+	types := map[string]string{}
+	if m, ok := obj["request_field_types"].(map[string]any); ok {
+		for slug, t := range m {
+			if s, ok := t.(string); ok {
+				types[slug] = s
+			}
+		}
+	}
+	def, _ := obj["definition"].(map[string]any)
+	if def == nil {
+		def = map[string]any{}
+	}
+	version := 0
+	if n := coerceInt(obj["version"]); n != nil {
+		version = *n
+	}
+	return PublishedFlow{Version: version, Definition: def, RequestFieldTypes: types}
 }
 
 // FlowRunParticipantDocument is one of a participant's own documents on a run — one per output
@@ -722,25 +776,33 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 		}
 	}
 	return FlowRun{
-		PrivateSlugs:  privateSlugs,
-		SourceFiles:   sourceFiles,
-		ID:            asString(obj["id"]),
-		FlowID:        asString(obj["flow_id"]),
-		FlowVersion:   obj["flow_version"],
-		ServiceID:     asString(obj["service_id"]),
-		ConnectionID:  asString(obj["connection_id"]),
-		CompanyUserID: asString(obj["company_user_id"]),
-		Bindings:      bindings,
-		Status:        asString(obj["status"]),
-		CurrentNode:   asString(obj["current_node"]),
-		OutputMode:    outputMode,
-		ReferenceDate: asString(obj["reference_date"]),
-		Definition:    def,
-		Answers:       answers,
-		CreatedAt:     parseISO(asString(obj["created_at"])),
-		UpdatedAt:     parseISO(asString(obj["updated_at"])),
-		Participants:  participants,
-		Raw:           obj,
+		PrivateSlugs:   privateSlugs,
+		SourceFiles:    sourceFiles,
+		ID:             asString(obj["id"]),
+		FlowID:         asString(obj["flow_id"]),
+		FlowVersion:    obj["flow_version"],
+		ServiceID:      asString(obj["service_id"]),
+		ConnectionID:   asString(obj["connection_id"]),
+		CompanyUserID:  asString(obj["company_user_id"]),
+		Bindings:       bindings,
+		Status:         asString(obj["status"]),
+		CurrentNode:    asString(obj["current_node"]),
+		OutputMode:     outputMode,
+		ReferenceDate:  asString(obj["reference_date"]),
+		Definition:     def,
+		Answers:        answers,
+		CreatedAt:      parseISO(asString(obj["created_at"])),
+		UpdatedAt:      parseISO(asString(obj["updated_at"])),
+		Participants:   participants,
+		Raw:            obj,
+		OwnerTagValues: func() map[string]any { m, _ := obj["owner_tag_values"].(map[string]any); return m }(),
+		TagValues: func() map[string]any {
+			m, _ := obj["tag_values"].(map[string]any)
+			if _, ok := m["public"].(string); !ok {
+				return nil
+			}
+			return m
+		}(),
 	}
 }
 

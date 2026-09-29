@@ -3,7 +3,10 @@ package companydata
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -1359,6 +1362,16 @@ func messageIDOf(body any) string {
 
 // ── contract-flow runs (company side — the company is a bound party) ─────────
 
+// PublishedFlow reads the latest PUBLISHED version of a flow — its version, definition and the
+// service's request-field types. GET /api/company-data/flows/{flowId}/published.
+func (c *Client) PublishedFlow(ctx context.Context, flowID string) (PublishedFlow, error) {
+	body, err := c.http.Get(ctx, epFlows+"/"+flowID+"/published", nil)
+	if err != nil {
+		return PublishedFlow{}, err
+	}
+	return publishedFlowFromAPI(asMap(body)), nil
+}
+
 // TriggerFlowRun starts a run for a connection. bindings = {party_key: user_id}
 // covering the flow's parties (each bound user must be the company or the
 // connected person). Pins the flow's latest PUBLISHED version. connectionID is
@@ -1371,23 +1384,177 @@ func messageIDOf(body any) string {
 // service key. A start whose list is not exactly that set is refused with an
 // *ApiError flows.source_files_invalid whose Details carry missing
 // ([{source_key, for_user_id}]) and unexpected ([file]); nothing is written.
+// It reads the flow's latest published version (PublishedFlow) and pins it with flow_version.
+// When that version's text elements show the connected customer's shared values
+// ({{party.field}} tags), the SDK opens those values with the service key and seals them per
+// recipient — one wrapper of the non-private values and one per private value, to the company
+// (the service key) and to the customer — and sends them as tag_values. A newer publish in between
+// (flows.version_changed) is re-read and retried once; a customer key that changed
+// (flows.tag_values_stale) is re-read and retried once. A stale SERVICE key is a *ConfigError:
+// rebuild the client with the service's current private key.
 func (c *Client) TriggerFlowRun(ctx context.Context, flowID, connectionID string, bindings map[string]string, sourceFiles ...FlowRunSourceFile) (FlowRun, error) {
-	body := map[string]any{
-		"target":   map[string]any{"connection_id": connectionID},
-		"bindings": bindings,
-	}
-	if len(sourceFiles) > 0 {
-		files := make([]map[string]any, 0, len(sourceFiles))
-		for _, f := range sourceFiles {
-			files = append(files, map[string]any{"source_key": f.SourceKey, "for_user_id": f.ForUserID, "file": f.File})
-		}
-		body["source_files"] = files
-	}
-	created, err := c.http.Post(ctx, epFlows+"/"+flowID+"/runs", body)
+	published, err := c.PublishedFlow(ctx, flowID)
 	if err != nil {
 		return FlowRun{}, err
 	}
-	return flowRunFromAPI(asMap(created)), nil
+	versionRetried, staleRetried := false, false
+	for {
+		body := map[string]any{
+			"target":       map[string]any{"connection_id": connectionID},
+			"bindings":     bindings,
+			"flow_version": published.Version,
+		}
+		if len(sourceFiles) > 0 {
+			files := make([]map[string]any, 0, len(sourceFiles))
+			for _, f := range sourceFiles {
+				files = append(files, map[string]any{"source_key": f.SourceKey, "for_user_id": f.ForUserID, "file": f.File})
+			}
+			body["source_files"] = files
+		}
+		shareCode := ""
+		if tags := NonOwnerPartyTags(published.Definition); len(tags) > 0 {
+			tv, sc, err := c.compileTagValues(ctx, tags, published, connectionID)
+			if err != nil {
+				return FlowRun{}, err
+			}
+			body["tag_values"] = tv
+			shareCode = sc
+		}
+		created, err := c.http.Post(ctx, epFlows+"/"+flowID+"/runs", body)
+		if err == nil {
+			return flowRunFromAPI(asMap(created)), nil
+		}
+		var apiErr *ApiError
+		if !errors.As(err, &apiErr) {
+			return FlowRun{}, err
+		}
+		if apiErr.ErrorKey == "flows.version_changed" && !versionRetried {
+			versionRetried = true
+			if published, err = c.PublishedFlow(ctx, flowID); err != nil {
+				return FlowRun{}, err
+			}
+			continue
+		}
+		if apiErr.ErrorKey == "flows.tag_values_stale" {
+			stale, _ := apiErr.Details["stale"].([]any)
+			for _, r := range stale {
+				if r == "company" {
+					return FlowRun{}, newConfigError("the configured service private key is not this service's current key — rebuild the client with the current service private key")
+				}
+			}
+			if !staleRetried && shareCode != "" {
+				staleRetried = true
+				c.InvalidatePublicKey(shareCode)
+				continue
+			}
+		}
+		return FlowRun{}, err
+	}
+}
+
+// compileTagValues builds the tag_values for one start, and returns the customer's share code: the
+// connected customer's shared values the text names, opened with the service key and sealed to the
+// company (the service key) and to the customer. A value that is absent or does not open is left
+// out; values_private decides which are private (a slug it does not name is private).
+func (c *Client) compileTagValues(ctx context.Context, tags []PartyTag, published PublishedFlow, connectionID string) (map[string]any, string, error) {
+	raw, err := c.http.Get(ctx, epConnections+"/"+connectionID, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	detail := asMap(raw)
+	userID := asString(detail["user_id"])
+	shareCode := asString(detail["share_code"])
+	if userID == "" || shareCode == "" {
+		return nil, "", newConfigError("connection %s has no customer key to seal the run's values to", connectionID)
+	}
+	values, _ := detail["values"].(map[string]any)
+	privacy, _ := detail["values_private"].(map[string]any)
+	type entry struct {
+		tag       string
+		isPrivate bool
+		value     map[string]any
+	}
+	var entries []entry
+	for _, t := range tags {
+		cell, _ := values[t.Field].(map[string]any)
+		wrapper, _ := cell["value"].(string)
+		if wrapper == "" {
+			continue
+		}
+		v, err := Decrypt(wrapper, c.privateKey)
+		if err != nil || v == "" {
+			continue
+		}
+		var ft any
+		if s, ok := published.RequestFieldTypes[t.Field]; ok {
+			ft = s
+		}
+		isPrivate := true
+		if b, ok := privacy[t.Field].(bool); ok && !b {
+			isPrivate = false
+		}
+		entries = append(entries, entry{tag: t.Tag, isPrivate: isPrivate, value: map[string]any{"v": v, "t": ft}})
+	}
+	seal := func(key *rsa.PublicKey, text string) (string, error) {
+		w, err := EncryptForPublicKey(text, key)
+		if err != nil {
+			return "", err
+		}
+		b, err := json.Marshal(w)
+		return string(b), err
+	}
+	recipient := func(key *rsa.PublicKey) (map[string]any, error) {
+		public := map[string]any{}
+		publicTags := []string{}
+		private := map[string]any{}
+		for _, e := range entries {
+			if !e.isPrivate {
+				public[e.tag] = e.value
+				publicTags = append(publicTags, e.tag)
+				continue
+			}
+			// One bound customer: every private value the text names is its own.
+			plain, err := json.Marshal(e.value)
+			if err != nil {
+				return nil, err
+			}
+			if private[e.tag], err = seal(key, string(plain)); err != nil {
+				return nil, err
+			}
+		}
+		plain, err := json.Marshal(public)
+		if err != nil {
+			return nil, err
+		}
+		sealed, err := seal(key, string(plain))
+		if err != nil {
+			return nil, err
+		}
+		der, err := x509.MarshalPKIXPublicKey(key)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(der)
+		return map[string]any{
+			"recipient_pubkey_sha256": hex.EncodeToString(sum[:]),
+			"public":                  sealed,
+			"public_tags":             publicTags,
+			"private":                 private,
+		}, nil
+	}
+	company, err := recipient(c.servicePublicKey())
+	if err != nil {
+		return nil, "", err
+	}
+	customerKey, err := c.recipientPublicKey(ctx, shareCode)
+	if err != nil {
+		return nil, "", err
+	}
+	customer, err := recipient(customerKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return map[string]any{"company": company, userID: customer}, shareCode, nil
 }
 
 // StageRunFile stages one sealed copy of a connection source for a run start → its file.

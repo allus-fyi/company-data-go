@@ -53,7 +53,7 @@ const (
 	callRequestFields = "Client.RequestFields — resolves the flow name + published version (the only handle the portal ever shows for it) to its flow id"
 	callIdentity      = "Client.Identity — GET /api/company-data/whoami: this service's own company_user_id, which the COMPANY party binds to"
 	callConnections   = "Client.ConnectionsList — resolves the person's own share code to the connection whose id the CUSTOMER party binds to"
-	callTrigger       = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version"
+	callTrigger       = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version — reads that version first and, when its text shows the customer's shared values, seals them for the company and the customer and sends them with it"
 	callFlowRun       = "Client.FlowRun — re-read on every poll to see whose turn the run is on"
 	callProcess       = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the output documents when the submit lands on a document-mode leaf"
 	callAnswers       = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key"

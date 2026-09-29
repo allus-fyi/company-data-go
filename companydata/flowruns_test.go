@@ -75,7 +75,13 @@ func TestTriggerFlowRun(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	var captured writeReq
-	c, _ := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
+	published := func(path string, params map[string][]string) (int, string) {
+		if !strings.HasSuffix(path, "/company-data/flows/flow-1/published") {
+			t.Fatalf("unexpected GET %s", path)
+		}
+		return 200, `{"version":3,"definition":{"parties":[],"nodes":[]},"request_field_types":{}}`
+	}
+	c, _ := newTestClientRW(t, cfg, published, func(w writeReq) (int, string) {
 		captured = w
 		b, _ := json.Marshal(runObjJSON(t, "awaiting_company", "n1", "", "", "data_only", ""))
 		return 201, string(b)
@@ -87,6 +93,12 @@ func TestTriggerFlowRun(t *testing.T) {
 	}
 	if !strings.HasSuffix(captured.path, "/company-data/flows/flow-1/runs") {
 		t.Fatalf("path = %s", captured.path)
+	}
+	if v, _ := captured.jsonBody["flow_version"].(float64); v != 3 {
+		t.Fatalf("flow_version = %#v", captured.jsonBody["flow_version"])
+	}
+	if _, has := captured.jsonBody["tag_values"]; has {
+		t.Fatalf("tag_values sent for a flow whose text names no customer value")
 	}
 	tgt, _ := captured.jsonBody["target"].(map[string]any)
 	if tgt["connection_id"] != "csc-1" {
