@@ -393,7 +393,11 @@ func (c *CustomerClient) DeclineFlowRun(connectionID, runID string) (any, error)
 // answer map comes from this company's OWN copy of the answers, opened with the
 // account key — every party's answers are sealed to every bound party, so that
 // copy holds the whole run and no service key is involved — and is sealed with
-// oneTimeKeyBundle. Returns the API response {documents, status} — documents is
+// oneTimeKeyBundle. Every participant PDF source the leaf's rules name that the
+// run holds for this company (a source_field whose own answer is a file, a
+// source_connection in run.SourceFiles) is first fetched through answer-files,
+// decrypted with the account key, sealed under the same one-time key and uploaded
+// to /generate/inputs. Returns the API response {documents, status} — documents is
 // one {output_key, party_key, document_id, position} per produced (output
 // document, participant) (idempotent — a repeat answers the same set). A *ConfigError is
 // returned when the run's current step is not bound to this company — the
@@ -413,11 +417,23 @@ func (c *CustomerClient) GenerateFlowDocument(connectionID string, run FlowRun) 
 	if err != nil {
 		return nil, err
 	}
-	body, err := oneTimeKeyBundle(stored)
-	if err != nil {
-		return nil, err
-	}
-	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+run.ID+"/generate", body)
+	base := epCustomerConnections + "/" + connectionID + "/flow-runs/" + run.ID
+	post := func(path string, body any) (any, error) { return c.http.Post(context.Background(), path, body) }
+	held := heldSources(run.Definition, run.CurrentNode, run.Answers, own, run.SourceFiles)
+	return generateWithInputs(post, base+"/generate", stored, held, func(src heldSource) (string, error) {
+		// This company's own copy of a held source — its own answer file, or its own copy
+		// of a connection source made at run start — both served by the answer-files route.
+		resp, err := c.http.GetResponse(context.Background(), base+"/answer-files/"+url.PathEscape(src.File))
+		if err != nil {
+			return "", err
+		}
+		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+		wrapper, err := parseBody(resp.Body, strings.Contains(contentType, "xml"))
+		if err != nil {
+			return "", err
+		}
+		return c.decryptAccount(wrapper)
+	})
 }
 
 // EncryptFlowAnswer encrypts one answer value for one flow party per the P4 key rule.
@@ -514,6 +530,12 @@ func (c *CustomerClient) decryptOwnRunAnswers(run FlowRun) (map[string]any, erro
 		slug := asString(row["slug"])
 		v := row["value"]
 		if slug == "" || v == nil {
+			continue
+		}
+		// A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands
+		// in the map as that reference, which reads as answered.
+		if fileRef(v) != "" {
+			out[slug] = flowPlain(v)
 			continue
 		}
 		plain, err := c.decryptAccount(v)

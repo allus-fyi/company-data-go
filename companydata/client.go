@@ -1364,16 +1364,78 @@ func messageIDOf(body any) string {
 // connected person). Pins the flow's latest PUBLISHED version. connectionID is
 // the person-side company_service_connections.id for this service. Returns the
 // created FlowRun (status awaiting_<entry node's party>).
-func (c *Client) TriggerFlowRun(ctx context.Context, flowID, connectionID string, bindings map[string]string) (FlowRun, error) {
+//
+// sourceFiles are the run start's source_files: one staged copy (StageRunFile) per
+// answered connection source ("conn:<party>:<request_slug>") a rule of the pinned
+// version names, per distinct bound user — the company's own copy sealed to the
+// service key. A start whose list is not exactly that set is refused with an
+// *ApiError flows.source_files_invalid whose Details carry missing
+// ([{source_key, for_user_id}]) and unexpected ([file]); nothing is written.
+func (c *Client) TriggerFlowRun(ctx context.Context, flowID, connectionID string, bindings map[string]string, sourceFiles ...FlowRunSourceFile) (FlowRun, error) {
 	body := map[string]any{
 		"target":   map[string]any{"connection_id": connectionID},
 		"bindings": bindings,
+	}
+	if len(sourceFiles) > 0 {
+		files := make([]map[string]any, 0, len(sourceFiles))
+		for _, f := range sourceFiles {
+			files = append(files, map[string]any{"source_key": f.SourceKey, "for_user_id": f.ForUserID, "file": f.File})
+		}
+		body["source_files"] = files
 	}
 	created, err := c.http.Post(ctx, epFlows+"/"+flowID+"/runs", body)
 	if err != nil {
 		return FlowRun{}, err
 	}
 	return flowRunFromAPI(asMap(created)), nil
+}
+
+// StageRunFile stages one sealed copy of a connection source for a run start → its file.
+// POST /api/company-data/flows/{flowID}/run-files with {value}: sealedValue is the source's
+// envelope JSON sealed to ONE bound user (a {"_enc":1,…} wrapper, as the map
+// EncryptForPublicKey returns or its JSON string). Name the returned file in TriggerFlowRun's
+// sourceFiles. An over-budget value is refused documents.too_large.
+func (c *Client) StageRunFile(ctx context.Context, flowID string, sealedValue any) (string, error) {
+	value, err := sealedString(sealedValue)
+	if err != nil {
+		return "", err
+	}
+	body, err := c.http.Post(ctx, epFlows+"/"+flowID+"/run-files", map[string]any{"value": value})
+	if err != nil {
+		return "", err
+	}
+	return responseFile(body)
+}
+
+// UploadAnswerFile uploads one bound party's copy of a binary answer on the company's turn →
+// its file. POST /api/company-data/flow-runs/{runID}/answer-files with {slug, for_user_id,
+// value}: slug a binary field of the current step, forUserID a bound party, sealedValue the
+// file's envelope JSON sealed to that party's key (a wrapper map or its JSON string). Upload one
+// copy per bound party, then submit {"_enc_file": file} as each party's answer value.
+func (c *Client) UploadAnswerFile(ctx context.Context, runID, slug, forUserID string, sealedValue any) (string, error) {
+	value, err := sealedString(sealedValue)
+	if err != nil {
+		return "", err
+	}
+	body, err := c.http.Post(ctx, epFlowRuns+"/"+runID+"/answer-files", map[string]any{
+		"slug": slug, "for_user_id": forUserID, "value": value,
+	})
+	if err != nil {
+		return "", err
+	}
+	return responseFile(body)
+}
+
+// FlowRunSourceFile returns the company's own copy of a run's connection source, as stored —
+// the sealed wrapper. GET /api/company-data/flow-runs/{runID}/source-files/{sourceKey} (the
+// key, e.g. "conn:customer:passport", is URL-encoded). The wrapper opens with the service key;
+// its plaintext is the file's envelope JSON. FlowRun.SourceFiles lists the run's keys.
+func (c *Client) FlowRunSourceFile(ctx context.Context, runID, sourceKey string) (any, error) {
+	res, err := c.binaryFetchCtx(ctx, epFlowRuns+"/"+runID+"/source-files/"+url.PathEscape(sourceKey))
+	if err != nil {
+		return nil, err
+	}
+	return res.Wrapper, nil
 }
 
 // FlowRuns lists this service's runs. An empty status defaults to the actionable
@@ -1465,6 +1527,12 @@ func (c *Client) decryptRunAnswers(run FlowRun) (map[string]any, error) {
 		slug := asString(row["slug"])
 		v := row["value"]
 		if slug == "" || v == nil {
+			continue
+		}
+		// A file answer is a plaintext {"_enc_file": …} reference, not a wrapper; it stands
+		// in the map as that reference, which reads as answered.
+		if fileRef(v) != "" {
+			out[slug] = flowPlain(v)
 			continue
 		}
 		plain, err := c.decryptValue(v)
@@ -1668,21 +1736,50 @@ func (c *Client) CheckFlowValue(run FlowRun, slug string, value any, draft map[s
 
 // GenerateFlowDocument runs the document-mode company leaf: a one-time-key value
 // gather → POST /generate. It seals the company's decrypted answers with
-// oneTimeKeyBundle and POSTs {otk, values}. Returns the API response
-// {documents, status} — documents is one {output_key, party_key, document_id,
-// position} per produced (output document, participant), position the step's
-// 1-based place in the run's signing line or null for an unlisted party
-// (idempotent — a repeat answers the same set).
+// oneTimeKeyBundle and POSTs {otk, values, inputs}. Before that, every participant
+// PDF source the current leaf's rules name that the run HOLDS for the company — a
+// source_field whose own answer is a file, a source_connection in run.SourceFiles —
+// is fetched (slots/{slug}/file resp. source-files/{key}), decrypted with the
+// service key, sealed under the same one-time key and uploaded to /generate/inputs;
+// inputs names them. Returns the API response {documents, status} — documents is
+// one {output_key, party_key, document_id, position} per produced (output document,
+// participant), position the step's 1-based place in the run's signing line or null
+// for an unlisted party (idempotent — a repeat answers the same set).
+// flows.source_pdf_invalid refuses a source that is not a usable PDF (the run
+// stays generating).
 func (c *Client) GenerateFlowDocument(ctx context.Context, run FlowRun) (any, error) {
 	answers, err := c.decryptRunAnswers(run)
 	if err != nil {
 		return nil, err
 	}
-	body, err := oneTimeKeyBundle(answers)
-	if err != nil {
-		return nil, err
+	held := heldSources(run.Definition, run.CurrentNode, run.Answers, run.ServiceUserID(), run.SourceFiles)
+	post := func(path string, body any) (any, error) { return c.http.Post(ctx, path, body) }
+	return generateWithInputs(post, epFlowRuns+"/"+run.ID+"/generate", answers, held, func(src heldSource) (string, error) {
+		return c.ownSourceEnvelope(ctx, run.ID, src)
+	})
+}
+
+// ownSourceEnvelope is the company's own copy of one held source, decrypted to its envelope
+// JSON.
+func (c *Client) ownSourceEnvelope(ctx context.Context, runID string, src heldSource) (string, error) {
+	var wrapper any
+	if src.Kind == "field" {
+		res, err := c.binaryFetchCtx(ctx, epFlowRuns+"/"+runID+"/slots/"+url.PathEscape(src.Slug)+"/file")
+		if err != nil {
+			return "", err
+		}
+		wrapper = res.Wrapper
+	} else {
+		w, err := c.FlowRunSourceFile(ctx, runID, src.SourceKey)
+		if err != nil {
+			return "", err
+		}
+		wrapper = w
 	}
-	return c.http.Post(ctx, epFlowRuns+"/"+run.ID+"/generate", body)
+	if wrapper == nil {
+		return "", &DecryptError{msg: "no sealed copy of " + src.SourceKey + " was served"}
+	}
+	return c.decryptValue(wrapper)
 }
 
 // ProcessFlowRun is the high-level company turn: load → (if our turn) fill +

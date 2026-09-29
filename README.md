@@ -651,12 +651,15 @@ run's bound parties.
 
 | Method | Returns | What it does |
 |--------|---------|--------------|
-| `TriggerFlowRun(ctx, flowID, connectionID, bindings)` | `FlowRun, error` | Starts a run, pinning the flow's latest published version. `bindings` = `{party_key: user_id}`. |
+| `TriggerFlowRun(ctx, flowID, connectionID, bindings, sourceFiles...)` | `FlowRun, error` | Starts a run, pinning the flow's latest published version. `bindings` = `{party_key: user_id}`. The optional trailing `FlowRunSourceFile{SourceKey, ForUserID, File}` values are the run's copies of its connection sources — see [Participant PDF sources](#participant-pdf-sources). |
+| `StageRunFile(ctx, flowID, sealedValue)` | `string, error` | Stages one sealed copy of a connection source for a run start (`POST /api/company-data/flows/{flowID}/run-files`) → its `file`. |
+| `UploadAnswerFile(ctx, runID, slug, forUserID, sealedValue)` | `string, error` | Uploads one bound party's copy of a binary answer on the company's own turn (`POST /api/company-data/flow-runs/{runID}/answer-files`) → its `file`; submit `{"_enc_file": file}` as that party's answer value. |
+| `FlowRunSourceFile(ctx, runID, sourceKey)` | `any, error` | The company's own copy of a run's connection source as stored — the sealed wrapper (`GET /api/company-data/flow-runs/{runID}/source-files/{sourceKey}`, key URL-encoded). |
 | `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
 | `FlowRun(ctx, runID)` | `FlowRun, error` | Fetches one run by id. |
 | `SubmitFlowAnswers(ctx, run, fill, partyPubKeys)` | `FlowRun, error` | Fills the company's current node, encrypts one answer copy per bound party, and advances the run. |
-| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and generates the leaf's output documents. Returns `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name (no bytes — see below). |
-| `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate, chained. |
+| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: uploads the held participant PDF sources as generation inputs, one-time-key-encrypts the answers and generates the leaf's output documents. Returns `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name (no bytes — see below). |
+| `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate (held source PDFs uploaded first), chained. |
 | `FlowRunDocument(ctx, runID, outputKey)` | `[]byte, error` | The company's own copy of one output document, decrypted to the plaintext file bytes. A 404 `*ApiError` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party. |
 | `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
 | `PluginPass(ctx, runID)` / `PluginOptions(…)` / `PluginOutputs(…)` / `CheckFlowValue(…)` | | Call a plugin element on the company's step and check a field's min/max — see [Plugins](#plugins). |
@@ -705,6 +708,46 @@ not bound to your company.
 
 Once a document-mode leaf has generated its output documents, download each one's bytes with
 `FlowRunDocument(ctx, runID, outputKey)` — see [Company documents](#company-documents) above.
+
+### Participant PDF sources
+
+A leaf output rule's PDF is a company template, a flow field's answer (`source_field` → source key
+`field:<slug>`, a field of type `pdf_document` or a descendant) or what a bound customer shared on
+its connection (`source_connection {party, request_slug}` → `conn:<party>:<request_slug>`, a
+`pdf_document` request field of the service). A rule whose source the run does not hold does not
+match; the next rule is tried.
+
+**Connection sources are copied at run start.** For every answered connection source a rule of the
+published version names, stage one copy per distinct bound user — its envelope JSON sealed to that
+user's key (your own copy to the service key) — and name them all on the start:
+
+```go
+file, err := client.StageRunFile(ctx, flowID, sealed) // sealed: a {"_enc":1,…} wrapper map or its JSON string
+run, err := client.TriggerFlowRun(ctx, flowID, connectionID, bindings,
+    companydata.FlowRunSourceFile{SourceKey: "conn:customer:passport", ForUserID: personUserID, File: file},
+    // … one per (source, distinct bound user)
+)
+```
+
+A start whose list is not exactly that set is refused with `*ApiError` `flows.source_files_invalid`;
+its `Details` carry `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing
+is written. A later change on the connection does not reach the run. `FlowRun.SourceFiles`
+(`map[string]string`, `source_key → file`) lists your own copies on every run read; read one with
+`FlowRunSourceFile(ctx, runID, sourceKey)`.
+
+**A binary field on the company's own turn** is uploaded once per bound party with
+`UploadAnswerFile(ctx, runID, slug, forUserID, sealed)`; submit `{"_enc_file": file}` as each party's
+answer value.
+
+**Generation uploads the held sources.** `GenerateFlowDocument` (and `ProcessFlowRun`, which chains
+it) computes the held set of the current leaf — a `source_field` whose own answer is a file, a
+`source_connection` in `run.SourceFiles` — fetches your own copy of each (`slots/{slug}/file`
+resp. `source-files/{key}`), decrypts it with the service key, seals it under the call's one-time
+key and POSTs it to `…/generate/inputs`, then generates with `inputs: [{source_key, input}]` (`[]`
+when nothing is held). `CustomerClient.GenerateFlowDocument` does the same over its
+`answer-files` route with the account key. `flows.generate_inputs_mismatch` refuses inputs that are
+not exactly the held set; `flows.source_pdf_invalid` refuses a source that is not a usable PDF, and
+the run stays `generating`.
 
 ---
 
@@ -1051,7 +1094,7 @@ Idiomatic Go error types matching the §9 taxonomy. Each has a sentinel for
 |------------|----------|------|
 | `*ConfigError` | `ErrConfig` | Missing/invalid config or key file at construction (fail fast). |
 | `*AuthError` | `ErrAuth` | Token fetch/refresh failed (bad client_id/secret, revoked client). |
-| `*ApiError` (`Status`, `ErrorKey`, `Message`) | `ErrAPI` | Any non-2xx from the API. |
+| `*ApiError` (`Status`, `ErrorKey`, `Message`, `Details`) | `ErrAPI` | Any non-2xx from the API; `Details` holds the error body's remaining fields (e.g. `missing`/`unexpected` on `flows.source_files_invalid`). |
 | `*DecryptError` | `ErrDecrypt` | Wrapper malformed, wrong key, or GCM tag mismatch. |
 | `*WebhookError` | `ErrWebhook` | Signature verification failed or an envelope couldn't be unwrapped. |
 | `*RateLimitError` (`RetryAfter`) | `ErrRateLimit` (also `ErrAPI`) | A 429 from a rate-limited endpoint (embeds `*ApiError`). |

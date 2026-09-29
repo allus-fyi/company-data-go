@@ -578,7 +578,11 @@ type FlowRun struct {
 	// did not carry the list, which the plugin helpers read as "unknown": every other
 	// party's value is then treated as private.
 	PrivateSlugs []string
-	Raw          map[string]any
+	// SourceFiles holds the viewer's own copies of the run's connection sources,
+	// {source_key: file} — the owning company's on the service Client, the customer's
+	// own on CustomerClient. Empty when the run holds none.
+	SourceFiles map[string]string
+	Raw         map[string]any
 }
 
 // FlowRunParticipantDocument is one of a participant's own documents on a run — one per output
@@ -709,8 +713,17 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 			}
 		}
 	}
+	sourceFiles := map[string]string{}
+	if m, ok := obj["source_files"].(map[string]any); ok {
+		for k, v := range m {
+			if f, ok := v.(string); ok {
+				sourceFiles[k] = f
+			}
+		}
+	}
 	return FlowRun{
 		PrivateSlugs:  privateSlugs,
+		SourceFiles:   sourceFiles,
 		ID:            asString(obj["id"]),
 		FlowID:        asString(obj["flow_id"]),
 		FlowVersion:   obj["flow_version"],

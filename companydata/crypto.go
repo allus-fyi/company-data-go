@@ -337,6 +337,36 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 	}, nil
 }
 
+// newOneTimeKey is a fresh random 32-byte AES-256-GCM key for one /generate call.
+func newOneTimeKey() ([]byte, error) {
+	otk := make([]byte, 32)
+	if _, err := rand.Read(otk); err != nil {
+		return nil, err
+	}
+	return otk, nil
+}
+
+// oneTimeKeySeal seals plaintext under a one-time key → base64(iv(12)||ciphertext||tag(16)),
+// the layout of a bundle's values. A generation input (a held source PDF's envelope) is sealed
+// the same way under the same key as the call's values, with its own fresh iv.
+func oneTimeKeySeal(otk []byte, plaintext string) (string, error) {
+	iv := make([]byte, gcmIVLen)
+	if _, err := rand.Read(iv); err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(otk)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	ctWithTag := gcm.Seal(nil, iv, []byte(plaintext), nil) // ciphertext || tag(16)
+	blob := append(append([]byte{}, iv...), ctWithTag...)
+	return base64.StdEncoding.EncodeToString(blob), nil
+}
+
 // oneTimeKeyBundle builds the one-time-key bundle a flow run's /generate takes: the
 // WHOLE answer map, sealed under a key used once and never stored. answers is
 // {slug: plaintext} (a non-string value is JSON-encoded). A random 32-byte
@@ -345,6 +375,16 @@ func EncryptForPublicKey(plaintext string, pub *rsa.PublicKey) (map[string]any, 
 // The server evaluates every leaf-PDF condition, constant and {{tag}} over this
 // map, so a slug missing from it prints blank on the contract.
 func oneTimeKeyBundle(answers map[string]any) (map[string]any, error) {
+	otk, err := newOneTimeKey()
+	if err != nil {
+		return nil, err
+	}
+	return oneTimeKeyBundleWith(answers, otk)
+}
+
+// oneTimeKeyBundleWith is oneTimeKeyBundle under a given one-time key — the key the call's
+// generation inputs were sealed under.
+func oneTimeKeyBundleWith(answers map[string]any, otk []byte) (map[string]any, error) {
 	strMap := map[string]string{}
 	for k, v := range answers {
 		strMap[k] = flowPlain(v)
@@ -353,27 +393,13 @@ func oneTimeKeyBundle(answers map[string]any) (map[string]any, error) {
 	if err != nil {
 		return nil, newConfigError("could not marshal answer values: %v", err)
 	}
-	otk := make([]byte, 32)
-	if _, err := rand.Read(otk); err != nil {
-		return nil, err
-	}
-	iv := make([]byte, gcmIVLen)
-	if _, err := rand.Read(iv); err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(otk)
+	values, err := oneTimeKeySeal(otk, string(payload))
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	ctWithTag := gcm.Seal(nil, iv, payload, nil) // ciphertext || tag(16)
-	blob := append(append([]byte{}, iv...), ctWithTag...)
 	return map[string]any{
 		"otk":    base64.StdEncoding.EncodeToString(otk),
-		"values": base64.StdEncoding.EncodeToString(blob),
+		"values": values,
 	}, nil
 }
 

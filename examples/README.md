@@ -185,7 +185,7 @@ header). Once started, events arrive two ways, both appended to the same accumul
 |---|---|
 | Resolve the flow | `Client.RequestFields`, matched by the configured flow name + published version |
 | Trigger the run | `Client.Identity` (company binding) → `Client.ConnectionsList` (customer personId, matched by share code) → `Client.TriggerFlowRun(flowID, connectionID, bindings)` |
-| Each poll (drive/resume) | `Client.FlowRun(runID)`; on the company's turn `Client.ProcessFlowRun(runID, fillNode, nil)` (one step; a bad email raises `*ValidationError`) |
+| Each poll (drive/resume) | `Client.FlowRun(runID)`; on the company's turn `Client.ProcessFlowRun(runID, fillNode, nil)` (one step; a bad email raises `*ValidationError`; at a document leaf it uploads the run's held participant source PDFs as generation inputs before generating) |
 | On completion | `Client.FlowRunAnswers(run)`; for a `document` flow `Client.FlowRunDocument(runID, outputKey)` for each output document in the company participant's `Documents` |
 
 A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum").
