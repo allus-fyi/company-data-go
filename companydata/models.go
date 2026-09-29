@@ -563,7 +563,6 @@ type FlowRun struct {
 	Bindings      map[string]string
 	Status        string
 	CurrentNode   string
-	DocumentID    string
 	OutputMode    string
 	ReferenceDate string // optional YYYY-MM-DD pinned "today" for constants; "" when absent
 	Definition    map[string]any
@@ -582,35 +581,44 @@ type FlowRun struct {
 	Raw          map[string]any
 }
 
-// FlowRunParticipant is one participant's row on a run's participants[] (flows.html §5a/§9 item
-// 12) — the durable participant set, additively carrying its place in the leaf PDF rule's
-// ordered signing plan. One account may hold TWO of these (two owner parties, or one customer
-// bound to two party keys) — never collapse this to a single row by user id.
-type FlowRunParticipant struct {
-	PartyKey           string
-	PersonUserID       string
-	ConnectionID       string
+// FlowRunParticipantDocument is one of a participant's own documents on a run — one per output
+// document the leaf produced for that participant. Position is the step's 1-based place in the
+// run's ONE signing line; nil for a party the output's signer list does not name (its copy is
+// "active" from the start, owing nothing).
+type FlowRunParticipantDocument struct {
+	OutputKey          string
+	Name               string
 	DocumentID         string
 	DocumentStatus     string
 	RequiresSignature  bool
 	RequiresAcceptance bool
-	// Position is the 1-based place in the signing plan; nil for a party the plan does not name.
-	Position *int
-	// Action is "signed" | "accepted" | "" — empty until this participant's document has acted.
+	Position           *int
+	// Action is "signed" | "accepted" | "" — empty until this document has been acted on.
 	Action  string
 	ActedAt string
 }
 
-func flowRunParticipantFromAPI(obj map[string]any) FlowRunParticipant {
+// FlowRunParticipant is one participant's row on a run's participants[] — the durable
+// participant set. Documents holds the participant's own copy of every output document the run
+// produced, ordered by signing-line position (unlisted last); empty before generation. One
+// account may hold TWO of these (two owner parties, or one customer bound to two party keys) —
+// never collapse this to a single row by user id.
+type FlowRunParticipant struct {
+	PartyKey     string
+	PersonUserID string
+	ConnectionID string
+	Documents    []FlowRunParticipantDocument
+}
+
+func flowRunParticipantDocumentFromAPI(obj map[string]any) FlowRunParticipantDocument {
 	var position *int
 	if n, ok := obj["position"].(float64); ok {
 		v := int(n)
 		position = &v
 	}
-	return FlowRunParticipant{
-		PartyKey:           asString(obj["party_key"]),
-		PersonUserID:       asString(obj["person_user_id"]),
-		ConnectionID:       asString(obj["connection_id"]),
+	return FlowRunParticipantDocument{
+		OutputKey:          asString(obj["output_key"]),
+		Name:               asString(obj["name"]),
 		DocumentID:         asString(obj["document_id"]),
 		DocumentStatus:     asString(obj["document_status"]),
 		RequiresSignature:  coerceBool(obj["requires_signature"]),
@@ -618,6 +626,23 @@ func flowRunParticipantFromAPI(obj map[string]any) FlowRunParticipant {
 		Position:           position,
 		Action:             asString(obj["action"]),
 		ActedAt:            asString(obj["acted_at"]),
+	}
+}
+
+func flowRunParticipantFromAPI(obj map[string]any) FlowRunParticipant {
+	var documents []FlowRunParticipantDocument
+	if lst, ok := obj["documents"].([]any); ok {
+		for _, d := range lst {
+			if m, ok := d.(map[string]any); ok {
+				documents = append(documents, flowRunParticipantDocumentFromAPI(m))
+			}
+		}
+	}
+	return FlowRunParticipant{
+		PartyKey:     asString(obj["party_key"]),
+		PersonUserID: asString(obj["person_user_id"]),
+		ConnectionID: asString(obj["connection_id"]),
+		Documents:    documents,
 	}
 }
 
@@ -695,7 +720,6 @@ func flowRunFromAPI(obj map[string]any) FlowRun {
 		Bindings:      bindings,
 		Status:        asString(obj["status"]),
 		CurrentNode:   asString(obj["current_node"]),
-		DocumentID:    asString(obj["document_id"]),
 		OutputMode:    outputMode,
 		ReferenceDate: asString(obj["reference_date"]),
 		Definition:    def,
@@ -777,9 +801,10 @@ type Document struct {
 	// signer_name_verified, ip, user_agent, created_at.
 	Signatures []map[string]any
 
-	// RunSignatures is present only on a contract-flow run-participant document: the run's
-	// ordered signature summary, one entry per participant owing an act — each
-	// {party_key, document_id, position, status, action, acted_at}. Nil on any other document.
+	// RunSignatures is present only on a contract-flow run-participant document: the WHOLE
+	// run's signing line, one entry per (output document, participant) in line order — each
+	// {output_key, name, party_key, document_id, position, status, action, acted_at}. Every
+	// document of the run carries the same summary. Nil on any other document.
 	RunSignatures []map[string]any
 
 	decryptValue decryptValueFn // injected; nil for a plaintext-only document

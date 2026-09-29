@@ -10,7 +10,7 @@ One runnable website that demonstrates **every scenario** of the allme platform 
 
 ~90 % of the logic is a shared frontend fetched from a pinned release; this directory is the thin Go
 backend that serves it and implements the [demo-backend contract](https://github.com/allme-sdk/example-test-suite)
-(`CONTRACT.md`, **contractVersion 3**). Everything the handlers do goes through the SDK's **intended
+(`CONTRACT.md`, **contractVersion 4**). Everything the handlers do goes through the SDK's **intended
 top-level surface** (`companydata.OAuthClient`, `companydata.Client`, `companydata.TwoFactorClient`) —
 never internals, never raw platform HTTP. The OIDC scenario (5) deliberately uses the standard
 third-party `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2` stack — that is the point of the OIDC
@@ -186,7 +186,12 @@ header). Once started, events arrive two ways, both appended to the same accumul
 | Resolve the flow | `Client.RequestFields`, matched by the configured flow name + published version |
 | Trigger the run | `Client.Identity` (company binding) → `Client.ConnectionsList` (customer personId, matched by share code) → `Client.TriggerFlowRun(flowID, connectionID, bindings)` |
 | Each poll (drive/resume) | `Client.FlowRun(runID)`; on the company's turn `Client.ProcessFlowRun(runID, fillNode, nil)` (one step; a bad email raises `*ValidationError`) |
-| On completion | `Client.FlowRunAnswers(run)`; for a `document` flow `Client.FlowRunDocument(runID)` |
+| On completion | `Client.FlowRunAnswers(run)`; for a `document` flow `Client.FlowRunDocument(runID, outputKey)` for each output document in the company participant's `Documents` |
+
+A document leaf can produce several named **output documents** (e.g. "Contract" and "Addendum").
+Generation answers `{documents: [{output_key, party_key, document_id, position}], status}` — one entry
+per produced (output document, participant). On completion the handler downloads the company's own
+copy of EACH output and reports them as `documents: [{output_key, status, downloaded}]`.
 
 ### Company-data
 
@@ -245,7 +250,7 @@ the bundle's `contract.json` version against the backend (a mismatch refuses lou
 | Symptom | Fix |
 |---|---|
 | **`port 8091 is busy`** at startup | Another SDK example holds the port — one origin is shared, so only one runs at a time. Stop it, or `PORT=<n> go run .`. |
-| **`contract mismatch: bundle contractVersion=… backend implements 3`** | The pinned bundle's `contract.json` version differs from this backend. Bump `frontend.lock` to a matching release (and re-fetch), or update the backend. |
+| **`contract mismatch: bundle contractVersion=… backend implements 4`** | The pinned bundle's `contract.json` version differs from this backend. Bump `frontend.lock` to a matching release (and re-fetch), or update the backend. |
 | **`frontend checksum MISMATCH`** | The downloaded `dist.tar.gz` doesn't match `frontend.lock`'s `sha256`. Fix the `sha256` (from `shasum -a 256 dist.tar.gz` on the real release) or re-download. |
 | **`could not download the pinned frontend release`** | The pinned release isn't published yet, or no network. If unpublished, seed the bundle into `.frontend/<tag>/` manually (`tar -xzf dist.tar.gz -C .frontend/<tag>`, `printf %s <sha> > .frontend/<tag>/.sha`). |
 | **`not_configured`** on Run | Save the scenario's setup first — Run builds the SDK from the saved config file. |

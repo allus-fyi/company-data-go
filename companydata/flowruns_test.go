@@ -37,7 +37,9 @@ const flowDefJSON = `{
   ]
 }`
 
-func runObjJSON(t *testing.T, status, current string, answersJSON, defJSON, outputMode, documentID string) map[string]any {
+// runObjJSON builds a run read; a non-empty companyDocumentID gives the company participant one
+// produced output document ("out_1") with that id.
+func runObjJSON(t *testing.T, status, current string, answersJSON, defJSON, outputMode, companyDocumentID string) map[string]any {
 	t.Helper()
 	if defJSON == "" {
 		defJSON = flowDefJSON
@@ -45,16 +47,18 @@ func runObjJSON(t *testing.T, status, current string, answersJSON, defJSON, outp
 	if answersJSON == "" {
 		answersJSON = "[]"
 	}
-	if documentID == "" {
-		documentID = "null"
-	} else {
-		documentID = `"` + documentID + `"`
+	companyDocs := "[]"
+	if companyDocumentID != "" {
+		companyDocs = `[{"output_key":"out_1","name":"Contract","document_id":"` + companyDocumentID + `",
+		  "document_status":"ready_to_sign","requires_signature":true,"requires_acceptance":false,
+		  "position":1,"action":null,"acted_at":null}]`
 	}
 	doc := `{
       "id":"run-1","flow_id":"flow-1","flow_version":3,"service_id":"svc-1",
       "connection_id":"csc-1","company_user_id":"` + companyUID + `",
       "bindings":{"company":"` + companyUID + `","person":"` + personUID + `"},
-      "status":"` + status + `","current_node":"` + current + `","document_id":` + documentID + `,
+      "status":"` + status + `","current_node":"` + current + `",
+      "participants":[{"party_key":"company","person_user_id":"` + companyUID + `","connection_id":null,"documents":` + companyDocs + `}],
       "output_mode":"` + outputMode + `","definition":` + defJSON + `,"answers":` + answersJSON + `,
       "created_at":null,"updated_at":null
     }`
@@ -274,6 +278,8 @@ func TestSubmitFlowAnswersSuppliedPartyPubKeys(t *testing.T) {
 	}
 }
 
+const generatedJSON = `{"documents":[{"output_key":"out_1","party_key":"company","document_id":"doc-9","position":1}],"status":"awaiting_signature"}`
+
 // ── generate (document leaf) ──────────────────────────────────────────────────
 
 func TestGenerateFlowDocument(t *testing.T) {
@@ -285,7 +291,7 @@ func TestGenerateFlowDocument(t *testing.T) {
 	var captured writeReq
 	c, _ := newTestClientRW(t, cfg, noGET(t), func(w writeReq) (int, string) {
 		captured = w
-		return 200, `{"document_id":"doc-9","status":"awaiting_signature"}`
+		return 200, generatedJSON
 	})
 	run := flowRunFromAPI(runObjJSON(t, "generating", "n1", answers, "", "document", ""))
 	res, err := c.GenerateFlowDocument(context.Background(), run)
@@ -293,7 +299,12 @@ func TestGenerateFlowDocument(t *testing.T) {
 		t.Fatalf("GenerateFlowDocument: %v", err)
 	}
 	rm, _ := res.(map[string]any)
-	if rm["document_id"] != "doc-9" {
+	docs, _ := rm["documents"].([]any)
+	var first map[string]any
+	if len(docs) > 0 {
+		first, _ = docs[0].(map[string]any)
+	}
+	if first["document_id"] != "doc-9" || first["output_key"] != "out_1" {
 		t.Fatalf("res = %#v", res)
 	}
 	if !strings.HasSuffix(captured.path, "/company-data/flow-runs/run-1/generate") {
@@ -360,7 +371,7 @@ func TestProcessFlowRunCompanyLeafDocument(t *testing.T) {
 		if !strings.HasSuffix(w.path, "/generate") {
 			t.Fatalf("unexpected write %s", w.path)
 		}
-		return 200, `{"document_id":"doc-9","status":"awaiting_signature"}`
+		return 200, generatedJSON
 	}
 	c, _ := newTestClientRW(t, cfg, getRoute, writeRoute)
 	run, err := c.ProcessFlowRun(context.Background(), "run-1",
@@ -380,7 +391,8 @@ func TestProcessFlowRunCompanyLeafDocument(t *testing.T) {
 	if !gotAnswers || !gotGenerate {
 		t.Fatalf("posts = %#v", posts)
 	}
-	if run.Status != "awaiting_signature" || run.DocumentID != "doc-9" {
+	if run.Status != "awaiting_signature" || len(run.Participants) != 1 ||
+		len(run.Participants[0].Documents) != 1 || run.Participants[0].Documents[0].DocumentID != "doc-9" {
 		t.Fatalf("final run = %+v", run)
 	}
 }

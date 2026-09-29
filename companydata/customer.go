@@ -393,8 +393,9 @@ func (c *CustomerClient) DeclineFlowRun(connectionID, runID string) (any, error)
 // answer map comes from this company's OWN copy of the answers, opened with the
 // account key — every party's answers are sealed to every bound party, so that
 // copy holds the whole run and no service key is involved — and is sealed with
-// oneTimeKeyBundle. Returns the API response {document_id, documents, status}
-// (idempotent — a repeat answers the same document set). A *ConfigError is
+// oneTimeKeyBundle. Returns the API response {documents, status} — documents is
+// one {output_key, party_key, document_id, position} per produced (output
+// document, participant) (idempotent — a repeat answers the same set). A *ConfigError is
 // returned when the run's current step is not bound to this company — the
 // participant the run lists on connectionID.
 func (c *CustomerClient) GenerateFlowDocument(connectionID string, run FlowRun) (any, error) {

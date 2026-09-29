@@ -1096,7 +1096,7 @@ func (c *Client) Document(ctx context.Context, documentID string) (Document, err
 // they happen to JSON-decode to an object with a truthy "encrypted" field, that's
 // the per-person case and it fails clearly as *ApiError{ErrorKey:
 // "documents.recipient_encrypted"} rather than attempting a doomed service-key
-// decrypt. For a generated flow contract's OWN copy the company uses
+// decrypt. For a generated flow document's OWN copy the company uses
 // FlowRunDocument — that copy IS service-key-encrypted.
 func (c *Client) DocumentFile(ctx context.Context, documentID string) ([]byte, error) {
 	raw, err := c.http.GetRaw(ctx, epDocuments+"/"+documentID+"/file")
@@ -1108,26 +1108,29 @@ func (c *Client) DocumentFile(ctx context.Context, documentID string) ([]byte, e
 		if enc, ok := decoded["encrypted"]; ok && asBool(enc) {
 			return nil, NewApiError(0, "documents.recipient_encrypted",
 				"This document is encrypted to its recipient and is not readable with the company service key. "+
-					"For a generated flow contract, use FlowRunDocument(runID) to download the company copy.")
+					"For a generated flow document, use FlowRunDocument(ctx, runID, outputKey) to download the company copy.")
 		}
 	}
 	return raw, nil // broadcast / plaintext bytes
 }
 
-// FlowRunDocument downloads a generated flow contract's COMPANY copy. GET
-// /flow-runs/{runID}/document/file returns the company-party copy,
-// encrypted to the SERVICE key — the same {"_enc":1,...} wrapper shape the
+// FlowRunDocument downloads the COMPANY copy of one output document a run generated.
+// outputKey names the output document (the OutputKey of an entry in the company
+// participant's Documents, or the output_key of a generate response's documents
+// entry). GET /flow-runs/{runID}/documents/{outputKey}/file returns the company-party
+// copy, encrypted to the SERVICE key — the same {"_enc":1,...} wrapper shape the
 // slot-file download uses, fetched + decrypted via the same lazy-binary-handle
 // path: binaryFetchCtx classifies the response and unwraps the API's
 // {"encrypted":true,"value":<wrapper>} envelope, decrypt
 // runs the service-key decrypt to the {"file":"data:…;base64,…"} envelope, and
-// the data-URI is decoded to the PLAINTEXT file bytes. A 404 (no generated
-// document yet) propagates as the normal *ApiError.
-func (c *Client) FlowRunDocument(ctx context.Context, runID string) ([]byte, error) {
+// the data-URI is decoded to the PLAINTEXT file bytes. A 404 propagates as the
+// normal *ApiError: flows.run_not_found for an unknown run, flows.no_document when
+// that output was not produced or the company is not a bound party.
+func (c *Client) FlowRunDocument(ctx context.Context, runID, outputKey string) ([]byte, error) {
 	fetch := func(valueURL string) (BinaryFetchResult, error) {
 		return c.binaryFetchCtx(ctx, valueURL)
 	}
-	return newLazyBinaryHandle(epFlowRuns+"/"+runID+"/document/file", fetch, c.decryptValue).Bytes()
+	return newLazyBinaryHandle(epFlowRuns+"/"+runID+"/documents/"+outputKey+"/file", fetch, c.decryptValue).Bytes()
 }
 
 // UpdateDocumentStatus sets a document's lifecycle status
@@ -1666,8 +1669,10 @@ func (c *Client) CheckFlowValue(run FlowRun, slug string, value any, draft map[s
 // GenerateFlowDocument runs the document-mode company leaf: a one-time-key value
 // gather → POST /generate. It seals the company's decrypted answers with
 // oneTimeKeyBundle and POSTs {otk, values}. Returns the API response
-// {document_id, documents, status} (idempotent — a repeat answers the same
-// document set).
+// {documents, status} — documents is one {output_key, party_key, document_id,
+// position} per produced (output document, participant), position the step's
+// 1-based place in the run's signing line or null for an unlisted party
+// (idempotent — a repeat answers the same set).
 func (c *Client) GenerateFlowDocument(ctx context.Context, run FlowRun) (any, error) {
 	answers, err := c.decryptRunAnswers(run)
 	if err != nil {
@@ -1683,7 +1688,8 @@ func (c *Client) GenerateFlowDocument(ctx context.Context, run FlowRun) (any, er
 // ProcessFlowRun is the high-level company turn: load → (if our turn) fill +
 // advance + generate. fillNode(node, answers) returns {slug: value}; the SDK
 // encrypts per party, submits, and — if the submit landed on a document-mode leaf
-// — calls GenerateFlowDocument. Returns the latest FlowRun; when the run is not
+// — calls GenerateFlowDocument. Returns the latest FlowRun — after a generate, each
+// participant's produced documents are on its Documents; when the run is not
 // awaiting the company it is returned untouched. partyPubKeys may be nil.
 func (c *Client) ProcessFlowRun(ctx context.Context, runID string, fillNode func(node, answers map[string]any) map[string]any, partyPubKeys map[string]*rsa.PublicKey) (FlowRun, error) {
 	run, err := c.FlowRun(ctx, runID)

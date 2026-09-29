@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -54,9 +55,9 @@ const (
 	callConnections   = "Client.ConnectionsList — resolves the person's own share code to the connection whose id the CUSTOMER party binds to"
 	callTrigger       = "Client.TriggerFlowRun — starts a run of the published flow for that connection, pinning the flow's latest published version"
 	callFlowRun       = "Client.FlowRun — re-read on every poll to see whose turn the run is on"
-	callProcess       = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the document when the submit lands on a document-mode leaf"
+	callProcess       = "Client.ProcessFlowRun — drives ONE company step: decrypts the answers so far, fills the node, type-checks the values, encrypts a copy per party, submits — and generates the output documents when the submit lands on a document-mode leaf"
 	callAnswers       = "Client.FlowRunAnswers — the completed run's answers, decrypted with the service key"
-	callDocument      = "Client.FlowRunDocument — downloads the company's own copy of the generated contract and decrypts it with the service key"
+	callDocument      = "Client.FlowRunDocument — downloads the company's own copy of output document %s and decrypts it with the service key"
 )
 
 // thin aliases to the shared scaffolding helpers so the handler code below reads cleanly.
@@ -265,7 +266,7 @@ func (h *family) Clear(w http.ResponseWriter, r *http.Request, id string) {
 
 // Run is the idempotent, short-cycled poll that IS the drive loop and the resume. Reads the platform
 // run; if it is the company's turn drives exactly ONE step; on completion fetches the answers and
-// (document-mode) downloads the generated contract. A terminal run returns its cached result on every
+// (document-mode) downloads every generated output document. A terminal run returns its cached result on every
 // poll until TTL/Clear.
 func (h *family) Run(w http.ResponseWriter, runID string, run map[string]any) {
 	// Idempotent: once terminal (completed OR errored) the outcome is returned unchanged on every
@@ -400,8 +401,8 @@ func (h *family) driveStep(run map[string]any, client *companydata.Client, flowR
 	}
 }
 
-// complete is terminal: fetch the decrypted answers and, for a document-mode run, download the generated
-// contract's company copy (the run-scoped, service-key-decryptable surface).
+// complete is terminal: fetch the decrypted answers and, for a document-mode run, download the company's
+// copy of EVERY output document the run produced (the run-scoped, service-key-decryptable surface).
 func (h *family) complete(run map[string]any, client *companydata.Client, flowRun companydata.FlowRun, flowRunID string) map[string]any {
 	ctx := context.Background()
 
@@ -418,14 +419,22 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 	run["answers"] = answersOut
 
 	if flowRun.OutputMode == "document" {
-		run["calls"] = demo.AddCall(run["calls"], callDocument)
-		bytes, err := client.FlowRunDocument(ctx, flowRunID)
-		if err != nil {
-			// The run completed but the document is not retrievable yet — report it, don't fail.
-			run["document"] = map[string]any{"status": "unavailable", "downloaded": false, "error": err.Error()}
-		} else {
-			run["document"] = map[string]any{"status": "downloaded", "downloaded": true, "bytes": len(bytes)}
+		documents := []any{}
+		for _, outputKey := range companyOutputKeys(flowRun) {
+			run["calls"] = demo.AddCall(run["calls"], fmt.Sprintf(callDocument, outputKey))
+			bytes, err := client.FlowRunDocument(ctx, flowRunID, outputKey)
+			if err != nil {
+				// The run completed but this output is not retrievable — report it, don't fail.
+				documents = append(documents, map[string]any{
+					"output_key": outputKey, "status": "unavailable", "downloaded": false, "error": err.Error(),
+				})
+			} else {
+				documents = append(documents, map[string]any{
+					"output_key": outputKey, "status": "downloaded", "downloaded": true, "bytes": len(bytes),
+				})
+			}
 		}
+		run["documents"] = documents
 	}
 
 	run["status"] = "completed"
@@ -502,6 +511,26 @@ func asInt(v any) (int, bool) {
 // still-encrypted wrapper the API returned — the evidence the "Decrypted answers" panel pairs
 // against each cleartext value, so a reader can see the decrypt actually ran on real ciphertext
 // rather than take it on faith.
+// companyOutputKeys lists the output keys of the documents the run produced for the company, in
+// signing-line order, each once — read off every participant row bound to the company's own user id
+// (a company can hold more than one party of a run, and each such row carries a copy of every output).
+func companyOutputKeys(flowRun companydata.FlowRun) []string {
+	keys := []string{}
+	seen := map[string]bool{}
+	for _, participant := range flowRun.Participants {
+		if participant.PersonUserID != flowRun.CompanyUserID {
+			continue
+		}
+		for _, doc := range participant.Documents {
+			if doc.OutputKey != "" && !seen[doc.OutputKey] {
+				seen[doc.OutputKey] = true
+				keys = append(keys, doc.OutputKey)
+			}
+		}
+	}
+	return keys
+}
+
 func ownCipherBySlug(flowRun companydata.FlowRun) map[string]any {
 	serviceUID := flowRun.ServiceUserID()
 	out := make(map[string]any, len(flowRun.Answers))
@@ -519,7 +548,7 @@ func ownCipherBySlug(flowRun companydata.FlowRun) map[string]any {
 
 // result renders the GET /api/runs/{runId} response: the SHARED run envelope (outer
 // {status:"pending"|"done"|"failed", result?, error?, calls}) with the pinned FLOW shape nested under
-// `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, document?}). Progress is
+// `result` ({status:"running"|"waiting_person"|"completed", steps, answers?, documents?}). Progress is
 // meant to be read ONLY from run.result, with polling continuing ONLY while the outer status is
 // "pending", so the inner flow status must NOT sit at the top level — it drives under "pending" until
 // the platform run completes ("done") or errors ("failed").
@@ -539,8 +568,8 @@ func result(run map[string]any) map[string]any {
 	if run["answers"] != nil {
 		res["answers"] = run["answers"]
 	}
-	if run["document"] != nil {
-		res["document"] = run["document"]
+	if run["documents"] != nil {
+		res["documents"] = run["documents"]
 	}
 
 	out := map[string]any{

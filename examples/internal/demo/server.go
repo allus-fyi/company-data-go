@@ -26,7 +26,7 @@ import (
 const (
 	// ContractVersion is the demo-backend contract this server implements; a bundle whose contract.json
 	// version differs is refused at startup (see launcher.go).
-	ContractVersion = 3
+	ContractVersion = 4
 	// SDKName identifies this SDK in /api/meta.
 	SDKName = "go"
 	// DefaultAPIURL is the deployed platform — the default target for every scenario's config.

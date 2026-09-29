@@ -487,23 +487,26 @@ obj, _ := doc.JSON() // plaintext (decrypts a per-person wrapper transparently)
 // A broadcast document comes back as plaintext bytes directly. A per-person
 // document is encrypted to that RECIPIENT (not your service key) and DocumentFile
 // returns an *ApiError{ErrorKey: "documents.recipient_encrypted"} instead of a
-// doomed decrypt attempt — for a generated flow contract's own company copy, use
+// doomed decrypt attempt — for a generated flow document's own company copy, use
 // FlowRunDocument below.
 pdf, err := client.DocumentFile(ctx, "019zzzz…")
 
-// #491: a generated flow contract's COMPANY copy — encrypted to your service
-// key, so (unlike DocumentFile on the same document) this one DOES decrypt.
-pdf, err = client.FlowRunDocument(ctx, runID)
+// The COMPANY copy of one generated flow output document — encrypted to your
+// service key, so (unlike DocumentFile on the same document) this one DOES decrypt.
+pdf, err = client.FlowRunDocument(ctx, runID, "out_1")
 
 // Advance the lifecycle status.
 // offering | ready_to_sign | active | active_but_ending | ended
 // A contract-flow-generated document can also read "waiting" — a run-participant
-// copy whose signer has not been reached yet in the run's ordered signing plan.
+// copy whose signer has not been reached yet in the run's signing line.
 // It is read-only: UpdateDocumentStatus returns an error with error_key
 // "documents.run_managed" (409) on a run-participant document while it is
 // waiting/ready_to_sign/offering — that status moves only through flow
 // generation, the run's own advance, sign/accept, or a run cancel/decline.
-// Such a document's RunSignatures carries the run's ordered signature summary.
+// Such a document's RunSignatures carries the WHOLE run's signing line — one
+// entry per (output document, participant), in line order, each {output_key,
+// name, party_key, document_id, position, status, action, acted_at}; every
+// document of the run carries the same summary.
 //
 // The document seal: completing every required signature/acceptance is not
 // the same as sealing. When the last one is recorded the platform ATTEMPTS,
@@ -535,12 +538,12 @@ err = client.DeleteDocument(ctx, doc.ID)
 
 `DocumentFile`/`FlowRunDocument` are the only two calls that return actual file
 bytes — `Document`/`ListDocuments` are metadata-only, and `GenerateFlowDocument`
-returns just `{document_id, status}`. Which one to call depends on **whose copy**
+returns just `{documents, status}`. Which one to call depends on **whose copy**
 you want: `DocumentFile(documentID)` for a document you pushed (broadcast comes
 back plaintext; per-person is encrypted to the recipient, so it errors with
 `documents.recipient_encrypted` rather than attempting a decrypt that can't
-succeed with your key); `FlowRunDocument(runID)` for the company-party copy of a
-document a contract flow generated (that copy is encrypted to YOUR service key
+succeed with your key); `FlowRunDocument(runID, outputKey)` for the company-party copy
+of one output document a contract flow generated (that copy is encrypted to YOUR service key
 and decrypts transparently, the same way a `photo`/`document` `*BinaryHandle`
 does).
 
@@ -652,8 +655,9 @@ run's bound parties.
 | `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
 | `FlowRun(ctx, runID)` | `FlowRun, error` | Fetches one run by id. |
 | `SubmitFlowAnswers(ctx, run, fill, partyPubKeys)` | `FlowRun, error` | Fills the company's current node, encrypts one answer copy per bound party, and advances the run. |
-| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and kicks off contract generation. Returns `{document_id, documents, status}` (no bytes — see below). |
+| `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: one-time-key-encrypts the answers and generates the leaf's output documents. Returns `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name (no bytes — see below). |
 | `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate, chained. |
+| `FlowRunDocument(ctx, runID, outputKey)` | `[]byte, error` | The company's own copy of one output document, decrypted to the plaintext file bytes. A 404 `*ApiError` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party. |
 | `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
 | `PluginPass(ctx, runID)` / `PluginOptions(…)` / `PluginOutputs(…)` / `CheckFlowValue(…)` | | Call a plugin element on the company's step and check a field's min/max — see [Plugins](#plugins). |
 | `Identity(ctx)` | `Identity, error` | **(#491)** This client's OWN identity — `{CompanyUserID, ServiceID}` from `GET /api/company-data/whoami`. The company party of a `TriggerFlowRun`/`SubmitFlowAnswers` binding must bind to `CompanyUserID` (the person party's user_id comes from the connection), so without this the company-side binding was otherwise unconstructible through the SDK. |
@@ -668,6 +672,20 @@ run, err := client.TriggerFlowRun(ctx, flowID, connectionID, map[string]string{
 
 run, err = client.FlowRun(ctx, run.ID)
 answers, err := client.FlowRunAnswers(run) // {slug: plaintext}, e.g. answers["monthly_eur"]
+
+// A document leaf can produce several named output documents ("Contract", "Addendum", …).
+// Each participant's own copies are on FlowRunParticipant.Documents
+// ([]FlowRunParticipantDocument{OutputKey, Name, DocumentID, DocumentStatus, RequiresSignature,
+// RequiresAcceptance, Position, Action, ActedAt}), ordered by signing-line position.
+for _, p := range run.Participants {
+    if p.PartyKey != run.CompanyPartyKey() {
+        continue
+    }
+    for _, d := range p.Documents {
+        pdf, err := client.FlowRunDocument(ctx, run.ID, d.OutputKey)
+        _, _ = pdf, err
+    }
+}
 ```
 
 **The party that answers a run's last step generates the contract — the customer role included.**
@@ -680,12 +698,13 @@ res, err := customer.GenerateFlowDocument(connectionID, run) // POST /api/compan
 
 Pass the run as re-read after your leaf submit. The answer map comes from your OWN copy of the run's
 answers, opened with the account key — every party's answers are sealed to every bound party, so that
-copy holds the whole run and no service key is involved. Returns `{document_id, documents, status}`;
-a repeat answers the same document set. A `*ConfigError` is returned when the run's current step is
+copy holds the whole run and no service key is involved. Returns `{documents, status}` — one
+`{output_key, party_key, document_id, position}` per produced (output document, participant); a repeat
+answers the same set. A `*ConfigError` is returned when the run's current step is
 not bound to your company.
 
-Once a document-mode leaf has generated the contract, download its bytes with
-`FlowRunDocument(runID)` — see [Company documents](#company-documents) above.
+Once a document-mode leaf has generated its output documents, download each one's bytes with
+`FlowRunDocument(ctx, runID, outputKey)` — see [Company documents](#company-documents) above.
 
 ---
 
