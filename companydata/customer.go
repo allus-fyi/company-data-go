@@ -381,7 +381,9 @@ func (c *CustomerClient) SubmitFlowAnswers(connectionID, runID string, body map[
 	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/answers", body)
 }
 
-// DeclineFlowRun declines a flow run.
+// DeclineFlowRun declines a flow run, cancelling it for every party. It is accepted only on your own
+// turn: your answer turn or your own open signing step. Any other time the API refuses it with
+// error_key "flows.not_your_turn" (403).
 func (c *CustomerClient) DeclineFlowRun(connectionID, runID string) (any, error) {
 	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/decline", nil)
 }
