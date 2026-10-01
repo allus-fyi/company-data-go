@@ -60,6 +60,30 @@ if errors.As(err, &rl) {
   caller's home region, which the SDK does automatically (README, **How it's
   wired** → Regions). It surfaces as `*ApiError` only when the base the refusal
   names is absent or empty — in which case no base was stored and no retry was made.
+- **A 503 `db.writes_paused` means saving is paused — retry it.** While the
+  platform cannot complete a save in every region, a call can answer 503 with
+  `ErrorKey` `db.writes_paused` ("Saving data is not possible right now") and the
+  header `Retry-After: 30`. **Nothing was written**, so the call is safe to repeat
+  exactly as it was; reads keep working. It surfaces as a plain `*ApiError`
+  (`Status == 503`); the SDK does not retry it, and `*ApiError` does not carry the
+  `Retry-After` header — wait 30 seconds, then repeat the same call. It can come
+  from every company-data and customer call that is not a GET (documents, flow-run
+  starts, answers, uploads and generation, consent answers, connect requests,
+  messages, 2FA challenges, `/api/keys/batch`); from the change-feed drains
+  `GET /api/company-data/changes` and `GET /api/customer/changes` (`ProcessChanges`,
+  `DrainBatch`), where nothing was drained — the events stay queued on the server
+  and arrive on a later run, and the local buffer is untouched; and from
+  `OAuthClient.PollResult` (`POST /oauth2/result`), where the result is not
+  consumed — poll again. The token request (`POST /oauth2/token`) does not answer
+  it: token grants keep working while saving is paused.
+
+  ```go
+  var apiErr *companydata.ApiError
+  if errors.As(err, &apiErr) && apiErr.Status == 503 && apiErr.ErrorKey == "db.writes_paused" {
+      time.Sleep(30 * time.Second)
+      // repeat the same call
+  }
+  ```
 - **`ConfigError` is fail-fast** — a bad passphrase, an unreadable PEM, a missing
   required field, or an invalid `format` all surface here at construction
   (`FromConfig` / `New`), before any network call. A bad service-key passphrase

@@ -76,6 +76,12 @@ func newAuthError(format string, a ...any) *AuthError {
 // ApiError is any non-2xx from the API. It carries the HTTP
 // Status, the platform ErrorKey (when the body provided one), and a
 // human-readable Message.
+//
+// A 503 db.writes_paused means saving is paused (the platform cannot complete
+// a save in every region). Nothing was written, so the call is safe to repeat;
+// the response's Retry-After is 30 seconds. Any call that is not a GET, the
+// change-feed drains and OAuthClient.PollResult can return it; the token
+// request cannot. The SDK does not retry it.
 type ApiError struct {
 	Status   int
 	ErrorKey string
