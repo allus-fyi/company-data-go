@@ -84,6 +84,35 @@ if errors.As(err, &rl) {
       // repeat the same call
   }
   ```
+- **A 503 `platform.out_of_order` means the platform is out of order — retry
+  it.** While the region serving a call is being rebuilt, the call answers 503
+  with `ErrorKey` `platform.out_of_order` ("allme is temporarily out of order.
+  Please try again later.") and the header `Retry-After: 300`. **The request was
+  not processed**, so the call is safe to repeat exactly as it was; the platform
+  answers normally again once the region is back in service. It surfaces as a
+  plain `*ApiError` (`Status == 503`); the SDK does not retry it, and `*ApiError`
+  does not carry the `Retry-After` header — wait 300 seconds, then repeat the same
+  call. It can come from every company-data and customer call, reads included
+  (connections, request fields, binary fetches, documents, flow runs, consent
+  answers, connect requests, messages, 2FA challenges and results, `/api/keys`);
+  from the change-feed drains `GET /api/company-data/changes` and
+  `GET /api/customer/changes` (`ProcessChanges`, `DrainBatch`), where nothing was
+  drained — the events stay queued on the server and arrive on a later run, and
+  the local buffer is untouched; and from every `OAuthClient` call
+  (`ExchangeCode`, `Userinfo`, `PollResult` — the result is not consumed; poll
+  again). The `client_credentials` token request (`POST /oauth2/token`) the
+  service and customer clients make does not answer it, so the SDK still holds a
+  token and the 503 arrives on the call itself; every other grant at
+  `POST /oauth2/token` — the `OAuthClient` code exchange, a refresh-token grant —
+  answers it.
+
+  ```go
+  var apiErr *companydata.ApiError
+  if errors.As(err, &apiErr) && apiErr.Status == 503 && apiErr.ErrorKey == "platform.out_of_order" {
+      time.Sleep(300 * time.Second)
+      // repeat the same call
+  }
+  ```
 - **`ConfigError` is fail-fast** — a bad passphrase, an unreadable PEM, a missing
   required field, or an invalid `format` all surface here at construction
   (`FromConfig` / `New`), before any network call. A bad service-key passphrase

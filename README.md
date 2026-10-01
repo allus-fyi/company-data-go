@@ -1127,7 +1127,16 @@ drains (`ProcessChanges`, `DrainBatch`) and `OAuthClient.PollResult` can return
 `*ApiError` with `Status` 503 and `ErrorKey` `db.writes_paused`, sent with
 `Retry-After: 30`. Nothing was written (a drain drained nothing), so wait 30
 seconds and repeat the same call; the SDK does not retry it. Reads and token
-requests keep working. See [`docs/errors.md`](docs/errors.md).
+requests keep working.
+
+**503 `platform.out_of_order` — the platform is out of order, retry.** While the
+region serving a call is being rebuilt, every call — reads, the change-feed drains
+(`ProcessChanges`, `DrainBatch`) and the `OAuthClient` calls included — can
+return `*ApiError` with `Status` 503 and `ErrorKey` `platform.out_of_order`, sent
+with `Retry-After: 300`. The request was not processed (a drain drained nothing),
+so wait 300 seconds and repeat the same call; the SDK does not retry it. The
+`client_credentials` token request keeps working; every other `/oauth2/token`
+grant answers it. See [`docs/errors.md`](docs/errors.md).
 
 ---
 

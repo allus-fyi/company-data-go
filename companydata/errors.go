@@ -82,6 +82,12 @@ func newAuthError(format string, a ...any) *AuthError {
 // the response's Retry-After is 30 seconds. Any call that is not a GET, the
 // change-feed drains and OAuthClient.PollResult can return it; the token
 // request cannot. The SDK does not retry it.
+//
+// A 503 platform.out_of_order means the region serving the call is being
+// rebuilt. The request was not processed, so the call is safe to repeat; the
+// response's Retry-After is 300 seconds. Any call can return it, reads and the
+// change-feed drains included, except the client_credentials token request.
+// The SDK does not retry it.
 type ApiError struct {
 	Status   int
 	ErrorKey string
