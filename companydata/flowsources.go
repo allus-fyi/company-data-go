@@ -16,7 +16,7 @@ import (
 
 // FlowRunSourceFile is one staged copy of a connection source named in a run start's
 // source_files: the source key ("conn:<party>:<request_slug>"), the bound user it is sealed
-// to, and the file StageRunFile returned.
+// to, and the file StageRunFile returned for the customer bound to the source's party.
 type FlowRunSourceFile struct {
 	SourceKey string
 	ForUserID string

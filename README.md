@@ -652,7 +652,7 @@ run's bound parties.
 | Method | Returns | What it does |
 |--------|---------|--------------|
 | `TriggerFlowRun(ctx, flowID, connectionID, bindings, sourceFiles...)` | `FlowRun, error` | Starts a run, pinning the flow's latest published version. `bindings` = `{party_key: user_id}`. The optional trailing `FlowRunSourceFile{SourceKey, ForUserID, File}` values are the run's copies of its connection sources — see [Participant PDF sources](#participant-pdf-sources). |
-| `StageRunFile(ctx, flowID, sealedValue)` | `string, error` | Stages one sealed copy of a connection source for a run start (`POST /api/company-data/flows/{flowID}/run-files`) → its `file`. |
+| `StageRunFile(ctx, flowID, sourceUserID, sealedValue)` | `string, error` | Stages one sealed copy of a connection source for a run start (`POST /api/company-data/flows/{flowID}/run-files`) → its `file`. `sourceUserID` is the customer bound to the source's party, whose shared PDF the copy is; the copy is stored in that customer's home region. |
 | `UploadAnswerFile(ctx, runID, slug, forUserID, sealedValue)` | `string, error` | Uploads one bound party's copy of a binary answer on the company's own turn (`POST /api/company-data/flow-runs/{runID}/answer-files`) → its `file`; submit `{"_enc_file": file}` as that party's answer value. |
 | `FlowRunSourceFile(ctx, runID, sourceKey)` | `any, error` | The company's own copy of a run's connection source as stored — the sealed wrapper (`GET /api/company-data/flow-runs/{runID}/source-files/{sourceKey}`, key URL-encoded). |
 | `PublishedFlow(ctx, flowID)` | `PublishedFlow, error` | The flow's latest published version — `Version`, `Definition` and the service's `RequestFieldTypes` — what `TriggerFlowRun` compiles a run's text-tag values from. |
@@ -722,19 +722,23 @@ match; the next rule is tried.
 
 **Connection sources are copied at run start.** For every answered connection source a rule of the
 published version names, stage one copy per distinct bound user — its envelope JSON sealed to that
-user's key (your own copy to the service key) — and name them all on the start:
+user's key (your own copy to the service key), naming the customer bound to the source's party, whose
+shared PDF it is — and name them all on the start:
 
 ```go
-file, err := client.StageRunFile(ctx, flowID, sealed) // sealed: a {"_enc":1,…} wrapper map or its JSON string
+// customerUserID: the customer bound to the source's party; sealed: a {"_enc":1,…} wrapper map or its JSON string
+file, err := client.StageRunFile(ctx, flowID, customerUserID, sealed)
 run, err := client.TriggerFlowRun(ctx, flowID, connectionID, bindings,
     companydata.FlowRunSourceFile{SourceKey: "conn:customer:passport", ForUserID: personUserID, File: file},
     // … one per (source, distinct bound user)
 )
 ```
 
-A start whose list is not exactly that set is refused with `*ApiError` `flows.source_files_invalid`;
-its `Details` carry `missing` (`[{source_key, for_user_id}]`) and `unexpected` (`[file]`), and nothing
-is written. A later change on the connection does not reach the run. `FlowRun.SourceFiles`
+A start whose list is not exactly that set, or whose copy was staged for another customer than the one
+bound to its source's party, is refused with `*ApiError` `flows.source_files_invalid`; its `Details`
+carry `missing` (`[{source_key, for_user_id, source_user_id}]`) and `unexpected` (`[file]`), and
+nothing is written. Staging a copy for a customer that is not connected to the service is refused
+`flows.source_user_invalid`. A later change on the connection does not reach the run. `FlowRun.SourceFiles`
 (`map[string]string`, `source_key → file`) lists your own copies on every run read; read one with
 `FlowRunSourceFile(ctx, runID, sourceKey)`.
 

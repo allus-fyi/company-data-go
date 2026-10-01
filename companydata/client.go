@@ -1383,7 +1383,8 @@ func (c *Client) PublishedFlow(ctx context.Context, flowID string) (PublishedFlo
 // version names, per distinct bound user — the company's own copy sealed to the
 // service key. A start whose list is not exactly that set is refused with an
 // *ApiError flows.source_files_invalid whose Details carry missing
-// ([{source_key, for_user_id}]) and unexpected ([file]); nothing is written.
+// ([{source_key, for_user_id, source_user_id}] — source_user_id the customer bound to the
+// source's party, whose shared file each copy is) and unexpected ([file]); nothing is written.
 // It reads the flow's latest published version (PublishedFlow) and pins it with flow_version.
 // When that version's text elements show the connected customer's shared values
 // ({{party.field}} tags), the SDK opens those values with the service key and seals them per
@@ -1558,16 +1559,20 @@ func (c *Client) compileTagValues(ctx context.Context, tags []PartyTag, publishe
 }
 
 // StageRunFile stages one sealed copy of a connection source for a run start → its file.
-// POST /api/company-data/flows/{flowID}/run-files with {value}: sealedValue is the source's
-// envelope JSON sealed to ONE bound user (a {"_enc":1,…} wrapper, as the map
-// EncryptForPublicKey returns or its JSON string). Name the returned file in TriggerFlowRun's
-// sourceFiles. An over-budget value is refused documents.too_large.
-func (c *Client) StageRunFile(ctx context.Context, flowID string, sealedValue any) (string, error) {
+// POST /api/company-data/flows/{flowID}/run-files with {source_user_id, value}: sourceUserID is
+// the connected customer whose shared PDF this copies (the source_user_id a refused start's
+// missing entry names — the user bound to the source's party); the copy is stored in that
+// customer's home region. sealedValue is the source's envelope JSON sealed to ONE bound user (a
+// {"_enc":1,…} wrapper, as the map EncryptForPublicKey returns or its JSON string). Name the
+// returned file in TriggerFlowRun's sourceFiles; the start accepts it only for a source whose
+// party is bound to sourceUserID. A customer that is not connected to the service is refused
+// flows.source_user_invalid, an over-budget value documents.too_large.
+func (c *Client) StageRunFile(ctx context.Context, flowID, sourceUserID string, sealedValue any) (string, error) {
 	value, err := sealedString(sealedValue)
 	if err != nil {
 		return "", err
 	}
-	body, err := c.http.Post(ctx, epFlows+"/"+flowID+"/run-files", map[string]any{"value": value})
+	body, err := c.http.Post(ctx, epFlows+"/"+flowID+"/run-files", map[string]any{"source_user_id": sourceUserID, "value": value})
 	if err != nil {
 		return "", err
 	}
