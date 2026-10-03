@@ -551,6 +551,7 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 		// The raw app-key ciphertext each decrypted value above came from — pairs with
 		// "values" by claim name so the panel can show a decrypt actually ran on real bytes.
 		"values_cipher": res.ValuesCipher,
+		"attestations":  attestationsMap(res.Attestations),
 	}
 
 	if asInt(id) == 4 {
@@ -580,6 +581,27 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 	run["status"] = "done"
 	run["result"] = result
 	return run
+}
+
+// nilIfEmpty maps the SDK's empty string for "not carried" to JSON null.
+func nilIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// attestationsMap renders the SDK's attestation map in the wire shape the run result carries.
+func attestationsMap(in map[string]companydata.Attestation) map[string]any {
+	out := map[string]any{}
+	for slug, a := range in {
+		out[slug] = map[string]any{
+			"verified": a.Verified, "hash": a.Hash, "salt": a.Salt, "verifiedAt": a.VerifiedAt,
+			"verifiedExpiresAt": nilIfEmpty(a.VerifiedExpiresAt), "verifiedMethod": nilIfEmpty(a.VerifiedMethod),
+			"verifiedProvider": nilIfEmpty(a.VerifiedProvider), "verificationId": nilIfEmpty(a.VerificationID),
+		}
+	}
+	return out
 }
 
 // completeOidc completes an OIDC sign-in (scenario 5) via the third-party OIDC stack — id_token
@@ -623,9 +645,8 @@ func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 			for slug, v := range resolved.Values {
 				values[slug] = v
 			}
-			attestations := map[string]any{}
+			attestations := attestationsMap(resolved.Attestations)
 			for slug, a := range resolved.Attestations {
-				attestations[slug] = map[string]any{"verified": a.Verified, "hash": a.Hash, "salt": a.Salt, "verifiedAt": a.VerifiedAt}
 				// A `verified: false` attestation is a MISMATCH between the delivered value and
 				// what was verified — the value must be rejected, never shown as an answer.
 				if !a.Verified {
