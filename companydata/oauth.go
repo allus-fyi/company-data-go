@@ -148,7 +148,7 @@ func NewOAuthClient(config *Config, opts ...OAuthOption) (*OAuthClient, error) {
 		o(c)
 	}
 	if c.doer == nil {
-		c.doer = &http.Client{Timeout: 60 * time.Second}
+		c.doer = &http.Client{Timeout: requestTimeout}
 	}
 	return c, nil
 }

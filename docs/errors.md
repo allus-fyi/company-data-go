@@ -60,6 +60,12 @@ if errors.As(err, &rl) {
   caller's home region, which the SDK does automatically (README, **How it's
   wired** → Regions). It surfaces as `*ApiError` only when the base the refusal
   names is absent or empty — in which case no base was stored and no retry was made.
+- **One request waits 45 seconds for the platform's answer.** The SDK's own
+  transport — for `Client`, `CustomerClient` and `OAuthClient` alike — waits 45
+  seconds for the platform's answer to one request, and the call then fails as it
+  does when the connection drops; a `Doer` you pass with `WithDoer` or
+  `WithOAuthDoer` keeps its own limit. A request given up may still have completed
+  on the platform.
 - **A 503 `db.writes_paused` means saving is paused — retry it.** While the
   platform cannot complete a save in every region, a call can answer 503 with
   `ErrorKey` `db.writes_paused` ("Saving data is not possible right now") and the

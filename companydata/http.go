@@ -41,6 +41,9 @@ const (
 	// tokenExpirySkew refreshes the token a little before it actually expires so
 	// an in-flight call never races the expiry boundary.
 	tokenExpirySkew = 30 * time.Second
+	// requestTimeout bounds one API request of the SDK's own HTTP client, for the service and
+	// customer clients and the OAuth client alike. A client passed in keeps its own limit.
+	requestTimeout = 45 * time.Second
 	// 429 backoff policy: bounded retries with a Retry-After-driven (or default)
 	// sleep between attempts.
 	defaultMaxRetries429 = 3
@@ -105,7 +108,7 @@ func NewHTTPClient(config *Config, opts ...httpOption) *HTTPClient {
 		o(c)
 	}
 	if c.doer == nil {
-		c.doer = &http.Client{Timeout: 60 * time.Second}
+		c.doer = &http.Client{Timeout: requestTimeout}
 	}
 	return c
 }
