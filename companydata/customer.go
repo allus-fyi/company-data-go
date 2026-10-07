@@ -350,7 +350,9 @@ func (c *CustomerClient) FlowRun(connectionID, runID string) (FlowRun, error) {
 // SubmitFlowAnswers submits this party's turn (body carries the encrypted per-party answers).
 //
 // It reads the run first and sets source_private: true on every answer in body["answers"]
-// that is private: a field whose default reaches a private source.
+// that is private: a field whose default reaches a private source. Every values[].value goes out
+// as the sealed wrapper's JSON string, whether the caller passed the map EncryptFlowAnswer returns
+// or a string.
 func (c *CustomerClient) SubmitFlowAnswers(connectionID, runID string, body map[string]any) (any, error) {
 	answers, _ := body["answers"].([]map[string]any)
 	if answers == nil {
@@ -377,6 +379,9 @@ func (c *CustomerClient) SubmitFlowAnswers(connectionID, runID string, body map[
 				a["source_private"] = true
 			}
 		}
+	}
+	if err := sealAnswerValues(answers); err != nil {
+		return nil, err
 	}
 	return c.http.Post(context.Background(), epCustomerConnections+"/"+connectionID+"/flow-runs/"+runID+"/answers", body)
 }

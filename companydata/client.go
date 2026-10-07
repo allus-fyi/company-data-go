@@ -1822,7 +1822,11 @@ func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[st
 			if err != nil {
 				return FlowRun{}, err
 			}
-			values = append(values, map[string]any{"for_user_id": uid, "value": wrapper})
+			sealed, err := sealedString(wrapper)
+			if err != nil {
+				return FlowRun{}, err
+			}
+			values = append(values, map[string]any{"for_user_id": uid, "value": sealed})
 		}
 		answer := map[string]any{"slug": slug, "values": values}
 		if private[slug] {

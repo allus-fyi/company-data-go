@@ -167,6 +167,40 @@ func sealedString(sealedValue any) (string, error) {
 	return string(b), nil
 }
 
+// sealAnswerValues sets every values[].value of the answers to the sealed wrapper's JSON string, in
+// place: the map EncryptForPublicKey returns and a string both end up sent as the string.
+func sealAnswerValues(answers []map[string]any) error {
+	seal := func(v map[string]any) error {
+		if v["value"] == nil {
+			return nil
+		}
+		s, err := sealedString(v["value"])
+		if err != nil {
+			return err
+		}
+		v["value"] = s
+		return nil
+	}
+	for _, a := range answers {
+		if typed, ok := a["values"].([]map[string]any); ok {
+			for _, v := range typed {
+				if err := seal(v); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		for _, item := range asAnyList(a["values"]) {
+			if v, ok := item.(map[string]any); ok {
+				if err := seal(v); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // responseFile is the file of an upload's 201 {file} response.
 func responseFile(body any) (string, error) {
 	f := asString(asMap(body)["file"])
