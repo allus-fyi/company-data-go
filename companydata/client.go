@@ -137,6 +137,12 @@ type Client struct {
 	pubkeyCache map[string]*rsa.PublicKey
 	pubkeyGen   map[string]uint64
 
+	// userPubkeyCache holds run-party public keys by the party's user id. A rotation signal names
+	// a share code, which does not say which user id it belongs to, so InvalidatePublicKey drops
+	// every entry and bumps one generation for the whole map. Guarded by pubkeyMu.
+	userPubkeyCache map[string]*rsa.PublicKey
+	userPubkeyGen   uint64
+
 	// pluginHTTP is the plain transport plugin calls reach the forwarder over — never the API
 	// transport, which attaches the bearer token and rewrites the base URL.
 	pluginHTTP *http.Client
@@ -171,6 +177,7 @@ func New(config *Config, opts ...clientOption) (*Client, error) {
 		unresolvedTypes: map[string]bool{},
 		pubkeyCache:     map[string]*rsa.PublicKey{},
 		pubkeyGen:       map[string]uint64{},
+		userPubkeyCache: map[string]*rsa.PublicKey{},
 		pluginHTTP:      newPluginTransport(),
 	}
 	for _, o := range opts {
@@ -742,6 +749,8 @@ func (c *Client) InvalidatePublicKey(shareCode string) {
 	c.pubkeyMu.Lock()
 	delete(c.pubkeyCache, shareCode)
 	c.pubkeyGen[shareCode]++ // any fetch already in flight must not write its stale result back
+	c.userPubkeyCache = map[string]*rsa.PublicKey{}
+	c.userPubkeyGen++
 	c.pubkeyMu.Unlock()
 }
 
@@ -1718,20 +1727,14 @@ func (c *Client) decryptRunAnswers(run FlowRun) (map[string]any, error) {
 
 // flowPersonPublicKey resolves a person party's RSA public key for per-party
 // answer encryption. It prefers a caller-supplied key (partyPubKeys), else
-// resolves the person's share_code from the run's connection → GET /api/keys/{code}.
-//
-// Integration gap: the run payload exposes neither person public keys nor
-// per-binding share codes, so the SDK resolves via the connection. Supply
-// partyPubKeys to skip the lookup entirely.
-func (c *Client) flowPersonPublicKey(ctx context.Context, run FlowRun, uid string, partyPubKeys map[string]*rsa.PublicKey) (*rsa.PublicKey, error) {
+// fetches the party's key by its user id. A run's ConnectionID names the
+// company-connection pair, not a service link, so it is never used to look the
+// party up. Supply partyPubKeys to skip the lookup entirely.
+func (c *Client) flowPersonPublicKey(ctx context.Context, _ FlowRun, uid string, partyPubKeys map[string]*rsa.PublicKey) (*rsa.PublicKey, error) {
 	if k, ok := partyPubKeys[uid]; ok {
 		return k, nil
 	}
-	sc, err := c.resolveShareCode(ctx, run.ConnectionID, uid)
-	if err != nil {
-		return nil, err
-	}
-	return c.recipientPublicKey(ctx, sc)
+	return c.userPublicKey(ctx, uid)
 }
 
 // SubmitFlowAnswers fills the company's current node and advances.
@@ -1743,7 +1746,7 @@ func (c *Client) flowPersonPublicKey(ctx context.Context, run FlowRun, uid strin
 // map, and POSTs {answers, next_node?/leaf, next_party?}. Returns the refreshed
 // FlowRun. A document-mode leaf leaves the run "generating" — call
 // GenerateFlowDocument (or ProcessFlowRun, which chains it). partyPubKeys may be
-// nil; supply it to skip the share_code → /api/keys resolution for person parties.
+// nil; supply it to skip the by-user-id key fetch (POST /api/keys/batch) for person parties.
 func (c *Client) SubmitFlowAnswers(ctx context.Context, run FlowRun, fill map[string]any, partyPubKeys map[string]*rsa.PublicKey) (FlowRun, error) {
 	if partyPubKeys == nil {
 		partyPubKeys = map[string]*rsa.PublicKey{}
@@ -2039,6 +2042,35 @@ func (c *Client) recipientPublicKey(ctx context.Context, shareCode string) (*rsa
 	// Store ONLY if no invalidation happened while the request was in flight.
 	if c.pubkeyGen[shareCode] == gen {
 		c.pubkeyCache[shareCode] = key
+	}
+	c.pubkeyMu.Unlock()
+	return key, nil
+}
+
+// userPublicKey fetches + caches a run party's RSA public key by its user id
+// (POST /api/keys/batch).
+func (c *Client) userPublicKey(ctx context.Context, userID string) (*rsa.PublicKey, error) {
+	c.pubkeyMu.Lock()
+	if cached, ok := c.userPubkeyCache[userID]; ok {
+		c.pubkeyMu.Unlock()
+		return cached, nil
+	}
+	gen := c.userPubkeyGen
+	c.pubkeyMu.Unlock()
+
+	key, err := fetchBatchPublicKey(ctx, c.http, userID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, NewApiError(0, "keys.not_found", "no public key for user "+userID)
+	}
+	c.pubkeyMu.Lock()
+	if c.userPubkeyGen == gen {
+		if c.userPubkeyCache == nil {
+			c.userPubkeyCache = map[string]*rsa.PublicKey{}
+		}
+		c.userPubkeyCache[userID] = key
 	}
 	c.pubkeyMu.Unlock()
 	return key, nil

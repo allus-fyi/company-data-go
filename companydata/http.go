@@ -275,6 +275,21 @@ func (c *HTTPClient) Post(ctx context.Context, path string, jsonBody any) (any, 
 	return c.request(ctx, http.MethodPost, path, nil, jsonBody)
 }
 
+// PostAsJSON POSTs path with a JSON body and parses the 2xx body as JSON whatever
+// Config.Format is — for a route that answers JSON to every caller. Auth/refresh/retry and
+// error mapping are identical to Post.
+func (c *HTTPClient) PostAsJSON(ctx context.Context, path string, jsonBody any) (any, error) {
+	encoded, err := json.Marshal(jsonBody)
+	if err != nil {
+		return nil, NewApiError(0, "", "request to "+path+" failed: could not marshal body: "+err.Error())
+	}
+	resp, err := c.doRequestRaw(ctx, http.MethodPost, path, nil, encoded, "application/json", true)
+	if err != nil {
+		return nil, err
+	}
+	return parseBody(resp.Body, false)
+}
+
 // PostRaw POSTs path with a raw byte body + a Content-Type → parsed body. Used
 // for the document file upload (raw plaintext bytes for a broadcast, the
 // ciphertext wrapper bytes for a per-person doc).

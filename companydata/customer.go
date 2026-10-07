@@ -909,20 +909,9 @@ func (c *CustomerClient) batchKey(userID string) (*rsa.PublicKey, error) {
 	if ok {
 		return k, nil
 	}
-	body, err := c.http.Post(context.Background(), epKeys+"/batch", map[string]any{"user_ids": []string{userID}})
+	pub, err := fetchBatchPublicKey(context.Background(), c.http, userID)
 	if err != nil {
 		return nil, err
-	}
-	var pub *rsa.PublicKey
-	if m, ok := body.(map[string]any); ok {
-		if keys, ok := m["keys"].(map[string]any); ok {
-			if spki, ok := keys[userID].(string); ok && spki != "" {
-				pub, err = LoadPublicKey(spki)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
 	}
 	c.pubkeyMu.Lock()
 	// Store ONLY if no invalidation happened while the request was in flight.

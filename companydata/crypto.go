@@ -7,6 +7,7 @@
 package companydata
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -259,6 +260,35 @@ func b64Field(value, name string) ([]byte, error) {
 }
 
 // ── encryption (for a recipient public key) ────────────────────────────────
+
+// fetchBatchPublicKey returns one user's public key through POST /api/keys/batch, or nil when
+// the user has none.
+//
+// The route answers JSON whatever the client's configured format is, so the body is parsed as
+// JSON. The answer is a flat map {user_id: {public_key, public_key_sha256, recipient_has_key}}
+// carrying every requested id; a user without a key has public_key null. http is the client's own
+// HTTP layer, so auth, rebase and retry are its own.
+func fetchBatchPublicKey(ctx context.Context, http *HTTPClient, userID string) (*rsa.PublicKey, error) {
+	body, err := http.PostAsJSON(ctx, epKeys+"/batch", map[string]any{"user_ids": []string{userID}})
+	if err != nil {
+		return nil, err
+	}
+	m, ok := body.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	var spki string
+	switch entry := m[userID].(type) {
+	case map[string]any:
+		spki = asString(entry["public_key"])
+	case string:
+		spki = entry
+	}
+	if spki == "" {
+		return nil, nil
+	}
+	return LoadPublicKey(spki)
+}
 
 // LoadPublicKey loads a base64 SPKI/DER public key (the platform's
 // GET /api/keys public_key) into an in-memory RSA public key.
