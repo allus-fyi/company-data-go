@@ -491,10 +491,14 @@ func resolveConnection(ctx context.Context, client *companydata.Client, shareCod
 	return nil, nil
 }
 
-// asInt coerces a decoded-JSON number (float64, int, or a numeric string) to an int; the ok result is
-// false for anything else, including a nil/absent value.
+// asInt coerces json.Number, float64, int, or a numeric string to an int.
+// json.Number and string values must parse as integers; float64 values are truncated.
+// Unsupported values, including nil, return ok=false.
 func asInt(v any) (int, bool) {
 	switch n := v.(type) {
+	case json.Number:
+		i, err := strconv.Atoi(n.String())
+		return i, err == nil
 	case float64:
 		return int(n), true
 	case int:
