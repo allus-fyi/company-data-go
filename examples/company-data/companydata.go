@@ -50,8 +50,8 @@ const (
 	callRequestFields  = "Client.RequestFields — GET /api/company-data/request-fields: your own request-field catalog, fetched once and cached for the life of the client"
 	callProcessChanges = "Client.ProcessChanges — drains the change feed through the crash-safe pump: handler before ack, at-least-once (dedup on Change.id), failures to the local dead-letter store"
 	callCreateDocument = "Client.CreateDocument — %s"
-	callListDocuments  = "Client.ListDocuments — GET /api/company-data/documents: pages the service's documents so cleanup finds everything it created"
-	callDeleteDocument = "Client.DeleteDocument — DELETE /api/company-data/documents/%s"
+	callDeleteDocument = "Client.DeleteDocument — DELETE /api/company-data/documents/%s: one document this example created"
+	callEndDocument    = "Client.UpdateDocumentStatus — PUT /api/company-data/documents/%s: status ended, because the platform refuses to delete a contract that carries a signature"
 	callWebhookStarted = "(webhook run started) — POST /webhook receives each delivery; every poll also drains the change feed as a fallback"
 	callVerifyWebhook  = "Client.VerifyWebhook — checks the delivery's X-Allus-Signature HMAC against the secret configured for its X-Allus-Webhook-Id; a failure answers 401"
 	callParseWebhook   = "Client.ParseWebhook — turns the verified body into a typed Change, decrypting its value with the service key"
@@ -160,6 +160,10 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if id == scenDocuments {
 		meta["share_code"] = toStr(in["shareCode"]) // the per-person/contract target
+		// The saved service the run and the clean-up act as; the record of created documents is kept
+		// across saves, each entry tagged with the service that created it.
+		meta["client_id"] = toStr(in["clientId"])
+		meta["created_documents"] = h.createdDocuments()
 		// Preserve presence so doDocuments can distinguish an explicit empty selection from an
 		// absent selection; absence means all document types.
 		if raw, ok := in["documentTypes"]; ok {
@@ -387,6 +391,9 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 		if err != nil {
 			return nil, err
 		}
+		if err := h.recordCreatedDocument(doc.ID); err != nil {
+			return nil, err
+		}
 		docs = append(docs, map[string]any{
 			"index":       len(docs) + 1,
 			"label":       sp.label,
@@ -399,10 +406,11 @@ func (h *family) doDocuments(client *companydata.Client, calls *[]string) (map[s
 
 // ── POST /api/scenarios/{id}/cleanup (companydata:documents only) ─────────────
 
-// Cleanup deletes every document the documents scenario has created on this service, so a reused
-// account can reset between runs — companydata:documents is additive (CreateDocument mints a new
-// document each run; nothing deletes a prior run's). Not part of the Family interface: opted into
-// via the demo.Cleaner interface, the same way identity's Enroll is opted into via demo.Enroller.
+// Cleanup removes the documents the documents scenario created, so a reused account can reset between
+// runs — companydata:documents is additive (CreateDocument mints a new document each run; nothing
+// deletes a prior run's). Only the ids this example recorded are touched; a document of the service it
+// did not create is never listed or deleted. Not part of the Family interface: opted into via the
+// demo.Cleaner interface, the same way identity's Enroll is opted into via demo.Enroller.
 func (h *family) Cleanup(w http.ResponseWriter, r *http.Request, id string) {
 	if id != scenDocuments {
 		writeJSON(w, 404, map[string]any{"error": "not_found"})
@@ -415,26 +423,74 @@ func (h *family) Cleanup(w http.ResponseWriter, r *http.Request, id string) {
 	h.dataRun(w, id, h.doCleanupDocuments)
 }
 
+// doCleanupDocuments deletes each document recorded for the saved service. A contract that carries a
+// signature is refused with documents.contract_immutable: it is set to status ended instead and reported
+// in "ended", and the clean-up goes on. A document already gone (documents.not_found) needs nothing. Each
+// id leaves the record as soon as it is dealt with, so a failure part-way leaves only the unprocessed
+// ones. Documents recorded for another service stay in the record untouched until that service is saved
+// again.
 func (h *family) doCleanupDocuments(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	deleted := 0
-	for {
-		*calls = append(*calls, callListDocuments)
-		page, err := client.ListDocuments(context.Background(), companydata.ListDocumentsOptions{Limit: 100, Offset: 0})
-		if err != nil {
-			return nil, err
+	ended := []string{}
+	clientID := toStr(h.rt.ReadConfigMeta(scenDocuments)["client_id"])
+	for _, rec := range h.createdDocuments() {
+		if rec["client_id"] != clientID {
+			continue
 		}
-		if len(page) == 0 {
-			break
-		}
-		for _, doc := range page {
-			*calls = append(*calls, fmt.Sprintf(callDeleteDocument, doc.ID))
-			if err := client.DeleteDocument(context.Background(), doc.ID); err != nil {
+		docID := toStr(rec["id"])
+		*calls = append(*calls, fmt.Sprintf(callDeleteDocument, docID))
+		err := client.DeleteDocument(context.Background(), docID)
+		var apiErr *companydata.ApiError
+		switch {
+		case err == nil:
+			deleted++
+		case errors.As(err, &apiErr) && apiErr.ErrorKey == "documents.contract_immutable":
+			*calls = append(*calls, fmt.Sprintf(callEndDocument, docID))
+			if _, err := client.UpdateDocumentStatus(context.Background(), docID, "ended"); err != nil {
 				return nil, err
 			}
-			deleted++
+			ended = append(ended, docID)
+		case errors.As(err, &apiErr) && apiErr.ErrorKey == "documents.not_found":
+			// already removed elsewhere — nothing left to clean up
+		default:
+			return nil, err
+		}
+		if err := h.forgetCreatedDocument(docID, clientID); err != nil {
+			return nil, err
 		}
 	}
-	return map[string]any{"deleted": deleted}, nil
+	return map[string]any{"deleted": deleted, "ended": ended}, nil
+}
+
+// createdDocuments are the documents this example created ({id, client_id} each), kept in the
+// documents scenario's setup sidecar.
+func (h *family) createdDocuments() []map[string]any {
+	out := []map[string]any{}
+	if raw, ok := h.rt.ReadConfigMeta(scenDocuments)["created_documents"].([]any); ok {
+		for _, item := range raw {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+func (h *family) recordCreatedDocument(docID string) error {
+	clientID := toStr(h.rt.ReadConfigMeta(scenDocuments)["client_id"])
+	return h.writeCreatedDocuments(append(h.createdDocuments(), map[string]any{"id": docID, "client_id": clientID}))
+}
+
+func (h *family) forgetCreatedDocument(docID, clientID string) error {
+	return h.writeCreatedDocuments(slices.DeleteFunc(h.createdDocuments(), func(m map[string]any) bool {
+		return toStr(m["id"]) == docID && toStr(m["client_id"]) == clientID
+	}))
+}
+
+func (h *family) writeCreatedDocuments(all []map[string]any) error {
+	meta := h.rt.ReadConfigMeta(scenDocuments)
+	meta["created_documents"] = all
+	return h.rt.WriteConfigMeta(scenDocuments, meta)
 }
 
 // ── companydata:webhook — the accumulating run + public receiver ──────────────
