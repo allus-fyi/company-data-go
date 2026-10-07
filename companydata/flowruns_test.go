@@ -175,16 +175,14 @@ func TestDecryptRunAnswersOnlyCompany(t *testing.T) {
 
 // ── submit: per-party fan-out + local routing ─────────────────────────────────
 
-func keyGetRouter(t *testing.T, spki string) func(string, map[string][]string) (int, string) {
-	return func(path string, _ map[string][]string) (int, string) {
-		if strings.HasSuffix(path, "/company-data/connections/csc-1") {
-			return 200, `{"connection_id":"csc-1","share_code":"ABC123"}`
+// keysBatch answers the by-user-id key fetch (POST /api/keys/batch) with spki for the person
+// party and hands every other write to next.
+func keysBatch(spki string, next func(writeReq) (int, string)) func(writeReq) (int, string) {
+	return func(w writeReq) (int, string) {
+		if strings.HasSuffix(w.path, "/api/keys/batch") {
+			return 200, `{"` + personUID + `":{"public_key":"` + spki + `","recipient_has_key":true}}`
 		}
-		if strings.HasSuffix(path, "/api/keys/ABC123") {
-			return 200, `{"public_key":"` + spki + `"}`
-		}
-		t.Fatalf("unexpected GET %s", path)
-		return 0, ""
+		return next(w)
 	}
 }
 
@@ -195,11 +193,11 @@ func TestSubmitFlowAnswersFanOutAndRoutesFallthrough(t *testing.T) {
 	priv, _ := LoadPrivateKey([]byte(v.EncryptedPrivateKeyPEM), v.Passphrase)
 
 	var captured writeReq
-	c, _ := newTestClientRW(t, cfg, keyGetRouter(t, spki), func(w writeReq) (int, string) {
+	c, _ := newTestClientRW(t, cfg, noGET(t), keysBatch(spki, func(w writeReq) (int, string) {
 		captured = w
 		b, _ := json.Marshal(runObjJSON(t, "awaiting_person", "n2", "", "", "data_only", ""))
 		return 200, string(b)
-	})
+	}))
 	run := flowRunFromAPI(runObjJSON(t, "awaiting_company", "n1", "", "", "data_only", ""))
 	out, err := c.SubmitFlowAnswers(context.Background(), run, map[string]any{"company_name": "ACME BV"}, nil)
 	if err != nil {
@@ -216,7 +214,12 @@ func TestSubmitFlowAnswersFanOutAndRoutesFallthrough(t *testing.T) {
 	seen := map[string]map[string]any{}
 	for _, vv := range vals {
 		m := vv.(map[string]any)
-		seen[m["for_user_id"].(string)] = m["value"].(map[string]any)
+		// a sealed value travels as the wrapper's JSON string
+		var wrapper map[string]any
+		if err := json.Unmarshal([]byte(m["value"].(string)), &wrapper); err != nil {
+			t.Fatalf("value is not a wrapper JSON string: %#v", m["value"])
+		}
+		seen[m["for_user_id"].(string)] = wrapper
 	}
 	if len(seen) != 2 || seen[companyUID] == nil || seen[personUID] == nil {
 		t.Fatalf("per-party copies = %#v", seen)
@@ -248,11 +251,11 @@ func TestSubmitFlowAnswersRoutesGuardedEdge(t *testing.T) {
 	cfg := clientConfig(t, v)
 	spki := vectorPubSPKIB64(t, v)
 	var captured writeReq
-	c, _ := newTestClientRW(t, cfg, keyGetRouter(t, spki), func(w writeReq) (int, string) {
+	c, _ := newTestClientRW(t, cfg, noGET(t), keysBatch(spki, func(w writeReq) (int, string) {
 		captured = w
 		b, _ := json.Marshal(runObjJSON(t, "awaiting_person", "n_end", "", "", "data_only", ""))
 		return 200, string(b)
-	})
+	}))
 	run := flowRunFromAPI(runObjJSON(t, "awaiting_company", "n1", "", "", "data_only", ""))
 	if _, err := c.SubmitFlowAnswers(context.Background(), run, map[string]any{"tier": "vip"}, nil); err != nil {
 		t.Fatalf("SubmitFlowAnswers: %v", err)
@@ -365,12 +368,6 @@ func TestProcessFlowRunCompanyLeafDocument(t *testing.T) {
 			b, _ := json.Marshal(runObjJSON(t, status, "n1", "", single, "document", docID))
 			return 200, string(b)
 		}
-		if strings.HasSuffix(path, "/company-data/connections/csc-1") {
-			return 200, `{"connection_id":"csc-1","share_code":"ABC123"}`
-		}
-		if strings.HasSuffix(path, "/api/keys/ABC123") {
-			return 200, `{"public_key":"` + spki + `"}`
-		}
 		t.Fatalf("unexpected GET %s", path)
 		return 0, ""
 	}
@@ -385,7 +382,7 @@ func TestProcessFlowRunCompanyLeafDocument(t *testing.T) {
 		}
 		return 200, generatedJSON
 	}
-	c, _ := newTestClientRW(t, cfg, getRoute, writeRoute)
+	c, _ := newTestClientRW(t, cfg, getRoute, keysBatch(spki, writeRoute))
 	run, err := c.ProcessFlowRun(context.Background(), "run-1",
 		func(node, answers map[string]any) map[string]any { return map[string]any{"company_name": "ACME BV"} }, nil)
 	if err != nil {
