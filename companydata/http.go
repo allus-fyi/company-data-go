@@ -155,7 +155,10 @@ func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 		return "", &AuthError{msg: "token request failed: " + err.Error(), err: err}
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", &AuthError{msg: "token request failed: reading the response: " + err.Error(), err: err}
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errorKey, message, _ := extractError(body, c.config.Format)
@@ -397,8 +400,11 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 		if err != nil {
 			return nil, NewApiError(0, "", "request to "+path+" failed: "+err.Error())
 		}
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			return nil, NewApiError(0, "", "request to "+path+" failed: reading the response: "+err.Error())
+		}
 		status := resp.StatusCode
 
 		switch {

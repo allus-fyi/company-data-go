@@ -482,8 +482,11 @@ func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) 
 		if err != nil {
 			return nil, NewApiError(0, "", fmt.Sprintf("result poll failed: %v", err))
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			return nil, NewApiError(0, "", fmt.Sprintf("result poll failed: reading the response: %v", err))
+		}
 		switch resp.StatusCode {
 		case 200:
 			m := parseJSONObject(body)
@@ -537,8 +540,11 @@ func (c *OAuthClient) postForm(u string, form url.Values, what string) (map[stri
 }
 
 func (c *OAuthClient) parse(resp *http.Response, what string) (map[string]any, error) {
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		return nil, NewApiError(0, "", fmt.Sprintf("%s request failed: reading the response: %v", what, err))
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return parseJSONObject(body), nil
 	}

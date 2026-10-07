@@ -66,6 +66,11 @@ if errors.As(err, &rl) {
   does when the connection drops; a `Doer` you pass with `WithDoer` or
   `WithOAuthDoer` keeps its own limit. A request given up may still have completed
   on the platform.
+- **A body that cannot be read to its end fails the call.** When the connection
+  closes, or the 45 seconds run out, while the answer's body is still arriving,
+  the call returns the same `*ApiError` with `Status == 0` that a failed send gives
+  (`*AuthError` for the token request) and never the bytes that did arrive. The SDK
+  does not send the request again.
 - **A connection closed before the answer is tried once more.** When the platform
   closes a reused connection before any byte of the answer arrives, the SDK sends
   the request once more on another connection and reports only the second failure.
