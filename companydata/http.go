@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +37,9 @@ import (
 //     *AuthError; 429 → read Retry-After and back off + retry a bounded number of
 //     times, then *RateLimitError; any other non-2xx → *ApiError carrying the
 //     body's error_key when present.
+//   - A closed connection — a request sent on a reused connection that the server
+//     closed before any byte of the response arrived is sent once more, on another
+//     connection, before anything is reported. See sendResendingOnce.
 //
 // Config-only key handling: the client id/secret come from Config,
 // never a method argument.
@@ -134,14 +141,16 @@ func (c *HTTPClient) fetchToken(ctx context.Context) (string, error) {
 	form.Set("client_id", c.config.ClientID)
 	form.Set("client_secret", c.config.ClientSecret)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base()+"/oauth2/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", &AuthError{msg: "could not build token request: " + err.Error(), err: err}
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.doer.Do(req)
+	tokenURL := c.base() + "/oauth2/token"
+	resp, err := sendResendingOnce(c.doer, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return "", &AuthError{msg: "token request failed: " + err.Error(), err: err}
 	}
@@ -369,21 +378,22 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 		if len(params) > 0 {
 			reqURL += "?" + params.Encode()
 		}
-		var bodyReader io.Reader
-		if hasBody {
-			bodyReader = bytes.NewReader(body)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
-		if err != nil {
-			return nil, NewApiError(0, "", "request to "+path+" failed: "+err.Error())
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Accept", accept)
-		if hasBody {
-			req.Header.Set("Content-Type", contentType)
-		}
-
-		resp, err := c.doer.Do(req)
+		resp, err := sendResendingOnce(c.doer, func() (*http.Request, error) {
+			var bodyReader io.Reader
+			if hasBody {
+				bodyReader = bytes.NewReader(body)
+			}
+			req, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Accept", accept)
+			if hasBody {
+				req.Header.Set("Content-Type", contentType)
+			}
+			return req, nil
+		})
 		if err != nil {
 			return nil, NewApiError(0, "", "request to "+path+" failed: "+err.Error())
 		}
@@ -442,6 +452,44 @@ func (c *HTTPClient) doRequestRaw(ctx context.Context, method, path string, para
 			return nil, NewApiErrorWithDetails(status, errorKey, message, details)
 		}
 	}
+}
+
+// sendResendingOnce sends the request newRequest builds and, when that attempt went out on a
+// REUSED connection which the server closed before any byte of the response arrived, sends it once
+// more — on another connection, since a closed one is never picked again — and answers with that
+// second attempt's outcome, failure included.
+//
+// That is the server ending a kept-alive connection on its idle timeout at the moment a request
+// was written to it: the server never read the request, so sending it again is the request's
+// first delivery. Nothing else is sent again — not a timeout, a cancelled or expired context, a
+// connection that could not be opened (the attempt then never reused one), nor an attempt that
+// received any part of a response. The trace reports the last connection an attempt used, so an
+// idempotent request the transport already replayed on a new connection is reported as it is.
+// newRequest is called once per attempt, because a request body is consumed by sending it.
+func sendResendingOnce(doer Doer, newRequest func() (*http.Request, error)) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		req, err := newRequest()
+		if err != nil {
+			return nil, err
+		}
+		var reused, responded atomic.Bool
+		trace := &httptrace.ClientTrace{
+			GotConn:              func(info httptrace.GotConnInfo) { reused.Store(info.Reused) },
+			GotFirstResponseByte: func() { responded.Store(true) },
+		}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+		resp, err := doer.Do(req)
+		if err == nil || attempt > 0 || !reused.Load() || responded.Load() ||
+			req.Context().Err() != nil || isTimeout(err) {
+			return resp, err
+		}
+	}
+}
+
+// isTimeout reports whether err is a timeout: the client's own, a dial's, or a deadline.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // url resolves path against the CURRENT base. An already-absolute path (the lazy binary

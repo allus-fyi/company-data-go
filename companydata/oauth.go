@@ -294,13 +294,19 @@ func (c *OAuthClient) ExchangeCode(code, codeVerifier string) (map[string]any, e
 
 // Userinfo reads the signed-in identity (GET /api/oauth/userinfo) with the RP token.
 func (c *OAuthClient) Userinfo(accessToken string) (map[string]any, error) {
-	req, err := http.NewRequest(http.MethodGet, c.apiURL()+"/api/oauth/userinfo", nil)
-	if err != nil {
+	userinfoURL := c.apiURL() + "/api/oauth/userinfo"
+	if _, err := url.Parse(userinfoURL); err != nil {
 		return nil, NewApiError(0, "", fmt.Sprintf("userinfo request build failed: %v", err))
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.doer.Do(req)
+	resp, err := sendResendingOnce(c.doer, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodGet, userinfoURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return nil, NewApiError(0, "", fmt.Sprintf("userinfo request failed: %v", err))
 	}
@@ -511,13 +517,15 @@ func (c *OAuthClient) PollResult(state string, timeout, interval time.Duration) 
 func (c *OAuthClient) apiURL() string { return strings.TrimRight(c.config.APIURL, "/") }
 
 func (c *OAuthClient) postRaw(u string, form url.Values) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	return c.doer.Do(req)
+	return sendResendingOnce(c.doer, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, u, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		return req, nil
+	})
 }
 
 func (c *OAuthClient) postForm(u string, form url.Values, what string) (map[string]any, error) {

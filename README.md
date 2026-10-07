@@ -1131,6 +1131,15 @@ does when the connection drops; a `Doer` you pass with `WithDoer` or
 `WithOAuthDoer` keeps its own limit. A request given up may still have completed
 on the platform.
 
+**A connection closed before the answer is tried once more.** When the platform
+closes a reused connection before any byte of the answer arrives, the SDK sends
+the request once more on another connection and reports only the second failure.
+This also holds for a `Doer` you pass, as long as it sends with `net/http` (the
+SDK learns about reuse and the first byte from `net/http/httptrace`). A request
+is never sent again once any byte of its answer has arrived, after the 45 seconds
+ran out, or when the connection could not be opened. A request the platform
+acted on before its connection died with no answer at all runs twice.
+
 **503 `db.writes_paused` — saving is paused, retry.** While the platform cannot
 complete a save in every region, any call that is not a GET, the change-feed
 drains (`ProcessChanges`, `DrainBatch`) and `OAuthClient.PollResult` can return
