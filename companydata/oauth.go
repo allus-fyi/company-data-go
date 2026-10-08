@@ -128,7 +128,7 @@ type OAuthOption func(*OAuthClient)
 // WithOAuthDoer injects an HTTP Doer (the standard *http.Client satisfies it) — used in tests.
 func WithOAuthDoer(d Doer) OAuthOption { return func(c *OAuthClient) { c.doer = d } }
 
-// WithAuthorizeURL overrides the hosted consent base (non-prod hosts).
+// WithAuthorizeURL overrides the hosted consent base (non-prod hosts); it wins over the config's authorize_url.
 func WithAuthorizeURL(u string) OAuthOption { return func(c *OAuthClient) { c.authorizeURL = u } }
 
 // WithOAuthSleep injects the poll sleeper (tests use a no-op).
@@ -139,9 +139,13 @@ func NewOAuthClient(config *Config, opts ...OAuthOption) (*OAuthClient, error) {
 	if config.OAuthClientID == "" || config.OAuthRedirectURI == "" {
 		return nil, newConfigError("OAuthClient requires oauth_client_id + oauth_redirect_uri (idw role)")
 	}
+	authorizeURL := config.AuthorizeURL
+	if authorizeURL == "" {
+		authorizeURL = DefaultAuthorizeURL
+	}
 	c := &OAuthClient{
 		config:       config,
-		authorizeURL: DefaultAuthorizeURL,
+		authorizeURL: authorizeURL,
 		sleep:        time.Sleep,
 	}
 	for _, o := range opts {

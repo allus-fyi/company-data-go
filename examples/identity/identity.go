@@ -28,9 +28,8 @@ import (
 
 const (
 	defaultAPIURL      = demo.DefaultAPIURL
-	defaultAuthBase    = companydata.DefaultAuthorizeURL // https://web.allme.fyi/auth
-	pollTimeout        = 2 * time.Second                 // short-cycled SDK wait per poll (contract §3)
-	oidcNetworkTimeout = 15 * time.Second                // bounds OIDC discovery + token exchange
+	pollTimeout        = 2 * time.Second  // short-cycled SDK wait per poll (contract §3)
+	oidcNetworkTimeout = 15 * time.Second // bounds OIDC discovery + token exchange
 )
 
 // noOrigin is the refusal when the request carries no Host header, so the browser's origin is unknown.
@@ -52,7 +51,7 @@ const noStoredOrigin = "no_origin — the saved config has no oauth_redirect_uri
 // panel is headed "What just happened", and a list that no longer matches the code is worse than a short
 // one.
 const (
-	callIDWBuild           = "companydata.OAuthClientFromConfig — builds the RP client from the saved config file: client id, secret and the registered redirect URI"
+	callIDWBuild           = "companydata.OAuthClientFromConfig — builds the RP client from the saved config file: client id, secret, the registered redirect URI and the sign-in address"
 	callAuthSignin         = "OAuthClient.AuthorizeURL — the consent URL the person is sent to (mode signin, response_mode redirect, PKCE S256, state = this run id)"
 	callAuthSigninDetached = "OAuthClient.AuthorizeURL — the sign-in URL behind the link + QR (mode signin, response_mode detached, PKCE S256, state = this run id)"
 	callAuthOneTime        = "OAuthClient.AuthorizeURL — the consent URL the person is sent to (mode one_time, claims email + phone, PKCE S256, state = this run id)"
@@ -139,7 +138,7 @@ func (family) Owns(id string) bool {
 // ── POST /api/scenarios/{id}/config ───────────────────────────────────────────
 
 // Config writes the browser's setup values to a canonical SDK config FILE. Any PEM is written to
-// .runtime/config/keys/ and referenced by path; demo-only run parameters (authorize base, one_time
+// .runtime/config/keys/ and referenced by path; demo-only run parameters (one_time
 // claims, share code, context) go to a meta sidecar so the config file stays a pure SDK config.
 func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	n := asInt(id)
@@ -163,6 +162,9 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if secret := toStr(in["oauthClientSecret"]); secret != "" {
 		cfg["oauth_client_secret"] = secret
+	}
+	if authorizeURL := toStr(in["authorizeBase"]); authorizeURL != "" && oauthURLScenario[n] {
+		cfg["authorize_url"] = authorizeURL
 	}
 
 	// Any scenario whose run can carry claim values (claimValueScenarios) needs the OAuth app
@@ -205,9 +207,6 @@ func (h *family) Config(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Demo-only run parameters (NOT SDK Config fields) → meta sidecar.
 	meta := map[string]any{}
-	if oauthURLScenario[n] {
-		meta["authorize_base"] = orDefault(toStr(in["authorizeBase"]), defaultAuthBase)
-	}
 	if n == 3 {
 		meta["claims"] = claimTypes(in)
 	}
@@ -671,16 +670,13 @@ func (h *family) completeOidc(run map[string]any, code string) map[string]any {
 // ── SDK / OIDC client builders — built from the persisted config FILE ─────────
 
 // oauthClientFor builds the OAuth client OFF the scenario's config file via the idw file constructor
-// (OAuthClientFromConfig → ConfigFromIdwFile). A non-default authorize base (local-stack option) is
-// supplied via WithAuthorizeURL. timeout > 0 injects a bounded HTTP Doer for the short-cycled polls so
+// (OAuthClientFromConfig → ConfigFromIdwFile); the sign-in address is the file's authorize_url when
+// present, else the SDK's live default. timeout > 0 injects a bounded HTTP Doer for the short-cycled polls so
 // one blackholed request cannot pin the single worker for the default 60s transport (contract §3).
 func (h *family) oauthClientFor(id string, timeout time.Duration) (*companydata.OAuthClient, error) {
 	var opts []companydata.OAuthOption
 	if timeout > 0 {
 		opts = append(opts, companydata.WithOAuthDoer(&http.Client{Timeout: timeout}))
-	}
-	if base := toStr(h.rt.ReadConfigMeta(id)["authorize_base"]); base != "" && base != defaultAuthBase {
-		opts = append(opts, companydata.WithAuthorizeURL(base))
 	}
 	return companydata.OAuthClientFromConfig(h.rt.ConfigPath(id), opts...)
 }

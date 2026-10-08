@@ -166,7 +166,7 @@ func (rt *Runtime) WriteConfig(scenarioID string, config map[string]any) (string
 }
 
 // WriteConfigMeta writes a scenario's demo-only meta sidecar — run parameters that are NOT SDK Config
-// fields (authorize base, one-time claims, share codes, flow/connection ids, webhook id), kept out of
+// fields (one-time claims, share codes, flow/connection ids, webhook id), kept out of
 // the canonical config file so it stays a pure SDK config.
 func (rt *Runtime) WriteConfigMeta(scenarioID string, meta map[string]any) error {
 	if err := rt.EnsureDirs(); err != nil {

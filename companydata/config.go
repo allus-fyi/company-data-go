@@ -38,6 +38,7 @@ const (
 	envOAuthClientSecret    = "ALLUS_OAUTH_CLIENT_SECRET"
 	envOAuthPrivateKey      = "ALLUS_OAUTH_PRIVATE_KEY"
 	envOAuthKeyPassphrase   = "ALLUS_OAUTH_KEY_PASSPHRASE"
+	envAuthorizeURL         = "ALLUS_AUTHORIZE_URL"
 	envCacheDir             = "ALLUS_CACHE_DIR"
 	envFormat               = "ALLUS_FORMAT"
 	envWebhookSecret        = "ALLUS_WEBHOOK_SECRET"
@@ -67,6 +68,9 @@ type Config struct {
 	OAuthClientSecret  string `json:"oauth_client_secret,omitempty"`
 	OAuthPrivateKey    string `json:"oauth_private_key,omitempty"`
 	OAuthKeyPassphrase string `json:"oauth_key_passphrase,omitempty"`
+
+	// Optional — the hosted sign-in page the OAuth role builds its link on; empty means the live address.
+	AuthorizeURL string `json:"authorize_url,omitempty"`
 
 	// Optional — per-webhook HMAC secrets keyed by webhook id; matched via the
 	// X-Allus-Webhook-Id header. A single-webhook service can use the flat
@@ -124,6 +128,7 @@ type rawConfig struct {
 	OAuthClientSecret    string            `json:"oauth_client_secret"`
 	OAuthPrivateKey      string            `json:"oauth_private_key"`
 	OAuthKeyPassphrase   string            `json:"oauth_key_passphrase"`
+	AuthorizeURL         string            `json:"authorize_url"`
 	Webhooks             map[string]string `json:"webhooks"`
 	WebhookSecret        string            `json:"webhook_secret"`
 	WebhookBearerToken   string            `json:"webhook_bearer_token"`
@@ -218,6 +223,7 @@ func buildConfig(raw *rawConfig, role string) (*Config, error) {
 		OAuthClientSecret:    firstNonEmpty(os.Getenv(envOAuthClientSecret), raw.OAuthClientSecret),
 		OAuthPrivateKey:      firstNonEmpty(os.Getenv(envOAuthPrivateKey), raw.OAuthPrivateKey),
 		OAuthKeyPassphrase:   firstNonEmpty(os.Getenv(envOAuthKeyPassphrase), raw.OAuthKeyPassphrase),
+		AuthorizeURL:         firstNonEmpty(os.Getenv(envAuthorizeURL), raw.AuthorizeURL),
 		CacheDir:             firstNonEmpty(os.Getenv(envCacheDir), raw.CacheDir),
 		Format:               firstNonEmpty(os.Getenv(envFormat), raw.Format),
 	}
