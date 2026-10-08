@@ -40,6 +40,14 @@ type Connection struct {
 No source field anywhere — `Values` is keyed by your slug. `Connection(ctx, id)`
 returns one; `Connections(ctx, …)` / `ConnectionsList(ctx, …)` iterate the book.
 
+### Ending a connection
+
+```
+func (c *Client) DeleteConnection(ctx context.Context, connectionID string) error
+```
+
+`DELETE /api/company-data/connections/{id}` — the service ends one of its own connections; `id` is `Connection.ID`. It leaves exactly the state the customer's own disconnect leaves, and returns nothing. The customer is told by the platform, and a `connection_deleted` change reaches the pump and webhooks. Errors: `*ApiError`, auth and rate-limit errors; the refusals are `404` `company_data.connection_not_found` (not a connection of this service) and `409` `company_connections.active_contract` (the customer holds an active agreement or subscription on this service).
+
 ## Value — one answer
 
 ```go

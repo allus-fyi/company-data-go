@@ -216,6 +216,7 @@ Options are advanced/optional: `WithHTTPClient` (inject a custom transport),
 | `Connections(ctx, limit, offset)` | `(<-chan Connection, <-chan error)` | A **lazy** channel of `Connection`, auto-paging the list endpoint (a short page ends iteration). Read the error channel after the connection channel closes. |
 | `ConnectionsList(ctx, limit, offset)` | `[]Connection, error` | Eager convenience — drains the iterator into a slice (initial full sync). |
 | `Connection(ctx, id)` | `Connection, error` | One connection by id. |
+| `DeleteConnection(ctx, connectionID)` | `error` | End one of this service's connections (`DELETE /api/company-data/connections/{id}`): leaves exactly the state the customer's own disconnect leaves, and `connection_deleted` reaches your change feed and webhooks. A refusal is an `*ApiError`: 404 `company_data.connection_not_found` (not a connection of this service), 409 `company_connections.active_contract` (the customer holds an active agreement or subscription on this service). |
 | `Logs(ctx, limit, offset)` | `[]LogEntry, error` | The service's activity log (ops events only — email/purge/webhook). |
 | `ProcessChanges(handler, opts)` | `error` | The **crash-safe streaming pump** (one `Change` at a time, durable buffer, retry→dead-letter, until empty then returns). See [the changes pump](#the-changes-pump). |
 | `DrainBatch(max)` | `[]Change, error` | A raw, **unbuffered** drain (advanced — you own durability). |

@@ -667,6 +667,18 @@ func (c *Client) Connection(ctx context.Context, id string) (Connection, error) 
 	return connectionFromAPI(m, c.typeForSlug, c.loadedFieldTypes, c.decryptValue, c.binaryFetch, nil)
 }
 
+// DeleteConnection ends one of THIS service's connections (the service side of a
+// disconnect). Wraps DELETE /api/company-data/connections/{id}. It leaves exactly
+// the state the customer's own disconnect leaves; the customer is told by the
+// platform, and connection_deleted reaches your change feed and webhooks. A
+// refusal is an *ApiError: 404 company_data.connection_not_found for an id that
+// is not a connection of this service, 409 company_connections.active_contract
+// while the customer holds an active agreement or subscription on it.
+func (c *Client) DeleteConnection(ctx context.Context, connectionID string) error {
+	_, err := c.http.Delete(ctx, epConnections+"/"+connectionID)
+	return err
+}
+
 // ── logs (moderate rate-limit) ──────────────────────────────────────────────
 
 // Logs returns the service's activity log → []LogEntry.
