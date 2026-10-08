@@ -213,9 +213,9 @@ Options are advanced/optional: `WithHTTPClient` (inject a custom transport),
 | Method | Returns | What it does |
 |--------|---------|--------------|
 | `RequestFields(ctx)` | `[]RequestField, error` | Your request-field **definitions** (slug → label/type/flags). Fetched once and cached. Never the person's fields. |
-| `Connections(ctx, limit, offset)` | `(<-chan Connection, <-chan error)` | A **lazy** channel of `Connection`, auto-paging the list endpoint (a short page ends iteration). Read the error channel after the connection channel closes. |
+| `Connections(ctx, limit, offset)` | `(<-chan Connection, <-chan error)` | A **lazy** channel of `Connection`, auto-paging the list endpoint (a short page ends iteration). Read the error channel after the connection channel closes. A value the service key cannot open never ends the iteration: it arrives marked `Unreadable` (see the `Value` notes below). |
 | `ConnectionsList(ctx, limit, offset)` | `[]Connection, error` | Eager convenience — drains the iterator into a slice (initial full sync). |
-| `Connection(ctx, id)` | `Connection, error` | One connection by id. |
+| `Connection(ctx, id)` | `Connection, error` | One connection by id. A value the service key cannot open is returned marked `Unreadable`, never as an error. |
 | `DeleteConnection(ctx, connectionID)` | `error` | End one of this service's connections (`DELETE /api/company-data/connections/{id}`): leaves exactly the state the customer's own disconnect leaves, and `connection_deleted` reaches your change feed and webhooks. A refusal is an `*ApiError`: 404 `company_data.connection_not_found` (not a connection of this service), 409 `company_connections.active_contract` (the customer holds an active agreement or subscription on this service). |
 | `Logs(ctx, limit, offset)` | `[]LogEntry, error` | The service's activity log (ops events only — email/purge/webhook). |
 | `ProcessChanges(handler, opts)` | `error` | The **crash-safe streaming pump** (one `Change` at a time, durable buffer, retry→dead-letter, until empty then returns). See [the changes pump](#the-changes-pump). |
@@ -246,7 +246,7 @@ other five SDKs.
 ```go
 type RequestField struct { Slug, Label, Type string; OneTime, Mandatory, Verified bool; VerifiedMaxAgeDays *int; Plugin *RequestFieldPlugin; Raw map[string]any }
 type Connection   struct { ID, PersonID, DisplayName string; ConnectedAt *time.Time; Values map[string]Value; Raw map[string]any }
-type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; VerifiedMethod, VerifiedProvider, VerificationID string; Raw map[string]any }
+type Value        struct { Value any; Live, Verified bool; UpdatedAt, VerifiedAt, VerifiedExpiresAt *time.Time; VerifiedMethod, VerifiedProvider, VerificationID string; Raw map[string]any; Unreadable bool }
 type Change       struct { ID, Event, PersonID, ShareCode, Slug string; Value any; Live, HasLive bool; At *time.Time; Raw map[string]any }
 type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Raw map[string]any }
 ```
@@ -325,6 +325,14 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   verification keys and none of these, so all three read `""`. They are readable
   whatever `Verified` says; that boolean stays the only trust decision. `Change`
   carries the same three on `field_updated`.
+- `Value.Unreadable` is true when the answer is present but the configured service
+  key cannot open it — sealed to a key the service has since replaced, or a wrong
+  configured key. `Value.Value` is then nil and `Value.Verified` false; every other
+  field is read as for a readable value, and the listing or read it arrived in goes
+  on. **Not readable is not empty:** an unanswered value is `Value` nil with
+  `Unreadable` false. A binary value is a lazy handle and is never marked: a binary
+  whose file cannot be opened fails when its bytes are read. When every value of
+  every connection reads `Unreadable`, check the configured `service_private_key`.
 - **The person's source field is never present** — no source slug, no
   `field_id`, not even via `Raw` (the hardened API doesn't return it).
 - `Raw` on any object → the underlying (hardened) API map, for debugging or an
@@ -663,7 +671,7 @@ run's bound parties.
 | `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: uploads the held participant PDF sources as generation inputs, one-time-key-encrypts the answers and generates the leaf's output documents. Returns `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name (no bytes — see below). |
 | `ProcessFlowRun(ctx, runID, fillNode, partyPubKeys)` | `FlowRun, error` | The high-level company turn: load → (if it's our turn) fill + advance + generate (held source PDFs uploaded first), chained. |
 | `FlowRunDocument(ctx, runID, outputKey)` | `[]byte, error` | The company's own copy of one output document, decrypted to the plaintext file bytes. A 404 `*ApiError` is `flows.run_not_found` for an unknown run, or `flows.no_document` when that output was not produced or the company is not a bound party. |
-| `FlowRunAnswers(run)` | `map[string]any, error` | **(#491)** A completed run's DECRYPTED answers as `{slug: plaintext}` — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). |
+| `FlowRunAnswers(run)` | `FlowRunAnswers, error` | A completed run's answers — the public accessor for reading a finished run's answers (decrypts the company's own service-key answer copies of an already-fetched `FlowRun`). `Answers` is the DECRYPTED `{slug: plaintext}` map, `Unreadable` the slugs whose answer the service key could not open (empty when every answer opened); an unreadable answer is left out of `Answers` and never fails the call. |
 | `PluginPass(ctx, runID)` / `PluginOptions(…)` / `PluginOutputs(…)` / `CheckFlowValue(…)` | | Call a plugin element on the company's step and check a field's min/max — see [Plugins](#plugins). |
 | `Identity(ctx)` | `Identity, error` | **(#491)** This client's OWN identity — `{CompanyUserID, ServiceID}` from `GET /api/company-data/whoami`. The company party of a `TriggerFlowRun`/`SubmitFlowAnswers` binding must bind to `CompanyUserID` (the person party's user_id comes from the connection), so without this the company-side binding was otherwise unconstructible through the SDK. |
 
@@ -678,7 +686,7 @@ run, err := client.TriggerFlowRun(ctx, flowID, connectionID, map[string]string{
 // ... after the run reaches a company-turn state (see ProcessFlowRun/SubmitFlowAnswers) ...
 
 run, err = client.FlowRun(ctx, run.ID)
-answers, err := client.FlowRunAnswers(run) // {slug: plaintext}, e.g. answers["monthly_eur"]
+answers, err := client.FlowRunAnswers(run) // answers.Answers is {slug: plaintext}, e.g. answers.Answers["monthly_eur"]
 
 // A document leaf can produce several named output documents ("Contract", "Addendum", …).
 // Each participant's own copies are on FlowRunParticipant.Documents
@@ -1106,7 +1114,7 @@ Idiomatic Go error types matching the §9 taxonomy. Each has a sentinel for
 | `*ConfigError` | `ErrConfig` | Missing/invalid config or key file at construction (fail fast). |
 | `*AuthError` | `ErrAuth` | Token fetch/refresh failed (bad client_id/secret, revoked client). |
 | `*ApiError` (`Status`, `ErrorKey`, `Message`, `Details`) | `ErrAPI` | Any non-2xx from the API; `Details` holds the error body's remaining fields (e.g. `missing`/`unexpected` on `flows.source_files_invalid`). |
-| `*DecryptError` | `ErrDecrypt` | Wrapper malformed, wrong key, or GCM tag mismatch. |
+| `*DecryptError` | `ErrDecrypt` | Wrapper malformed, wrong key, or GCM tag mismatch. Returned when a binary value's bytes are read, on a change event (the pump dead-letters it; a webhook parse returns it) and from flow-run routing and generation. `Connections`/`ConnectionsList`/`Connection` never return it for a value — they mark it `Unreadable` — and `FlowRunAnswers` lists such an answer under `Unreadable`. |
 | `*WebhookError` | `ErrWebhook` | Signature verification failed or an envelope couldn't be unwrapped. |
 | `*RateLimitError` (`RetryAfter`) | `ErrRateLimit` (also `ErrAPI`) | A 429 from a rate-limited endpoint (embeds `*ApiError`). |
 | `*ValidationError` (`Slug`, `FieldType`, `Bound`, `BoundValue`) | `ErrValidation` | A value fails its field type's check, or (`Bound` = `"min"`/`"max"`) lies outside a flow field's bound. |

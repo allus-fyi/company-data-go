@@ -257,10 +257,11 @@ func (h *family) doRead(client *companydata.Client, calls *[]string) (map[string
 		values := make([]map[string]any, 0, len(conn.Values))
 		for slug, v := range conn.Values {
 			values = append(values, map[string]any{
-				"slug":  slug,
-				"value": stringifyValue(v.Value),
-				"live":  v.Live,
-				"at":    isoOrNil(v.UpdatedAt),
+				"slug":       slug,
+				"value":      stringifyValue(v.Value),
+				"live":       v.Live,
+				"at":         isoOrNil(v.UpdatedAt),
+				"unreadable": v.Unreadable,
 			})
 		}
 		connections = append(connections, map[string]any{

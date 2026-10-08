@@ -62,8 +62,17 @@ type Value struct {
     VerifiedProvider  string     // WHO established the proof: allme|sumsub
     VerificationID    string     // the proof id to quote back to allme in a dispute
     Raw       map[string]any
+    Unreadable        bool       // true = present but the service key cannot open it; Value nil, Verified false
 }
 ```
+
+**Not readable is not empty.** An unanswered value is `Value` `nil` with `Unreadable` `false`; a
+value the configured service key cannot open (sealed to a key the service has since replaced, or a
+wrong configured key) is `Value` `nil` with `Unreadable` `true`, and never fails the
+`Connections`/`ConnectionsList`/`Connection` read it arrived in. Its other members are read as for a readable value,
+with `Verified` `false`. A binary value is a lazy handle and is never marked; its failure surfaces when
+its bytes are read. When every value of every connection reads `Unreadable`, check the configured
+`service_private_key`.
 
 ### `value` types — from the type's RESOLVED definition
 

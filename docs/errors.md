@@ -146,3 +146,8 @@ if errors.As(err, &rl) {
 - **`DecryptError`** inside the changes pump is contained: a poison (undecryptable)
   buffered event is dead-lettered immediately rather than wedging the stream (see
   [pump](pump.md)).
+- **`DecryptError` never ends a connection read.** `Connections`, `ConnectionsList`
+  and `Connection` return a value the service key cannot open marked
+  `Value.Unreadable` instead, and `FlowRunAnswers` lists such an answer under
+  `FlowRunAnswers.Unreadable`. It is still returned when a binary value's bytes are
+  read, by a webhook parse, and by flow-run routing and generation.

@@ -1668,14 +1668,15 @@ func (c *Client) FlowRun(ctx context.Context, runID string) (FlowRun, error) {
 	return flowRunFromAPI(asMap(body)), nil
 }
 
-// FlowRunAnswers returns a completed run's DECRYPTED answers as {slug: plaintext}.
-// It decrypts the company's service-key answer copies of an
-// already-fetched run — the public accessor for a finished run's answers, since
-// the private decryptRunAnswers it wraps is otherwise reached only inside
-// ProcessFlowRun, which returns an already-completed run untouched. (Go has no
-// FlowRun|string union; fetch the run with FlowRun first, then pass it here.)
-func (c *Client) FlowRunAnswers(run FlowRun) (map[string]any, error) {
-	return c.decryptRunAnswers(run)
+// FlowRunAnswers returns a completed run's DECRYPTED answers. It decrypts the company's
+// service-key answer copies of an already-fetched run — the public accessor for a finished
+// run's answers, which ProcessFlowRun returns untouched. (Go has no FlowRun|string union; fetch
+// the run with FlowRun first, then pass it here.)
+//
+// An answer the service key cannot open never fails the call: it is left out of Answers and its
+// slug is listed in Unreadable. Any other error is returned.
+func (c *Client) FlowRunAnswers(run FlowRun) (FlowRunAnswers, error) {
+	return c.openRunAnswers(run, true)
 }
 
 // Identity is this client's own service identity.
@@ -1709,10 +1710,25 @@ func (c *Client) servicePublicKey() *rsa.PublicKey {
 }
 
 // decryptRunAnswers decrypts the company's service-key answer copies → {slug:
-// plaintext}. Only the rows whose for_user_id is the company's bound user_id are
-// decryptable with the service private key; the person's copies are skipped.
+// plaintext}, failing on the first answer that does not open. Routing and generation
+// read the run's whole answer set, so a missing answer there would route or fill on a
+// value that is not the run's.
 func (c *Client) decryptRunAnswers(run FlowRun) (map[string]any, error) {
+	opened, err := c.openRunAnswers(run, false)
+	if err != nil {
+		return nil, err
+	}
+	return opened.Answers, nil
+}
+
+// openRunAnswers opens the company's service-key answer copies. Only the rows whose
+// for_user_id is the company's bound user_id are decryptable with the service private
+// key; the person's copies are skipped. With skipUnreadable an answer that does not open
+// (an ErrDecrypt error) is left out and its slug listed in Unreadable; without it the
+// error is returned.
+func (c *Client) openRunAnswers(run FlowRun, skipUnreadable bool) (FlowRunAnswers, error) {
 	out := map[string]any{}
+	unreadable := []string{}
 	for _, row := range run.Answers {
 		if asString(row["for_user_id"]) != run.ServiceUserID() {
 			continue
@@ -1730,11 +1746,15 @@ func (c *Client) decryptRunAnswers(run FlowRun) (map[string]any, error) {
 		}
 		plain, err := c.decryptValue(v)
 		if err != nil {
-			return nil, err
+			if !skipUnreadable || !errors.Is(err, ErrDecrypt) {
+				return FlowRunAnswers{}, err
+			}
+			unreadable = append(unreadable, slug)
+			continue
 		}
 		out[slug] = plain
 	}
-	return out, nil
+	return FlowRunAnswers{Answers: out, Unreadable: unreadable}, nil
 }
 
 // flowPersonPublicKey resolves a person party's RSA public key for per-party

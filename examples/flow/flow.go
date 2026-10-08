@@ -412,8 +412,8 @@ func (h *family) complete(run map[string]any, client *companydata.Client, flowRu
 		return failRun(run, err)
 	}
 	ciphers := ownCipherBySlug(flowRun)
-	answersOut := make([]any, 0, len(answers))
-	for slug, value := range answers {
+	answersOut := make([]any, 0, len(answers.Answers))
+	for slug, value := range answers.Answers {
 		answersOut = append(answersOut, map[string]any{"slug": slug, "value": value, "cipher": ciphers[slug]})
 	}
 	run["answers"] = answersOut

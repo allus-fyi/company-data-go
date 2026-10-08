@@ -2,6 +2,7 @@ package companydata
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 //	RequestField { Slug, Label, Type, OneTime, Mandatory, Verified, VerifiedMaxAgeDays }
 //	Connection   { ID, PersonID, DisplayName, ConnectedAt, Values map[slug]Value }
 //	Value        { Value, Live, UpdatedAt, Verified, VerifiedAt, VerifiedExpiresAt,
-//	               VerifiedMethod, VerifiedProvider, VerificationID }
+//	               VerifiedMethod, VerifiedProvider, VerificationID, Unreadable }
 //	Change       { ID, Event, PersonID, ShareCode, Slug, Value, Live, At } // ID = stable dedup key
 //	LogEntry     { Type, Message, Metadata, At }
 //
@@ -146,6 +147,12 @@ func requestFieldsFromAPI(body any) []RequestField {
 // connected" (auto-updates) vs a one-time snapshot; UpdatedAt = when this answer
 // last changed (nil if absent). Both ride on the Value (per-answer), not the
 // definition.
+//
+// Unreadable marks an answer that is present but could not be opened with the
+// configured service key — sealed to a key the service has since replaced, or a
+// wrong configured key. Such a value carries Value nil and Verified false, and
+// never fails the read it arrived in. An unanswered value is Value nil with
+// Unreadable false.
 type Value struct {
 	Value     any
 	Live      bool
@@ -169,12 +176,25 @@ type Value struct {
 	VerifiedProvider string
 	VerificationID   string
 	Raw              map[string]any
+	// Unreadable: true when the answer is present but could not be opened with the configured
+	// service key; Value is then nil and Verified false. Every value of every connection
+	// reading true points at the configured key.
+	Unreadable bool
 }
 
+// valueFromAPI builds a typed Value from one hardened {value|value_url, live, updatedAt} entry.
+// An entry whose value cannot be opened (an ErrDecrypt error) is built marked Unreadable, with
+// no plaintext; every other member is read from the entry as for a readable one. Any other
+// error is returned.
 func valueFromAPI(obj map[string]any, fieldType string, fieldTypes *FieldTypeRegistry, decryptValue decryptValueFn, binaryFetch binaryFetchFn) (Value, error) {
+	unreadable := false
 	typed, err := typedValue(obj, fieldType, fieldTypes, decryptValue, binaryFetch)
 	if err != nil {
-		return Value{}, err
+		if !errors.Is(err, ErrDecrypt) {
+			return Value{}, err
+		}
+		typed = nil
+		unreadable = true
 	}
 	return Value{
 		Value:             typed,
@@ -187,6 +207,7 @@ func valueFromAPI(obj map[string]any, fieldType string, fieldTypes *FieldTypeReg
 		VerifiedProvider:  asString(obj["verified_provider"]),
 		VerificationID:    asString(obj["verification_id"]),
 		Raw:               obj,
+		Unreadable:        unreadable,
 	}, nil
 }
 
@@ -608,6 +629,17 @@ type FlowRun struct {
 	// service key. nil on a run whose text names none.
 	TagValues map[string]any
 	Raw       map[string]any
+}
+
+// FlowRunAnswers is a run's answers as the company's service key opens them.
+//
+// Answers holds every answer the key opened, {slug: plaintext}; Unreadable lists the slugs of
+// the answers present on the run that it could not open (sealed to a key the service has since
+// replaced, or a wrong configured key), empty when every answer opened. An unreadable slug is
+// never in Answers.
+type FlowRunAnswers struct {
+	Answers    map[string]any
+	Unreadable []string
 }
 
 // PublishedFlow is the latest published version of a flow — what Client.TriggerFlowRun compiles a
