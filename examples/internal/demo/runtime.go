@@ -51,6 +51,7 @@ var (
 
 // Runtime is the on-disk state store rooted at a base directory.
 type Runtime struct {
+	baseDir       string
 	runtimeDir    string
 	runsDir       string
 	configDir     string
@@ -60,9 +61,13 @@ type Runtime struct {
 	statePath     string
 }
 
-// NewRuntime builds a Runtime whose state lives under baseDir/.runtime.
+// NewRuntime builds a Runtime whose state lives under baseDir/.runtime, or under the directory the
+// EXAMPLE_RUNTIME_DIR environment variable names when it is set and non-empty.
 func NewRuntime(baseDir string) *Runtime {
-	rt := &Runtime{runtimeDir: filepath.Join(baseDir, ".runtime")}
+	rt := &Runtime{baseDir: baseDir, runtimeDir: filepath.Join(baseDir, ".runtime")}
+	if dir := os.Getenv("EXAMPLE_RUNTIME_DIR"); dir != "" {
+		rt.runtimeDir = dir
+	}
 	rt.runsDir = filepath.Join(rt.runtimeDir, "runs")
 	rt.configDir = filepath.Join(rt.runtimeDir, "config")
 	rt.configKeysDir = filepath.Join(rt.configDir, "keys")
@@ -143,8 +148,9 @@ func (rt *Runtime) HasConfig(scenarioID string) bool {
 	return err == nil
 }
 
-// WriteConfig writes a scenario's canonical SDK config file (atomic). Returns the RELATIVE path (for
-// display/inspection in the setup panel). config is the canonical SDK config shape (snake_case keys).
+// WriteConfig writes a scenario's canonical SDK config file (atomic). Returns the path for
+// display/inspection in the setup panel: relative to the example directory under the default runtime
+// directory, under the selected directory with EXAMPLE_RUNTIME_DIR. config is the canonical SDK config shape (snake_case keys).
 func (rt *Runtime) WriteConfig(scenarioID string, config map[string]any) (string, error) {
 	if err := rt.EnsureDirs(); err != nil {
 		return "", err
@@ -153,7 +159,10 @@ func (rt *Runtime) WriteConfig(scenarioID string, config map[string]any) (string
 	if err := atomicWrite(rt.ConfigPath(scenarioID), blob, 0o600); err != nil {
 		return "", err
 	}
-	return ".runtime/config/" + sid(scenarioID) + ".json", nil
+	if rt.runtimeDir == filepath.Join(rt.baseDir, ".runtime") {
+		return ".runtime/config/" + sid(scenarioID) + ".json", nil
+	}
+	return rt.ConfigPath(scenarioID), nil
 }
 
 // WriteConfigMeta writes a scenario's demo-only meta sidecar — run parameters that are NOT SDK Config

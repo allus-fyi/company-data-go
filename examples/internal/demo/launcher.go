@@ -3,7 +3,7 @@ package demo
 // The one-command launcher shared by the whole example: `go run .` (from examples/).
 //
 // Steps:
-//  1. wipe .runtime/ (fresh state each boot)
+//  1. wipe the runtime state directory (.runtime/, or EXAMPLE_RUNTIME_DIR; fresh state each boot)
 //  2. on a missing/unverified bundle: fetch the pinned frontend release (frontend.lock), VERIFY its
 //     sha256, unpack to .frontend/<tag>/ (a present, verified bundle is a cache hit — nothing refetched)
 //  3. assert the bundle's contract.json version == the backend's implemented ContractVersion
@@ -56,7 +56,7 @@ func run(factories []FamilyFactory) error {
 	// 1. fresh runtime state (shared by all three families)
 	rt := NewRuntime(base)
 	if err := rt.WipeAll(); err != nil {
-		return fmt.Errorf("could not reset .runtime/: %w", err)
+		return fmt.Errorf("could not reset %s: %w", rt.runtimeDir, err)
 	}
 
 	// 2. frontend bundle (pinned release, checksum-verified, TAG-specific cache)
