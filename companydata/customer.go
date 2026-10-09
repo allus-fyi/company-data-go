@@ -57,10 +57,14 @@ type CustomerConnection struct {
 }
 
 // TypedAnswer is a typed answer to a consent/edit request row (before encryption).
+//
+// Kind "keep" (EditAnswers only) keeps the row's stored answer as it is: Value is ignored and
+// nothing is sent but the row and the kind. The API accepts it only for a row that holds an
+// answer now.
 type TypedAnswer struct {
 	RequestFieldID string
 	Value          string
-	Kind           string // "typed" (default) | "one_time"
+	Kind           string // "typed" (default) | "one_time" | "keep"
 }
 
 // FlowParty identifies a flow party for EncryptFlowAnswer.
@@ -247,7 +251,9 @@ func (c *CustomerClient) DeclineConsent(consentID string) (any, error) {
 	return c.http.Post(context.Background(), epCustomerConsents+"/"+consentID+"/decline", nil)
 }
 
-// EditAnswers re-types + re-encrypts already-answered mappings.
+// EditAnswers re-types + re-encrypts already-answered mappings. answers is the WHOLE answer
+// set: a row it sends nothing for is withdrawn, and a row answered with Kind "keep" keeps its
+// stored answer.
 func (c *CustomerClient) EditAnswers(connectionID, serviceLinkID string, answers []TypedAnswer, companyCode, serviceCode string) (any, error) {
 	decisions, err := c.encryptTyped(answers, companyCode, serviceCode)
 	if err != nil {
@@ -849,6 +855,9 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 		return nil, err
 	}
 	for _, a := range answers {
+		if a.Kind == "keep" {
+			continue
+		}
 		if ft := types[a.RequestFieldID]; ft != "" {
 			if !registry.IsFieldValueValid(ft, a.Value) {
 				return nil, newValidationError(a.RequestFieldID, ft)
@@ -857,6 +866,11 @@ func (c *CustomerClient) encryptTyped(answers []TypedAnswer, companyCode, servic
 	}
 	out := make([]map[string]any, 0, len(answers))
 	for _, a := range answers {
+		// A kept row carries no value: nothing to encrypt.
+		if a.Kind == "keep" {
+			out = append(out, map[string]any{"request_field_id": a.RequestFieldID, "kind": "keep"})
+			continue
+		}
 		wrapper, err := EncryptForPublicKey(a.Value, pub)
 		if err != nil {
 			return nil, err
