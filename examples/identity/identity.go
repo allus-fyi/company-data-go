@@ -462,7 +462,7 @@ func (h *family) Run(w http.ResponseWriter, runID string, run map[string]any) {
 }
 
 // advance short-cycles a pending run awaiting a detached / challenge outcome: ONE SDK wait with
-// timeout 2s per poll; an SDK logical timeout is treated as still-pending. Clients are rebuilt from the
+// timeout 2s per poll; a poll that got no HTTP response, or a 503, stays pending (pollErr). Clients are rebuilt from the
 // run's scenario config file — the run stores no credentials.
 func (h *family) advance(run map[string]any) map[string]any {
 	id := toStr(run["scenario"])
@@ -511,12 +511,25 @@ func (h *family) advance(run map[string]any) map[string]any {
 	return run
 }
 
-// pollErr distinguishes the SDK's LOGICAL "not completed within Ns" timeout (still pending) from a real
-// transport failure (failed run). The SDK poll helpers signal the logical timeout as an *ApiError(0)
-// whose message contains that exact sentinel; a transport failure is a different *ApiError(0) message.
+// pollErr keeps a pending run pending when the poll could not read an outcome and another poll can
+// still read it: the SDK's logical "not completed within" timeout, a request that never received an
+// HTTP response (a transport timeout or connection failure, the token request included), or a 503.
+// Every other error ends the run.
 func pollErr(run map[string]any, err error) map[string]any {
-	if strings.Contains(err.Error(), "not completed within") {
-		return run // logical short-cycle timeout → still pending
+	var apiErr *companydata.ApiError
+	if errors.As(err, &apiErr) {
+		// Status 0 also marks a 2xx answer whose body could not be decoded; that answer is final and
+		// ends the run.
+		if apiErr.Status == 0 && !strings.HasPrefix(apiErr.Message, "response was not valid") {
+			return run
+		}
+		if apiErr.Status == 503 {
+			return run
+		}
+	}
+	var authErr *companydata.AuthError
+	if errors.As(err, &authErr) && strings.Contains(authErr.Error(), "token request failed:") {
+		return run
 	}
 	return failRun(run, err)
 }
