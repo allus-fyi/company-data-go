@@ -1020,7 +1020,7 @@ func TestDocumentVerbsHitRightPath(t *testing.T) {
 	cfg := clientConfig(t, v)
 	getRoute := func(path string, _ map[string][]string) (int, string) {
 		if strings.HasSuffix(path, "/documents") {
-			return 200, `{"total":0,"items":[]}`
+			return 200, `{"items":[],"next":null}`
 		}
 		if strings.Contains(path, "/documents/d9") {
 			return 200, `{"id":"d9","payload_kind":"json","is_private":false,"value":{"a":1}}`

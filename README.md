@@ -481,11 +481,13 @@ with your own key, or returns a broadcast value as-is).
 ### List / fetch / update / delete
 
 ```go
-// List this service's documents (optional person/status filter + paging).
+// Every document of this service, newest first (optional person/status filter).
+// ListDocuments pages GET /api/company-data/documents with its cursor, sending each
+// page's `next` marker back as `after` until a page answers none.
 docs, err := client.ListDocuments(ctx, companydata.ListDocumentsOptions{
     PersonUserID: "019yyyy…", // optional
     Status:       "active",   // optional
-    Limit:        100, Offset: 0,
+    Limit:        100,        // the page size, 1–500
 })
 
 // One document by id.

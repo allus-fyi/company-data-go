@@ -1071,35 +1071,47 @@ func (c *Client) CreateDocument(ctx context.Context, opts CreateDocumentOptions)
 type ListDocumentsOptions struct {
 	PersonUserID string
 	Status       string
-	Limit        int // defaults to 100 when <1
-	Offset       int
+	Limit        int // the page size, 1–500; defaults to 100 when <1
 }
 
-// ListDocuments lists this service's documents → []Document (paged; optional
-// person/status filter).
+// ListDocuments returns every document of this service, newest first (optional
+// person/status filter). It pages GET /api/company-data/documents with its
+// cursor: each page's `next` marker is sent back as `after` until a page answers
+// none.
 func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOptions) ([]Document, error) {
 	limit := opts.Limit
 	if limit < 1 {
 		limit = defaultConnPage
 	}
-	offset := opts.Offset
-	if offset < 0 {
-		offset = 0
+	if limit > 500 {
+		limit = 500
 	}
-	params := url.Values{}
-	params.Set("limit", strconv.Itoa(limit))
-	params.Set("offset", strconv.Itoa(offset))
-	if opts.PersonUserID != "" {
-		params.Set("person_user_id", opts.PersonUserID)
+	out := []Document{}
+	after := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", strconv.Itoa(limit))
+		if opts.PersonUserID != "" {
+			params.Set("person_user_id", opts.PersonUserID)
+		}
+		if opts.Status != "" {
+			params.Set("status", opts.Status)
+		}
+		if after != "" {
+			params.Set("after", after)
+		}
+		body, err := c.http.Get(ctx, epDocuments, params)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, documentsFromAPI(body, c.decryptValue)...)
+		m, _ := body.(map[string]any)
+		next, _ := m["next"].(string)
+		if next == "" {
+			return out, nil
+		}
+		after = next
 	}
-	if opts.Status != "" {
-		params.Set("status", opts.Status)
-	}
-	body, err := c.http.Get(ctx, epDocuments, params)
-	if err != nil {
-		return nil, err
-	}
-	return documentsFromAPI(body, c.decryptValue), nil
 }
 
 // Document fetches one document by id → Document.
