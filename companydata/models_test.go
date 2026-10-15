@@ -352,6 +352,10 @@ func TestChangeDocumentStatusChangedParses(t *testing.T) {
 func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
 	v := loadVector(t)
 	decryptValue, _ := vectorDecryptValue(t, v)
+	noteCipher, err := json.Marshal(encryptForVectorKey(t, v, "Too expensive"))
+	if err != nil {
+		t.Fatalf("marshal note wrapper: %v", err)
+	}
 	body := map[string]any{"changes": []any{
 		map[string]any{
 			"id": "chg-sign", "event": "document_status_changed",
@@ -361,7 +365,7 @@ func TestChangeDocumentStatusChangedCarriesAction(t *testing.T) {
 		map[string]any{
 			"id": "chg-cancel", "event": "document_status_changed",
 			"person_user_id": "u-2", "action": "cancelled",
-			"note": "Too expensive", "document_id": "doc-8", "status": "ended",
+			"note": string(noteCipher), "document_id": "doc-8", "status": "ended",
 			"at": "2026-06-22T11:00:00Z",
 		},
 	}}

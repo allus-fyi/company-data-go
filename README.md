@@ -562,11 +562,18 @@ does).
 
 When a recipient acts on a document, the change feed emits a
 **`document_status_changed`** event carrying `DocumentID` + `Status` (no slug, no
-value) — handle it alongside the field events. A transition to `active`
-additionally carries the same seal state the document read carries —
-`SealedAt`, `PlainSHA256`, `SignerFirstName`, `SignerLastName`,
-`SignerNameVerified` (+ `HasSignerNameVerified`) — so you never need a
-follow-up `Document(id)` call just to learn a run sealed:
+value) — handle it alongside the field events. A signature additionally
+carries `SignerFirstName`, `SignerLastName` and `SignerNameVerified`
+(+ `HasSignerNameVerified`), and a cancellation its `Note`. The signer names
+and the note arrive encrypted to your service key; the SDK decrypts them, so
+the `Change` exposes them as plaintext.
+
+When the platform seals a file document (never a JSON contract) the feed emits
+a separate **`document_sealed`** event carrying `DocumentID`, `SealedAt` and
+`PlainSHA256` — so you never need a follow-up `Document(id)` call just to learn
+a document sealed. A webhook receives it only when it subscribes to
+`document_sealed` (or has an empty event filter, which receives every event); a subscription to `document_status_changed` alone does not
+deliver it.
 
 ```go
 err := client.ProcessChanges(func(c companydata.Change) error {
@@ -574,6 +581,8 @@ err := client.ProcessChanges(func(c companydata.Change) error {
     case "document_status_changed":
         // e.g. the person moved a contract offering → ready_to_sign → active
         onDocumentStatus(c.PersonID, c.DocumentID, c.Status)
+    case "document_sealed":
+        onDocumentSealed(c.PersonID, c.DocumentID, c.SealedAt, c.PlainSHA256)
     case "field_updated":
         upsert(c.PersonID, c.Slug, c.Value)
     }

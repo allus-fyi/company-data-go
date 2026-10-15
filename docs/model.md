@@ -207,8 +207,10 @@ type Change struct {
 | `field_deleted` | `Slug` (no value). A binary slot whose file expired may add `content_sha256` + `expired` in `Raw` |
 | `consent_accepted` / `consent_declined` | `Slug` |
 | `message_received` | `ConnectionID`, `MessageID`, `PersonPublicKey` + `MessageBody` (the DECRYPTED message text); no slot. Person→company only — a broadcast raises no event |
+| `document_status_changed` | `DocumentID`, `Status`, `Action`; a signature adds `Method`, `ContentSHA256`, `SignedAt`, `SignerFirstName`, `SignerLastName`, `SignerNameVerified`; a cancellation adds `Note`, `CancelEffectiveDate`. The signer names and the note arrive encrypted to the service key and are DECRYPTED by the SDK |
+| `document_sealed` | `DocumentID`, `SealedAt`, `PlainSHA256` (lowercase hex). Emitted when the platform seals a file document, never for a JSON contract. A webhook receives it only when subscribed to it (or has an empty event filter, which receives every event) |
 
-The event's ciphertext is carried under `body`. It is never `value`: on every other
+A `message_received` event's ciphertext is carried under `body`. It is never `value`: on every other
 event `value` means field ciphertext, and a message body is not one.
 
 **Answering one.** `SendMessage` answers **201** with the created message carrying

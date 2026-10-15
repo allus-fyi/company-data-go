@@ -400,18 +400,18 @@ type Change struct {
 	Value                 any
 	Live                  bool
 	HasLive               bool
-	DocumentID            string // set on document_status_changed
-	Status                string // set on document_status_changed
-	Action                string // set on document_status_changed for a contract: signed | accepted | cancelled
-	Note                  string // set on document_status_changed: the person's optional cancellation note
-	Method                string // set on a signature: biometric | twofa | email | custodian
-	ContentSHA256         string // set on a signature: SHA-256 of the signed content
-	SignedAt              string // set on a signature: ISO timestamp the signature was recorded
-	CancelEffectiveDate   string // set on a cancelled document_status_changed: ISO date the cancellation takes effect
-	SealedAt              string // set on document_status_changed: when the platform seal was applied; empty until sealed
-	PlainSHA256           string // set on document_status_changed: SHA-256 of the document's unencrypted PDF bytes; empty on a JSON contract
-	SignerFirstName       string // set on document_status_changed: the signature's own signer evidence
-	SignerLastName        string
+	DocumentID            string     // set on document_status_changed and document_sealed
+	Status                string     // set on document_status_changed
+	Action                string     // set on document_status_changed for a contract: signed | accepted | cancelled
+	Note                  string     // set on document_status_changed: the person's optional cancellation note, decrypted from service-key ciphertext
+	Method                string     // set on a signature: biometric | twofa | email | custodian
+	ContentSHA256         string     // set on a signature: SHA-256 of the signed content
+	SignedAt              string     // set on a signature: ISO timestamp the signature was recorded
+	CancelEffectiveDate   string     // set on a cancelled document_status_changed: ISO date the cancellation takes effect
+	SealedAt              string     // set on document_sealed: when the platform seal was applied; empty on every other event
+	PlainSHA256           string     // set on document_sealed: SHA-256 (lowercase hex) of the document's unencrypted PDF bytes; empty on every other event
+	SignerFirstName       string     // set on document_status_changed: the signature's own signer evidence, decrypted from service-key ciphertext
+	SignerLastName        string     // set on document_status_changed: decrypted from service-key ciphertext
 	SignerNameVerified    bool       // true iff the submitted name matched the signer's verified ID name
 	HasSignerNameVerified bool       // whether SignerNameVerified was present on the event at all
 	RequestID             string     // set on connection_request_accepted | connection_request_rejected
@@ -472,19 +472,44 @@ func changeFromAPI(obj map[string]any, typeForSlug typeForSlugFn, fieldTypes fie
 		documentID = asString(obj["document_id"])
 		status = asString(obj["status"])
 		action = asString(obj["action"])
-		note = asString(obj["note"])
 		method = asString(obj["method"])
 		contentSHA256 = asString(obj["content_sha256"])
 		signedAt = asString(obj["signed_at"])
 		cancelEffectiveDate = asString(obj["cancel_effective_date"])
-		sealedAt = asString(obj["sealed_at"])
-		plainSHA256 = asString(obj["plain_sha256"])
-		signerFirstName = asString(obj["signer_first_name"])
-		signerLastName = asString(obj["signer_last_name"])
+		// The signer names and the note are encrypted for the SERVICE key, so the
+		// ordinary decrypt opens them. Null, absent, or an empty string (an XML
+		// empty element) stays empty and is never decrypted.
+		for _, f := range []struct {
+			key string
+			dst *string
+		}{
+			{"signer_first_name", &signerFirstName},
+			{"signer_last_name", &signerLastName},
+			{"note", &note},
+		} {
+			cipher, ok := obj[f.key]
+			if !ok || cipher == nil {
+				continue
+			}
+			if s, isStr := cipher.(string); isStr && s == "" {
+				continue
+			}
+			plain, err := decryptValue(cipher)
+			if err != nil {
+				return Change{}, err
+			}
+			*f.dst = plain
+		}
 		if v, ok := obj["signer_name_verified"]; ok && v != nil {
 			hasSignerNameVerified = true
 			signerNameVerified = coerceBool(v)
 		}
+	}
+
+	if event == "document_sealed" {
+		documentID = asString(obj["document_id"])
+		sealedAt = asString(obj["sealed_at"])
+		plainSHA256 = asString(obj["plain_sha256"])
 	}
 
 	// 2fa_challenge_completed carries the outcome in status (approved|denied|revoked); its
