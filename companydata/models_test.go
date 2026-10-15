@@ -306,7 +306,7 @@ func TestConnectionIncludesCustomerTypeAndShareCode(t *testing.T) {
 }
 
 func TestLogEntriesParsed(t *testing.T) {
-	body := map[string]any{"total": 2, "items": []any{
+	body := map[string]any{"items": []any{
 		map[string]any{"type": "email", "message": "alert", "metadata": map[string]any{"days": 3}, "created_at": "2026-06-17T06:00:00Z"},
 		map[string]any{"type": "purge", "message": "purged 4", "metadata": map[string]any{"count": 4}, "created_at": "2026-06-17T07:00:00Z"},
 	}}

@@ -248,7 +248,7 @@ func (h *family) dataRun(w http.ResponseWriter, id string, do dataFn) {
 // who both filled the same slug stay distinguishable.
 func (h *family) doRead(client *companydata.Client, calls *[]string) (map[string]any, error) {
 	*calls = append(*calls, callConnections)
-	conns, err := client.ConnectionsList(context.Background(), 0, 0)
+	conns, err := client.ConnectionsList(context.Background(), 0)
 	if err != nil {
 		return nil, err
 	}

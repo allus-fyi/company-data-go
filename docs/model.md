@@ -229,7 +229,7 @@ type LogEntry struct {
 }
 ```
 
-`client.Logs(ctx, limit, offset)` — service operations only, never person data.
+`client.Logs(ctx, limit)` — service operations only, never person data.
 
 ## Raw
 

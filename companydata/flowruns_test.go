@@ -112,6 +112,7 @@ func TestTriggerFlowRun(t *testing.T) {
 func TestFlowRunsDefaultAwaitingCompany(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
+	var afters []string
 	c, _ := newTestClientRW(t, cfg, func(path string, params map[string][]string) (int, string) {
 		if !strings.HasSuffix(path, "/company-data/flow-runs") {
 			t.Fatalf("unexpected GET %s", path)
@@ -119,15 +120,27 @@ func TestFlowRunsDefaultAwaitingCompany(t *testing.T) {
 		if got := params["status"]; len(got) != 1 || got[0] != "awaiting_company" {
 			t.Fatalf("status param = %#v", params["status"])
 		}
-		b, _ := json.Marshal(map[string]any{"total": 1, "items": []any{runObjJSON(t, "awaiting_company", "n1", "", "", "data_only", "")}})
+		after := ""
+		if v := params["after"]; len(v) > 0 {
+			after = v[0]
+		}
+		afters = append(afters, after)
+		var next any
+		if after == "" {
+			next = "m1"
+		}
+		b, _ := json.Marshal(map[string]any{"items": []any{runObjJSON(t, "awaiting_company", "n1", "", "", "data_only", "")}, "next": next})
 		return 200, string(b)
 	}, func(writeReq) (int, string) { return 200, "{}" })
 	runs, err := c.FlowRuns(context.Background(), "")
 	if err != nil {
 		t.Fatalf("FlowRuns: %v", err)
 	}
-	if len(runs) != 1 || runs[0].Status != "awaiting_company" {
+	if len(runs) != 2 || runs[0].Status != "awaiting_company" {
 		t.Fatalf("runs = %+v", runs)
+	}
+	if strings.Join(afters, ",") != ",m1" {
+		t.Fatalf("afters = %v", afters)
 	}
 }
 

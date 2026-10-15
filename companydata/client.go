@@ -25,10 +25,10 @@ import (
 // live there and nowhere else), then call:
 //
 //	client.RequestFields(ctx)               -> cached []RequestField  (slug -> meta)
-//	client.Connections(ctx)                 -> channel of Connection (auto-paged)
-//	client.ConnectionsList(ctx, limit, off) -> []Connection (eager, all pages)
+//	client.Connections(ctx, limit)          -> channel of Connection (auto-paged)
+//	client.ConnectionsList(ctx, limit)      -> []Connection (eager, all pages)
 //	client.Connection(ctx, id)              -> one Connection
-//	client.Logs(ctx, limit, offset)         -> []LogEntry
+//	client.Logs(ctx, limit)                 -> []LogEntry (all pages)
 //	client.ProcessChanges(handler, opts)    -> the crash-safe pump
 //	client.DrainBatch(max)                  -> raw unbuffered drain (advanced)
 //	client.DeadLetters() / client.RetryDeadLetters(handler, opts)
@@ -82,6 +82,9 @@ const (
 	// heavily rate-limited, so pages are reasonably large to
 	// minimize requests for a full sync, while the iterator stays lazy.
 	defaultConnPage = 100
+
+	// flowRunPage is the page size FlowRuns reads the run list with (the list's maximum).
+	flowRunPage = 500
 
 	// Bounded extra backoff for the connections iterator on a surfaced 429.
 	connMax429Backoffs = 5
@@ -537,11 +540,13 @@ func (c *Client) loadedFieldTypes() (*FieldTypeRegistry, error) {
 // backs off per Retry-After and retries the page a bounded number of times
 // before surfacing the error.
 //
-// Honor the API's reported total: a short page (fewer rows than the page size)
-// ends iteration. Cancel via ctx to stop early.
+// limit is the page size. The iterator pages with the list's cursor: each page's
+// `next` marker is sent back as `after` until a page answers none, and a page is
+// fetched only once the previous one has been consumed. Cancel via ctx to stop
+// early.
 //
 // For a simpler eager API, use ConnectionsList.
-func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Connection, <-chan error) {
+func (c *Client) Connections(ctx context.Context, limit int) (<-chan Connection, <-chan error) {
 	out := make(chan Connection)
 	errc := make(chan error, 1)
 
@@ -553,26 +558,19 @@ func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Con
 		if page < 1 {
 			page = defaultConnPage
 		}
-		cur := offset
-		if cur < 0 {
-			cur = 0
-		}
 		if err := c.prepareTyping(ctx); err != nil {
 			errc <- err
 			return
 		}
 
+		after := ""
 		for {
-			body, err := c.getConnectionsPage(ctx, page, cur)
+			body, err := c.getConnectionsPage(ctx, page, after)
 			if err != nil {
 				errc <- err
 				return
 			}
-			items := listItems(body)
-			if len(items) == 0 {
-				return
-			}
-			for _, obj := range items {
+			for _, obj := range listItems(body) {
 				m, ok := obj.(map[string]any)
 				if !ok {
 					continue
@@ -589,11 +587,10 @@ func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Con
 					return
 				}
 			}
-			// A short page means we reached the end (no more rows than asked for).
-			if len(items) < page {
+			after = nextMarker(body)
+			if after == "" {
 				return
 			}
-			cur += page
 		}
 	}()
 
@@ -602,8 +599,8 @@ func (c *Client) Connections(ctx context.Context, limit, offset int) (<-chan Con
 
 // ConnectionsList eagerly drains the connections iterator into a slice (the
 // initial-full-sync convenience). It auto-pages and honors the rate limit.
-func (c *Client) ConnectionsList(ctx context.Context, limit, offset int) ([]Connection, error) {
-	conns, errc := c.Connections(ctx, limit, offset)
+func (c *Client) ConnectionsList(ctx context.Context, limit int) ([]Connection, error) {
+	conns, errc := c.Connections(ctx, limit)
 	var out []Connection
 	for conn := range conns {
 		out = append(out, conn)
@@ -615,12 +612,14 @@ func (c *Client) ConnectionsList(ctx context.Context, limit, offset int) ([]Conn
 }
 
 // getConnectionsPage GETs one connections page, backing off on a surfaced 429.
-func (c *Client) getConnectionsPage(ctx context.Context, page, offset int) (any, error) {
+func (c *Client) getConnectionsPage(ctx context.Context, page int, after string) (any, error) {
 	attempts := 0
 	for {
 		params := url.Values{}
 		params.Set("limit", strconv.Itoa(page))
-		params.Set("offset", strconv.Itoa(offset))
+		if after != "" {
+			params.Set("after", after)
+		}
 		body, err := c.http.Get(ctx, epConnections, params)
 		if err == nil {
 			return body, nil
@@ -634,7 +633,7 @@ func (c *Client) getConnectionsPage(ctx context.Context, page, offset int) (any,
 			return nil, err
 		}
 		delay := connBackoff(rl.RetryAfter, attempts)
-		c.logf("connections rate-limited (offset=%d); backoff %v (attempt %d)", offset, delay, attempts)
+		c.logf("connections rate-limited; backoff %v (attempt %d)", delay, attempts)
 		if delay > 0 {
 			c.sleep(delay)
 		}
@@ -681,23 +680,35 @@ func (c *Client) DeleteConnection(ctx context.Context, connectionID string) erro
 
 // ── logs (moderate rate-limit) ──────────────────────────────────────────────
 
-// Logs returns the service's activity log → []LogEntry.
-// Ops events only (email / purge / webhook) — never person field data.
-func (c *Client) Logs(ctx context.Context, limit, offset int) ([]LogEntry, error) {
+// Logs returns the service's whole activity log, newest first → []LogEntry.
+// It pages GET /api/company-data/logs with its cursor: limit is the page size
+// (1–200), and each page's `next` marker is sent back as `after` until a page
+// answers none. Ops events only (email / purge / webhook) — never person field data.
+func (c *Client) Logs(ctx context.Context, limit int) ([]LogEntry, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	if offset < 0 {
-		offset = 0
+	if limit > 200 {
+		limit = 200
 	}
-	params := url.Values{}
-	params.Set("limit", strconv.Itoa(limit))
-	params.Set("offset", strconv.Itoa(offset))
-	body, err := c.http.Get(ctx, epLogs, params)
-	if err != nil {
-		return nil, err
+	out := []LogEntry{}
+	after := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", strconv.Itoa(limit))
+		if after != "" {
+			params.Set("after", after)
+		}
+		body, err := c.http.Get(ctx, epLogs, params)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, logEntriesFromAPI(body)...)
+		after = nextMarker(body)
+		if after == "" {
+			return out, nil
+		}
 	}
-	return logEntriesFromAPI(body), nil
 }
 
 // ── changes feed — the crash-safe pump ────────────────────────
@@ -1105,12 +1116,10 @@ func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOptions) (
 			return nil, err
 		}
 		out = append(out, documentsFromAPI(body, c.decryptValue)...)
-		m, _ := body.(map[string]any)
-		next, _ := m["next"].(string)
-		if next == "" {
+		after = nextMarker(body)
+		if after == "" {
 			return out, nil
 		}
-		after = next
 	}
 }
 
@@ -1643,27 +1652,38 @@ func (c *Client) FlowRunSourceFile(ctx context.Context, runID, sourceKey string)
 	return res.Wrapper, nil
 }
 
-// FlowRuns lists this service's runs. An empty status defaults to the actionable
-// "awaiting_company" queue; pass "*" (or any non-empty status) explicitly, or use
-// FlowRunsAll for the unfiltered list.
+// FlowRuns lists this service's runs, newest first. An empty status defaults to
+// the actionable "awaiting_company" queue; pass "*" (or any non-empty status)
+// explicitly, or use FlowRunsAll for the unfiltered list. Every page of
+// GET /api/company-data/flow-runs is read, following its cursor (`next` sent back
+// as `after`) until a page answers none.
 func (c *Client) FlowRuns(ctx context.Context, status string) ([]FlowRun, error) {
 	if status == "" {
 		status = "awaiting_company"
 	}
-	var params url.Values
-	if status != "*" {
-		params = url.Values{"status": {status}}
+	out := []FlowRun{}
+	after := ""
+	for {
+		params := url.Values{}
+		params.Set("limit", strconv.Itoa(flowRunPage))
+		if status != "*" {
+			params.Set("status", status)
+		}
+		if after != "" {
+			params.Set("after", after)
+		}
+		body, err := c.http.Get(ctx, epFlowRuns, params)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range listItems(body) {
+			out = append(out, flowRunFromAPI(asMap(o)))
+		}
+		after = nextMarker(body)
+		if after == "" {
+			return out, nil
+		}
 	}
-	body, err := c.http.Get(ctx, epFlowRuns, params)
-	if err != nil {
-		return nil, err
-	}
-	items := listItems(body)
-	out := make([]FlowRun, 0, len(items))
-	for _, o := range items {
-		out = append(out, flowRunFromAPI(asMap(o)))
-	}
-	return out, nil
 }
 
 // FlowRunsAll lists all of this service's runs (no status filter).
@@ -2141,7 +2161,7 @@ func (c *Client) resolveShareCode(ctx context.Context, connectionID, personUserI
 		}
 	}
 	if personUserID != "" {
-		conns, errc := c.Connections(ctx, defaultConnPage, 0)
+		conns, errc := c.Connections(ctx, defaultConnPage)
 		for conn := range conns {
 			raw := conn.Raw
 			if asString(raw["user_id"]) == personUserID || conn.PersonID == personUserID {
@@ -2385,7 +2405,7 @@ func dataURI(fileBytes []byte, mime string) string {
 	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(fileBytes)
 }
 
-// listItems pulls the items array out of a {total, items} list response.
+// listItems pulls the items array out of a {items, next} list response.
 func listItems(body any) []any {
 	switch b := body.(type) {
 	case map[string]any:
@@ -2403,6 +2423,18 @@ func listItems(body any) []any {
 	default:
 		return nil
 	}
+}
+
+// nextMarker is a cursor-paged list response's `next` marker, or "" on the last
+// page. An XML response carries a null `next` as an empty element, which is the
+// last page too.
+func nextMarker(body any) string {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return ""
+	}
+	next, _ := m["next"].(string)
+	return next
 }
 
 // connBackoff is the backoff before retrying a rate-limited connections page.

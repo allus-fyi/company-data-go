@@ -478,7 +478,7 @@ func resolveFlowIDCandidates(ctx context.Context, client *companydata.Client, fl
 // same call a real integrator would make to look a person up by the one identifier they can read off
 // their own app.
 func resolveConnection(ctx context.Context, client *companydata.Client, shareCode string) (*companydata.Connection, error) {
-	conns, err := client.ConnectionsList(ctx, 0, 0)
+	conns, err := client.ConnectionsList(ctx, 0)
 	if err != nil {
 		return nil, err
 	}

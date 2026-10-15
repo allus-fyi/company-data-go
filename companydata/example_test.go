@@ -18,7 +18,7 @@ func ExampleFromConfig() {
 	}
 
 	ctx := context.Background()
-	conns, err := client.ConnectionsList(ctx, 100, 0) // initial full sync
+	conns, err := client.ConnectionsList(ctx, 100) // initial full sync
 	if err != nil {
 		log.Fatal(err)
 	}

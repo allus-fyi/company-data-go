@@ -574,7 +574,7 @@ func (h *family) completeSignin(run map[string]any, code string) map[string]any 
 			return failRun(run, err)
 		}
 		appendCall(run, callConnectionsLive)
-		conns, err := client.ConnectionsList(context.Background(), 0, 0)
+		conns, err := client.ConnectionsList(context.Background(), 0)
 		if err != nil {
 			return failRun(run, err)
 		}

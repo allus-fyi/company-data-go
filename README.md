@@ -167,7 +167,7 @@ if err != nil {
 ctx := context.Background()
 
 // Iterate every connected person (lazy, auto-paged).
-conns, errc := client.Connections(ctx, 100, 0)
+conns, errc := client.Connections(ctx, 100)
 for conn := range conns {
     fmt.Println(conn.DisplayName, conn.PersonID)
     for slug, val := range conn.Values {
@@ -182,7 +182,7 @@ if err := <-errc; err != nil {
 Or get all of them eagerly into a slice:
 
 ```go
-conns, err := client.ConnectionsList(ctx, 100, 0)   // initial full sync
+conns, err := client.ConnectionsList(ctx, 100)   // initial full sync
 ```
 
 Or fetch one connection by id:
@@ -213,11 +213,11 @@ Options are advanced/optional: `WithHTTPClient` (inject a custom transport),
 | Method | Returns | What it does |
 |--------|---------|--------------|
 | `RequestFields(ctx)` | `[]RequestField, error` | Your request-field **definitions** (slug → label/type/flags). Fetched once and cached. Never the person's fields. |
-| `Connections(ctx, limit, offset)` | `(<-chan Connection, <-chan error)` | A **lazy** channel of `Connection`, auto-paging the list endpoint (a short page ends iteration). Read the error channel after the connection channel closes. A value the service key cannot open never ends the iteration: it arrives marked `Unreadable` (see the `Value` notes below). |
-| `ConnectionsList(ctx, limit, offset)` | `[]Connection, error` | Eager convenience — drains the iterator into a slice (initial full sync). |
+| `Connections(ctx, limit)` | `(<-chan Connection, <-chan error)` | A **lazy** channel of `Connection`, newest connection first, paging the list endpoint with its cursor (each page's `next` is sent back as `after` until a page answers none; `limit` is the page size, max 500; the list carries no total). Read the error channel after the connection channel closes. A value the service key cannot open never ends the iteration: it arrives marked `Unreadable` (see the `Value` notes below). |
+| `ConnectionsList(ctx, limit)` | `[]Connection, error` | Eager convenience — drains the iterator into a slice (initial full sync). |
 | `Connection(ctx, id)` | `Connection, error` | One connection by id. A value the service key cannot open is returned marked `Unreadable`, never as an error. |
 | `DeleteConnection(ctx, connectionID)` | `error` | End one of this service's connections (`DELETE /api/company-data/connections/{id}`): leaves exactly the state the customer's own disconnect leaves, and `connection_deleted` reaches your change feed and webhooks. A refusal is an `*ApiError`: 404 `company_data.connection_not_found` (not a connection of this service), 409 `company_connections.active_contract` (the customer holds an active agreement or subscription on this service). |
-| `Logs(ctx, limit, offset)` | `[]LogEntry, error` | The service's activity log (ops events only — email/purge/webhook). |
+| `Logs(ctx, limit)` | `[]LogEntry, error` | The service's whole activity log, newest first (ops events only — email/purge/webhook), read page by page with the list's cursor; `limit` is the page size, max 200. |
 | `ProcessChanges(handler, opts)` | `error` | The **crash-safe streaming pump** (one `Change` at a time, durable buffer, retry→dead-letter, until empty then returns). See [the changes pump](#the-changes-pump). |
 | `DrainBatch(max)` | `[]Change, error` | A raw, **unbuffered** drain (advanced — you own durability). |
 | `DeadLetters()` | `[]DeadLetter, error` | Inspect the local dead-letter store. |
@@ -676,7 +676,7 @@ run's bound parties.
 | `UploadAnswerFile(ctx, runID, slug, forUserID, sealedValue)` | `string, error` | Uploads one bound party's copy of a binary answer on the company's own turn (`POST /api/company-data/flow-runs/{runID}/answer-files`) → its `file`; submit `{"_enc_file": file}` as that party's answer value. |
 | `FlowRunSourceFile(ctx, runID, sourceKey)` | `any, error` | The company's own copy of a run's connection source as stored — the sealed wrapper (`GET /api/company-data/flow-runs/{runID}/source-files/{sourceKey}`, key URL-encoded). |
 | `PublishedFlow(ctx, flowID)` | `PublishedFlow, error` | The flow's latest published version — `Version`, `Definition` and the service's `RequestFieldTypes` — what `TriggerFlowRun` compiles a run's text-tag values from. |
-| `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
+| `FlowRuns(ctx, status)` / `FlowRunsAll(ctx)` | `[]FlowRun, error` | Lists this service's runs, newest first, reading every page with the list's cursor (`status == ""` defaults to the actionable `awaiting_company` queue; `FlowRunsAll` is unfiltered). |
 | `FlowRun(ctx, runID)` | `FlowRun, error` | Fetches one run by id. |
 | `SubmitFlowAnswers(ctx, run, fill, partyPubKeys)` | `FlowRun, error` | Fills the company's current node, encrypts one answer copy per bound party, and advances the run. |
 | `GenerateFlowDocument(ctx, run)` | `any, error` | Runs a document-mode leaf: uploads the held participant PDF sources as generation inputs, one-time-key-encrypts the answers and generates the leaf's output documents. Returns `{documents, status}` — one `{output_key, party_key, document_id, position}` per produced (output document, participant); `position` is the step's 1-based place in the run's ONE signing line (one signer at a time, across every output), null for a party an output's signer list does not name (no bytes — see below). |

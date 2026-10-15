@@ -133,7 +133,6 @@ func TestConnectionsYieldsTypedDecrypted(t *testing.T) {
 	cfg := clientConfig(t, v)
 	addrWrapper := encryptForVectorKey(t, v, `{"city":"Utrecht","country":"NL"}`)
 	page1 := map[string]any{
-		"total": 1,
 		"items": []any{
 			map[string]any{
 				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
@@ -160,7 +159,7 @@ func TestConnectionsYieldsTypedDecrypted(t *testing.T) {
 		return 0, ""
 	})
 
-	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	conns, err := c.ConnectionsList(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("ConnectionsList: %v", err)
 	}
@@ -195,18 +194,25 @@ func TestConnectionsAutoPages(t *testing.T) {
 	makeItem := func(i string) map[string]any {
 		return map[string]any{"connection_id": "c" + i, "user_id": "p" + i, "display_name": "N" + i, "values": map[string]any{}}
 	}
-	page0, _ := json.Marshal(map[string]any{"total": 3, "items": []any{makeItem("1"), makeItem("2")}})
-	page1, _ := json.Marshal(map[string]any{"total": 3, "items": []any{makeItem("3")}})
+	page0, _ := json.Marshal(map[string]any{"items": []any{makeItem("1"), makeItem("2")}, "next": "m1"})
+	page1, _ := json.Marshal(map[string]any{"items": []any{makeItem("3")}, "next": nil})
 	pages := []string{string(page0), string(page1)}
 	idx := 0
-	var offsets []string
+	var afters []string
 
 	c, _ := newTestClient(t, cfg, func(path string, params map[string][]string) (int, string) {
 		if strings.HasSuffix(path, "/request-fields") {
 			return 200, `{"request_fields":[]}`
 		}
 		if strings.HasSuffix(path, "/connections") {
-			offsets = append(offsets, params["offset"][0])
+			if _, has := params["offset"]; has {
+				t.Fatalf("offset sent: %v", params["offset"])
+			}
+			after := ""
+			if v := params["after"]; len(v) > 0 {
+				after = v[0]
+			}
+			afters = append(afters, after)
 			body := pages[idx]
 			idx++
 			return 200, body
@@ -215,7 +221,7 @@ func TestConnectionsAutoPages(t *testing.T) {
 		return 0, ""
 	})
 
-	conns, err := c.ConnectionsList(context.Background(), 2, 0)
+	conns, err := c.ConnectionsList(context.Background(), 2)
 	if err != nil {
 		t.Fatalf("ConnectionsList: %v", err)
 	}
@@ -226,8 +232,8 @@ func TestConnectionsAutoPages(t *testing.T) {
 	if strings.Join(ids, ",") != "c1,c2,c3" {
 		t.Fatalf("ids = %v", ids)
 	}
-	if strings.Join(offsets, ",") != "0,2" {
-		t.Fatalf("offsets = %v", offsets)
+	if strings.Join(afters, ",") != ",m1" {
+		t.Fatalf("afters = %v", afters)
 	}
 }
 
@@ -235,7 +241,6 @@ func TestBinaryHandleFetchesSlotAndDecrypts(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	page := map[string]any{
-		"total": 1,
 		"items": []any{
 			map[string]any{
 				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
@@ -261,7 +266,7 @@ func TestBinaryHandleFetchesSlotAndDecrypts(t *testing.T) {
 		return 0, ""
 	})
 
-	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	conns, err := c.ConnectionsList(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("ConnectionsList: %v", err)
 	}
@@ -298,7 +303,6 @@ func TestBinaryHandleServesPlaintextBytes(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	page := map[string]any{
-		"total": 1,
 		"items": []any{
 			map[string]any{
 				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
@@ -335,7 +339,7 @@ func TestBinaryHandleServesPlaintextBytes(t *testing.T) {
 		return h
 	}
 
-	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	conns, err := c.ConnectionsList(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("ConnectionsList: %v", err)
 	}
@@ -361,7 +365,6 @@ func TestBinaryHandleExpiredAnswerCarriesDigest(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
 	page := map[string]any{
-		"total": 1,
 		"items": []any{
 			map[string]any{
 				"connection_id": "csc-1", "user_id": "person-1", "display_name": "Anna",
@@ -384,7 +387,7 @@ func TestBinaryHandleExpiredAnswerCarriesDigest(t *testing.T) {
 			`"content_sha256":"abc123","expired_at":"2026-07-01T00:00:00Z"}`
 	})
 
-	conns, err := c.ConnectionsList(context.Background(), 100, 0)
+	conns, err := c.ConnectionsList(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("ConnectionsList: %v", err)
 	}
@@ -438,20 +441,29 @@ func TestConnectionByID(t *testing.T) {
 func TestLogsDeserialize(t *testing.T) {
 	v := loadVector(t)
 	cfg := clientConfig(t, v)
-	body := `{"total":2,"items":[
-		{"type":"email","message":"stale-queue alert","metadata":{"days":3},"created_at":"2026-06-17T06:00:00Z"},
-		{"type":"purge","message":"purged 4","metadata":{"count":4},"created_at":"2026-06-17T07:00:00Z"}
-	]}`
+	pages := []string{
+		`{"items":[{"type":"email","message":"stale-queue alert","metadata":{"days":3},"created_at":"2026-06-17T06:00:00Z"}],"next":"m1"}`,
+		`{"items":[{"type":"purge","message":"purged 4","metadata":{"count":4},"created_at":"2026-06-17T07:00:00Z"}],"next":null}`,
+	}
+	idx := 0
 	var seenLimit string
+	var afters []string
 	c, _ := newTestClient(t, cfg, func(path string, params map[string][]string) (int, string) {
 		if strings.HasSuffix(path, "/logs") {
 			seenLimit = params["limit"][0]
+			after := ""
+			if v := params["after"]; len(v) > 0 {
+				after = v[0]
+			}
+			afters = append(afters, after)
+			body := pages[idx]
+			idx++
 			return 200, body
 		}
 		t.Fatalf("unexpected GET %s", path)
 		return 0, ""
 	})
-	logs, err := c.Logs(context.Background(), 50, 0)
+	logs, err := c.Logs(context.Background(), 50)
 	if err != nil {
 		t.Fatalf("Logs: %v", err)
 	}
@@ -465,6 +477,9 @@ func TestLogsDeserialize(t *testing.T) {
 	}
 	if seenLimit != "50" {
 		t.Fatalf("limit param = %q", seenLimit)
+	}
+	if strings.Join(afters, ",") != ",m1" {
+		t.Fatalf("afters = %v", afters)
 	}
 }
 
