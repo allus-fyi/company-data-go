@@ -1,12 +1,12 @@
 {
-  "_comment": "Canonical parity vector for the field-type registry and for field-type value validation. `registry` is the row set every case below is resolved against — the 26 SEEDED rows plus six data-added rows: a child of `url` carrying a regex, a child of `legal_document` overriding nothing, a child of `address` REPLACING its `fields` list, one row whose `input` is outside the fixed vocabulary (a deployed registry's CHECK constraint makes that unreachable; it pins how a client older than a primitive behaves — read-only rendering, and validation by the check and the regexes alone), and two rows whose names are legal per `^[a-z0-9_]{1,40}$` but hostile to a dictionary: `__proto__` and the all-digit `123`. Every platform's resolver MUST reproduce every expectation here. Ports: frontend/src/fieldTypes.js + fieldValidation.js (reference), allus/src/, admin/src/, ios FieldTypeRegistry.swift, android FieldTypeRegistry.kt, sdks/*/. See docs/superpowers/specs/2026-09-07-field-type-definitions.html and its predecessor docs/superpowers/specs/2026-07-15-field-type-validation-design.html.",
+  "_comment": "Canonical parity vector for the field-type registry and for field-type value validation. `registry` is the row set every case below is resolved against — the 27 SEEDED rows (one of them, `id_selfie`, `system_only`: a system-written type left out of every derived set) plus six data-added rows: a child of `url` carrying a regex, a child of `legal_document` overriding nothing, a child of `address` REPLACING its `fields` list, one row whose `input` is outside the fixed vocabulary (a deployed registry's CHECK constraint makes that unreachable; it pins how a client older than a primitive behaves — read-only rendering, and validation by the check and the regexes alone), and two rows whose names are legal per `^[a-z0-9_]{1,40}$` but hostile to a dictionary: `__proto__` and the all-digit `123`. Every platform's resolver MUST reproduce every expectation here. Ports: frontend/src/fieldTypes.js + fieldValidation.js (reference), allus/src/, admin/src/, ios FieldTypeRegistry.swift, android FieldTypeRegistry.kt, sdks/*/. See docs/superpowers/specs/2026-09-07-field-type-definitions.html and its predecessor docs/superpowers/specs/2026-07-15-field-type-validation-design.html.",
   "_case_kinds": {
     "cases": "isFieldValueValid(type, value, options) -> valid. Empty value = valid (required is the caller's job). Only present, non-empty sub-fields of a structured type are checked. A type the registry does not carry accepts anything. ORDER: the primitive's own rule, then the resolved check, then every regex root-first, then the sub-field entries — and a CHECK's normalised value is what those regexes see, while a primitive's is not. `options` is the caller's own option list, present only on a choice case: the ROW's resolved options govern when it carries any, else these, and a choice with neither is refused rather than measured against an empty domain.",
-    "resolve_cases": "resolve(type) -> the resolved definition: every inherited column filled in from the nearest ancestor that sets it, plus `validations` root-first. `known` is false for a type the registry does not carry.",
+    "resolve_cases": "resolve(type) -> the resolved definition: every inherited column filled in from the nearest ancestor that sets it, plus `validations` root-first. `known` is false for a type the registry does not carry. `is_system` and `system_only` are the row's own flags, never inherited; both are false for a type the registry does not carry.",
     "accepts_cases": "accepts(requested, actual) -> true when `actual` is `requested` or any descendant of it.",
     "ordered_cases": "ordered(types) -> roots first, each followed by its own children, recursively; siblings by `label`. The expectations are keyed by `type` because a rendered label is per language, and are computed from the `label` values in `registry`. A type the registry does not carry sorts after the tree.",
     "effective_type_cases": "effectiveType(type) -> the nearest ancestor, self included, that is `date` or `number`; otherwise the type itself. The flow BUILDER's question alone — the evaluator never sees it.",
-    "derived_sets": "requestableTypes() / flowTypes() / claimableTypes() over `registry`: requestable = every type except an option-less choice type; flow = requestable plus those choice types; claimable = requestable on the `inline` lane."
+    "derived_sets": "requestableTypes() / flowTypes() / claimableTypes() over `registry`: requestable = every type except an option-less choice type and a `system_only` type; flow = requestable plus those choice types; claimable = requestable on the `inline` lane."
   },
   "registry": [
     {
@@ -19,7 +19,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "email",
@@ -31,7 +32,8 @@
       "options": null,
       "fields": null,
       "validation": "[^\\s@]+@[^\\s@]+\\.[^\\s@]+",
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "phone",
@@ -43,7 +45,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "url",
@@ -55,7 +58,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "gender",
@@ -72,7 +76,8 @@
       ],
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "country",
@@ -84,7 +89,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "nationality",
@@ -96,7 +102,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "personal_number",
@@ -108,7 +115,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "place_of_birth",
@@ -120,7 +128,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "date",
@@ -132,7 +141,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "date_of_birth",
@@ -144,7 +154,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "number",
@@ -156,7 +167,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "integer",
@@ -168,7 +180,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "decimal",
@@ -180,7 +193,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "float",
@@ -192,7 +206,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "address",
@@ -261,7 +276,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "creditcard",
@@ -306,7 +322,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "bank",
@@ -359,7 +376,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "select",
@@ -371,7 +389,8 @@
       "options": [],
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "multiselect",
@@ -383,7 +402,8 @@
       "options": [],
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "photo",
@@ -395,7 +415,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "document",
@@ -407,7 +428,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "legal_document",
@@ -436,7 +458,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "passport",
@@ -473,7 +496,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "photo_id",
@@ -510,7 +534,8 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
     },
     {
       "type": "drivers_license",
@@ -547,7 +572,21 @@
         }
       ],
       "validation": null,
-      "is_system": true
+      "is_system": true,
+      "system_only": false
+    },
+    {
+      "type": "id_selfie",
+      "parent": null,
+      "label": "fieldtype_id_selfie",
+      "input": "file",
+      "lane": "document",
+      "check": null,
+      "options": null,
+      "fields": null,
+      "validation": null,
+      "is_system": true,
+      "system_only": true
     },
     {
       "type": "facebook",
@@ -559,7 +598,8 @@
       "options": null,
       "fields": null,
       "validation": "https?://(www\\.)?facebook\\.com/.*",
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     },
     {
       "type": "id_card",
@@ -571,7 +611,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     },
     {
       "type": "billing_address",
@@ -616,7 +657,8 @@
         }
       ],
       "validation": null,
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     },
     {
       "type": "signature_pad",
@@ -628,7 +670,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     },
     {
       "type": "__proto__",
@@ -640,7 +683,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     },
     {
       "type": "123",
@@ -652,7 +696,8 @@
       "options": null,
       "fields": null,
       "validation": null,
-      "is_system": false
+      "is_system": false,
+      "system_only": false
     }
   ],
   "cases": [
@@ -1771,6 +1816,7 @@
         "parent": "legal_document",
         "label": "fieldtype_passport",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "pages",
         "lane": "document",
@@ -1813,6 +1859,7 @@
         "parent": "legal_document",
         "label": "Identity card",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "file",
         "lane": "document",
@@ -1847,6 +1894,7 @@
         "parent": "url",
         "label": "Facebook",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -1866,6 +1914,7 @@
         "parent": "address",
         "label": "Billing address",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "composite",
         "lane": "inline",
@@ -1916,6 +1965,7 @@
         "parent": "text",
         "label": "fieldtype_email",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -1935,6 +1985,7 @@
         "parent": "number",
         "label": "fieldtype_integer",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -1952,6 +2003,7 @@
         "parent": null,
         "label": "Signature pad",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "signature",
         "lane": "inline",
@@ -1969,6 +2021,7 @@
         "parent": null,
         "label": "some_future_type",
         "is_system": false,
+        "system_only": false,
         "known": false,
         "input": null,
         "lane": null,
@@ -1986,6 +2039,7 @@
         "parent": null,
         "label": "fieldtype_select",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "list",
         "lane": "inline",
@@ -2003,6 +2057,7 @@
         "parent": "text",
         "label": "fieldtype_gender",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "list",
         "lane": "inline",
@@ -2025,6 +2080,7 @@
         "parent": "text",
         "label": "Proto row",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -2042,6 +2098,7 @@
         "parent": "text",
         "label": "Numeric row",
         "is_system": false,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -2059,6 +2116,7 @@
         "parent": null,
         "label": "constructor",
         "is_system": false,
+        "system_only": false,
         "known": false,
         "input": null,
         "lane": null,
@@ -2076,6 +2134,7 @@
         "parent": "text",
         "label": "fieldtype_personal_number",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
@@ -2093,9 +2152,28 @@
         "parent": "text",
         "label": "fieldtype_place_of_birth",
         "is_system": true,
+        "system_only": false,
         "known": true,
         "input": "line",
         "lane": "inline",
+        "check": null,
+        "options": null,
+        "fields": null,
+        "validations": []
+      }
+    },
+    {
+      "name": "resolve_id_selfie_system_only",
+      "type": "id_selfie",
+      "resolved": {
+        "type": "id_selfie",
+        "parent": null,
+        "label": "fieldtype_id_selfie",
+        "is_system": true,
+        "system_only": true,
+        "known": true,
+        "input": "file",
+        "lane": "document",
         "check": null,
         "options": null,
         "fields": null,
@@ -2267,6 +2345,7 @@
         "passport",
         "photo_id",
         "drivers_license",
+        "id_selfie",
         "facebook",
         "id_card",
         "billing_address",
@@ -2280,6 +2359,7 @@
         "bank",
         "creditcard",
         "document",
+        "id_selfie",
         "legal_document",
         "drivers_license",
         "passport",

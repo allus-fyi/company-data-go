@@ -102,6 +102,7 @@ type FieldTypeRow struct {
 	Fields     []SubFieldEntry `json:"fields"`
 	Validation *string         `json:"validation"`
 	IsSystem   bool            `json:"is_system"`
+	SystemOnly bool            `json:"system_only"`
 }
 
 // ResolvedFieldType is a row with every inherited column filled in, plus the validations
@@ -110,11 +111,15 @@ type FieldTypeRow struct {
 // A type the registry does not carry resolves with Known false and every column empty. That is
 // a distinct answer from a known type with nothing set, and callers must read it as "this
 // platform cannot draw or store this", never as a default.
+//
+// SystemOnly marks a type written by the platform alone. It is read off the type's own row, never
+// inherited, and is false for a type the registry does not carry; such a type is in no derived set.
 type ResolvedFieldType struct {
 	Type        string
 	Parent      *string
 	Label       string
 	IsSystem    bool
+	SystemOnly  bool
 	Known       bool
 	Input       *string
 	Lane        *string
@@ -424,6 +429,7 @@ func (r *FieldTypeRegistry) resolveIn(fieldType string) ResolvedFieldType {
 		Parent:      row.Parent,
 		Label:       label,
 		IsSystem:    row.IsSystem,
+		SystemOnly:  row.SystemOnly,
 		Known:       true,
 		Validations: []string{},
 	}
@@ -556,16 +562,16 @@ func (r *FieldTypeRegistry) OptionsFor(fieldType string, suppliedOptions ...stri
 }
 
 // RequestableTypes answers the types a contact field, a service request row or an admin field may
-// declare.
+// declare: every type except an option-less choice type and a system-only type.
 func (r *FieldTypeRegistry) RequestableTypes() []string {
-	return r.filterTypes(func(t string) bool { return !r.IsOptionLessChoice(t) })
+	return r.filterTypes(func(t string) bool { return !r.IsOptionLessChoice(t) && !r.Resolve(t).SystemOnly })
 }
 
 // FlowTypes answers the requestable set plus the option-less choice types a flow element supplies
-// options for.
+// options for. A system-only type is in neither half.
 func (r *FieldTypeRegistry) FlowTypes() []string {
 	out := r.RequestableTypes()
-	return append(out, r.filterTypes(r.IsOptionLessChoice)...)
+	return append(out, r.filterTypes(func(t string) bool { return r.IsOptionLessChoice(t) && !r.Resolve(t).SystemOnly })...)
 }
 
 // ClaimableTypes answers the requestable set on the inline lane. A file can never be sealed to a

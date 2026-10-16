@@ -33,6 +33,7 @@ type fvVector struct {
 			Parent      *string         `json:"parent"`
 			Label       string          `json:"label"`
 			IsSystem    bool            `json:"is_system"`
+			SystemOnly  bool            `json:"system_only"`
 			Known       bool            `json:"known"`
 			Input       *string         `json:"input"`
 			Lane        *string         `json:"lane"`
@@ -109,7 +110,7 @@ func TestFieldTypeResolveVector(t *testing.T) {
 		got := registry.Resolve(c.Type)
 		want := ResolvedFieldType{
 			Type: c.Resolved.Type, Parent: c.Resolved.Parent, Label: c.Resolved.Label,
-			IsSystem: c.Resolved.IsSystem, Known: c.Resolved.Known, Input: c.Resolved.Input,
+			IsSystem: c.Resolved.IsSystem, SystemOnly: c.Resolved.SystemOnly, Known: c.Resolved.Known, Input: c.Resolved.Input,
 			Lane: c.Resolved.Lane, Check: c.Resolved.Check, Options: c.Resolved.Options,
 			Fields: c.Resolved.Fields, Validations: c.Resolved.Validations,
 		}

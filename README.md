@@ -300,6 +300,14 @@ type LogEntry     struct { Type, Message string; Metadata any; At *time.Time; Ra
   not even via `.raw`. For a binary slot the API resolves slot → source → file itself, so the
   bytes you fetch are the answering field's whatever type that field carries.
 
+  **The derived sets.** `RequestableTypes()` (what a request row may declare), `FlowTypes()` (that set plus the
+  option-less choice types a flow element supplies options for) and `ClaimableTypes()` (the requestable
+  types on the `inline` lane) leave out a SYSTEM-ONLY type — one the platform alone writes.
+  `Resolve(type).SystemOnly` reads that flag off the type's own row (never inherited; false for a type the
+  registry does not carry). `id_selfie`, the ID-check selfie, is one: no company configures a
+  request row of it, and it reaches a service only as the `age_scan_selfie` row a venue's age-scan
+  toggle adds — a document-lane value, so a lazy `*BinaryHandle` like any other.
+
   **A CHOICE type's options.** `select` and `multiselect` carry no options of their own — a flow
   element supplies them — so `Validate` / `IsFieldValueValid` / `FieldValueError` take the caller's
   own option list as a trailing variadic argument. The ROW's resolved options govern whenever it
